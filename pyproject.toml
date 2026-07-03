@@ -18,6 +18,9 @@ dependencies = [
 dev = [
   "pytest>=8.0",
 ]
+desktop-build = [
+  "pyinstaller>=6.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]

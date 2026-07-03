@@ -1,6 +1,24 @@
 # Rainwater Calculator
 
-This repository now includes a standalone local Python application for rainwater tank sizing.
+This repository now includes standalone local Python applications for rainwater tank sizing.
+
+## Windows desktop app
+
+### Run the Tkinter app locally
+```powershell
+cd C:\Projects\rainwater-calculator-py
+.\.venv\Scripts\python.exe tkinter_app.py
+```
+
+### Build the Windows executable
+```powershell
+.\build_exe.ps1
+```
+
+The build output is:
+- `dist\RainwaterCalculator.exe`
+
+Copy `dist\RainwaterCalculator.exe` to another Windows machine and run it. The desktop app stores saved projects beside the executable in `rainwater_projects.db`.
 
 ## New standalone app (recommended)
 

@@ -8,6 +8,8 @@ __pycache__/
 
 .streamlit/
 .weather_cache/
+build/
+dist/
 
 rainwater_projects.db
 
