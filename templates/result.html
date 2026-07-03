@@ -1,0 +1,21 @@
+﻿{% extends "bootstrap/base.html" %}
+{% import "bootstrap/wtf.html" as wtf %}
+{% from "_render_field.html" import render_field, render_field_2, render_month %}
+
+{% block content %}
+
+<div class="container">
+
+    <div class="jumbotron">
+        <h2> Results </h2>
+    </div>
+    <a class="btn btn-primary btn-lg" href="{{ url_for('rel_graph') }}" role="button">View Reliability Graph</a>
+    <a class="btn btn-primary btn-lg" href="{{ url_for('tank_water') }}" role="button">View Tank Water Collection</a>
+
+</div>
+{% endblock %}<!-- main_content -->
+
+{% block scripts %}
+{{ super() }}
+{% endblock %}
+

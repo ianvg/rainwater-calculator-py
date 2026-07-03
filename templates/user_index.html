@@ -1,0 +1,21 @@
+{% extends "bootstrap/base.html" %}
+{% block content %}
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Rainwater Harvesting</h1>
+            <p class="lead">We're here to calculate the best tank size for your rainwater harvesting project</p>
+            <hr class="my-4">
+            <p>Enter Required Information</p>
+            <p class="lead">
+                <a class="btn btn-primary btn-lg" href="{{ url_for('unit_choice') }}" role="button">Imperial / Metric ?</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('collectareadat') }}" role="button">Collection Area Details</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('demanddat') }}" role="button">Demand Details</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('rainfalldata') }}" role="button">Rainfall Data</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('res_page') }}" role="button">See Result</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('rep_page') }}" role="button">See Report</a>
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}

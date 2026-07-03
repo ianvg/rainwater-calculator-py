@@ -1,0 +1,33 @@
+﻿{% extends "bootstrap/base.html" %}
+{% import "bootstrap/wtf.html" as wtf %}
+{% from "_render_field.html" import render_field, render_field_2, render_month %}
+
+{% block content %}
+
+<div class="container">
+    <div class="jumbotron">
+        <h2> Register User </h2>
+        <form action="{{ url_for('register_data') }}" method="post">
+            {{ form.csrf_token }}
+            {{ render_field(form.email) }}
+            {{ render_field(form.password) }}
+            {{ render_field(form.conf_password) }}
+            {{ render_field(form.address) }}
+            {{ render_field(form.company) }}
+            {{ render_field(form.title) }}
+            <div class="row justify-content-center">
+                <div class="col-md-3"></div>
+                <div class="col-md-6">
+                    <input class="btn btn-primary btn-lg btn-block" type="submit" value="Submit">
+                </div>
+                <div class="col-md-3"></div>
+            </div>
+        </form>
+    </div>
+</div>
+{% endblock %}<!-- main_content -->
+
+{% block scripts %}
+{{ super() }}
+{% endblock %}
+

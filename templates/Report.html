@@ -1,0 +1,299 @@
+{% extends "bootstrap/base.html" %}
+{% import "bootstrap/wtf.html" as wtf %}
+{% from "_render_field_disabled.html" import render_field_dis, render_field_2_dis, render_month_dis %}
+{% block content %}
+
+
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Details for Roof Collection Area</h1>
+        </div>
+    </div>
+</div>
+
+<form action="{{ url_for('rep_page') }}" method="post">
+    <div class="container">
+        <p class="lead"> Membrane (TPO, PVC or Similar) </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofMembraneArea) }}
+            {{ render_field_dis(form1.RoofMembraneRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Asphault Shingle </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofAsphaultShingleArea) }}
+            {{ render_field_dis(form1.RoofAsphaultShingleRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Metal </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofMetalArea) }}
+            {{ render_field_dis(form1.RoofMetalRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Green Roof </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofGreenRoofArea) }}
+            {{ render_field_dis(form1.RoofGreenRoofRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Terracotta </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofTerracottaArea) }}
+            {{ render_field_dis(form1.RoofTerracottaRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Other (Specify)... </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form1.RoofOtherArea) }}
+            {{ render_field_dis(form1.RoofOtherRunoffCoeff) }}
+        </div>
+    </div>
+</form>
+
+
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Details for Non-Roof Collection Area</h1>
+        </div>
+    </div>
+</div>
+
+<form action="{{ url_for('rep_page') }}" method="post">
+    <div class="container">
+        <h1 class="text-primary"> Impervious Surface </h1>
+        <hr>
+        <hr>
+
+        <p class="lead"> Asphault / Concrete </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.NonRoofImperviousAsphaultArea) }}
+            {{ render_field_dis(form2.NonRoofImperviousAsphaultRunoffCoeff) }}
+        </div>
+        <p class="lead"> Brick </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.NonRoofImperviousBrickArea) }}
+            {{ render_field_dis(form2.NonRoofImperviousBrickRunoffCoeff) }}
+        </div>
+        <p class="lead"> Others... </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.NonRoofImperviousOtherArea) }}
+            {{ render_field_dis(form2.NonRoofImperviousOtherRunoffCoeff) }}
+        </div>
+
+        <h1 class="text-primary"> Semi-Pervious Surface</h1>
+        <hr>
+        <hr>
+
+        <h2 class="text-primary"> Grass / Turf </h2>
+        <p class="lead"> Sandy Soil </p>
+        <p class="lead"> Flat, 2% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandyFlatArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandyFlatRunoffCoeff) }}
+        </div>
+        <p class="lead"> Average, 2-7% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandyAvArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandyAvRunoffCoeff) }}
+        </div>
+        <p class="lead"> Steep, greater than 7% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandySteepArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfSandySteepRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Clay Soil </p>
+        <p class="lead"> Flat, 2% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfClayFlatArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfClayFlatRunoffCoeff) }}
+        </div>
+        <p class="lead"> Average, 2-7% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfClayAvArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfClayAvRunoffCoeff) }}
+        </div>
+        <p class="lead"> Steep, greater than 7% </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGrassTurfClaySteepArea) }}
+            {{ render_field_dis(form2.SemiperviousGrassTurfClaySteepRunoffCoeff) }}
+        </div>
+
+
+        <p class="lead"> Gravel Area </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousGravelArea) }}
+            {{ render_field_dis(form2.SemiperviousGravelRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Landscape Area </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousLandScapeArea) }}
+            {{ render_field_dis(form2.SemiperviousLandScapeRunoffCoeff) }}
+        </div>
+
+        <p class="lead"> Forested Area </p>
+        <div class="jumbotron">
+            {{ render_field_dis(form2.SemiperviousForestedArea) }}
+            {{ render_field_dis(form2.SemiperviousForestedRunoffCoeff) }}
+        </div>
+
+        <h1 class="text-primary"> Engineered Semi-pervious Surface (e.g. Porous Pavement) </h1>
+        <hr>
+        <hr>
+
+        <div class="jumbotron">
+            {{ render_field_dis(form2.EngineeredSemiperviousArea) }}
+            {{ render_field_dis(form2.EngineeredSemiperviousRunoffCoeff) }}
+        </div>
+
+        <h1 class="text-primary"> Other </h1>
+        <hr>
+        <hr>
+
+        <div class="jumbotron">
+            {{ render_field_dis(form2.OtherArea) }}
+            {{ render_field_dis(form2.OtherRunoffCoeff) }}
+        </div>
+
+    </div>
+</form>
+
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Details for Indoor Demands</h1>
+        </div>
+    </div>
+</div>
+<div class="container">
+    <form action="{{ url_for('rep_page') }}" method="post">
+
+        <h1 class="text-primary"> Toilets and Urinals </h1>
+        <hr>
+        <hr>
+
+        {{ render_field_dis(form3.AvFlushperPerson) }}
+        {{ render_field_dis(form3.AvGalperFlushToilets) }}
+        {{ render_field_dis(form3.AvGalperFlushUrinals) }}
+
+        <h3>Average Occupancy of male per day</h3>
+        {{ render_month_dis(form3.OccupJan, form3.OccupFeb, form3.OccupMar, form3.OccupApr, form3.OccupMay, form3.OccupJun,
+        form3.OccupJul, form3.OccupAug, form3.OccupSep, form3.OccupOct, form3.OccupNov, form3.OccupDec) }}
+        <br><br>
+        <hr>
+        <hr>
+        <h3>Average Occupancy of female per day</h3>
+        {{ render_month_dis(form3.UrinalJan, form3.UrinalFeb, form3.UrinalMar, form3.UrinalApr, form3.UrinalMay, form3.UrinalJun,
+        form3.UrinalJul, form3.UrinalAug, form3.UrinalSep, form3.UrinalOct, form3.UrinalNov, form3.UrinalDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Ice Making </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form3.IceMakingJan, form3.IceMakingFeb, form3.IceMakingMar, form3.IceMakingApr, form3.IceMakingMay,
+        form3.IceMakingJun, form3.IceMakingJul, form3.IceMakingAug, form3.IceMakingSep, form3.IceMakingOct,
+        form3.IceMakingNov, form3.IceMakingDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Cooling Tower </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form3.CoolingTowerJan, form3.CoolingTowerFeb, form3.CoolingTowerMar, form3.CoolingTowerApr, form3.CoolingTowerMay,
+        form3.CoolingTowerJun, form3.CoolingTowerJul, form3.CoolingTowerAug, form3.CoolingTowerSep, form3.CoolingTowerOct,
+        form3.CoolingTowerNov, form3.CoolingTowerDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Ice for Ice Skating </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form3.IceSkatingJan, form3.IceSkatingFeb, form3.IceSkatingMar, form3.IceSkatingApr, form3.IceSkatingMay,
+        form3.IceSkatingJun, form3.IceSkatingJul, form3.IceSkatingAug, form3.IceSkatingSep, form3.IceSkatingOct,
+        form3.IceSkatingNov, form3.IceSkatingDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Others (Mop Sinks, Trap Primers etc) </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form3.OtherIndoorJan, form3.OtherIndoorFeb, form3.OtherIndoorMar, form3.OtherIndoorApr, form3.OtherIndoorMay,
+        form3.OtherIndoorJun, form3.OtherIndoorJul, form3.OtherIndoorAug, form3.OtherIndoorSep, form3.OtherIndoorOct,
+        form3.OtherIndoorNov, form3.OtherIndoorDec) }}
+        <br><br>
+
+    </form>
+</div>
+
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Details for Outdoor Demands</h1>
+        </div>
+    </div>
+</div>
+<div class="container">
+    <form action="{{ url_for('rep_page') }}" method="post">
+
+        <h1 class="text-primary"> Spray Irrigation </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form4.SprayIrrigationJan, form4.SprayIrrigationFeb, form4.SprayIrrigationMar, form4.SprayIrrigationApr, form4.SprayIrrigationMay, form4.SprayIrrigationJun,
+        form4.SprayIrrigationJul, form4.SprayIrrigationAug, form4.SprayIrrigationSep, form4.SprayIrrigationOct, form4.SprayIrrigationNov, form4.SprayIrrigationDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Drip Irrigation </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form4.DripIrrigationJan, form4.DripIrrigationFeb, form4.DripIrrigationMar, form4.DripIrrigationApr, form4.DripIrrigationMay,
+        form4.DripIrrigationJun, form4.DripIrrigationJul, form4.DripIrrigationAug, form4.DripIrrigationSep, form4.DripIrrigationOct,
+        form4.DripIrrigationNov, form4.DripIrrigationDec) }}
+        <br><br>
+
+        <h1 class="text-primary"> Vehicular Washing </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form4.VehicularWashingJan, form4.VehicularWashingFeb, form4.VehicularWashingMar, form4.VehicularWashingApr, form4.VehicularWashingMay,
+        form4.VehicularWashingJun, form4.VehicularWashingJul, form4.VehicularWashingAug, form4.VehicularWashingSep, form4.VehicularWashingOct,
+        form4.VehicularWashingNov, form4.VehicularWashingDec) }}
+        <br><br>
+        
+        <h1 class="text-primary"> Others (Mop Sinks, Trap Primers etc) </h1>
+        <hr>
+        <hr>
+        <h3>Volume </h3>
+        {{ render_month_dis(form4.OtherOutdoorJan, form4.OtherOutdoorFeb, form4.OtherOutdoorMar, form4.OtherOutdoorApr, form4.OtherOutdoorMay,
+        form4.OtherOutdoorJun, form4.OtherOutdoorJul, form4.OtherOutdoorAug, form4.OtherOutdoorSep, form4.OtherOutdoorOct,
+        form4.OtherOutdoorNov, form4.OtherOutdoorDec) }}
+        <br><br>
+
+    </form>
+</div>
+
+<div class="container">
+    <div class="jumbotron">
+        <h2> Reliability Graph </h2>
+    </div>
+
+    <div class="container">
+        <form action="{{ url_for('rep_page') }}" method="post">
+            {{ render_field_dis(form5.start_point) }}
+            {{ render_field_dis(form5.end_point) }}
+            {{ render_field_dis(form5.step) }}
+            {{ render_field_dis(form5.init_fill) }}
+            {{ render_field_dis(form5.rel_percent) }}
+        </form>
+        {{ figstr|safe }}
+    </div>
+</div>
+
+
+{% endblock %}

@@ -1,0 +1,17 @@
+{% extends "bootstrap/base.html" %}
+{% block content %}
+<div class="container">
+    <div class="row">
+        <div class="jumbotron">
+            <h1 class="display-4">Enter Demand Details</h1>
+            <p class="lead">Enter the details of your indoor and outdoor details </p>
+            <hr class="my-4">
+            <p class="lead">
+                <a class="btn btn-primary btn-lg" href="{{ url_for('indoordemand') }}" role="button">Indoor Demands</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('outdoordemand') }}" role="button">Outdoor Demands</a>
+                <a class="btn btn-primary btn-lg" href="{{ url_for('user_index') }}" role="button">Next</a>
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}
