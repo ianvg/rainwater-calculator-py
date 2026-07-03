@@ -12,13 +12,22 @@ cd C:\Projects\rainwater-calculator-py
 
 ### Build the Windows executable
 ```powershell
-.\build_exe.ps1
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
 The build output is:
 - `dist\RainwaterCalculator.exe`
 
 Copy `dist\RainwaterCalculator.exe` to another Windows machine and run it. The desktop app stores saved projects beside the executable in `rainwater_projects.db`.
+
+### Sharing the Windows app
+For a simple handoff, you can share `dist\RainwaterCalculator.exe` directly. The recipient does not need Python installed because the executable bundles the Python runtime and required app dependencies.
+
+Notes:
+- Share the `.exe` from a trusted source. Windows SmartScreen may warn about unsigned executables.
+- Saved projects are not inside the `.exe`; they are stored in `rainwater_projects.db` beside the executable after the user saves projects.
+- If you want to send existing saved projects, include `rainwater_projects.db` with the `.exe`.
+- ACIS weather import requires internet access.
 
 ## New standalone app (recommended)
 
@@ -91,6 +100,19 @@ streamlit run streamlit_app.py
 ```
 
 The app should open in a browser at `http://localhost:8501`.
+
+### 6. Clean generated build artifacts
+PyInstaller creates generated folders that can be removed to free disk space:
+
+```powershell
+Remove-Item -Recurse -Force build, dist
+```
+
+This does not remove source code, tests, README files, Git history, or the build script. It only removes generated packaging output. To recreate the executable later, run:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+```
 
 ## Expected rainfall CSV format
 The uploaded CSV must include these columns:
