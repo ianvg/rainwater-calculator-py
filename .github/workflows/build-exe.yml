@@ -1,0 +1,27 @@
+name: Build Windows EXE
+  
+on:
+  workflow_dispatch:
+
+jobs:
+  build-exe:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+        
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Build executable
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+
+      - name: Upload executable artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RainwaterCalculator-windows
+          path: dist/RainwaterCalculator.exe
