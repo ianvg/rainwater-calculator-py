@@ -17,7 +17,7 @@ function Invoke-Checked {
 }
 
 if (-not (Test-Path $python)) {
-    Invoke-Checked "py" @("-3.10", "-m", "venv", (Join-Path $PSScriptRoot ".venv"))
+    Invoke-Checked "python" @("-m", "venv", (Join-Path $PSScriptRoot ".venv"))
 }
 
 Invoke-Checked $python @("-m", "pip", "install", "--upgrade", "pip")
