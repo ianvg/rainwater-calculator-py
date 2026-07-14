@@ -357,9 +357,6 @@ class RainwaterTkApp(tk.Tk):
 
     def save_project(self) -> None:
         self._apply_form_to_model()
-        if self.rainfall_df.empty:
-            messagebox.showwarning(APP_TITLE, "Load rainfall data before saving a project.")
-            return
         try:
             self.store.save_project(self.config_model, self.rainfall_df)
             self._load_project_list()

@@ -51,7 +51,7 @@ class SQLiteStore:
             rows = conn.execute("SELECT name FROM projects ORDER BY updated_at DESC, name ASC").fetchall()
         return [r["name"] for r in rows]
 
-    def save_project(self, config: ProjectConfig, rainfall_df: pd.DataFrame) -> None:
+    def save_project(self, config: ProjectConfig, rainfall_df: pd.DataFrame | None = None) -> None:
         config_json = json.dumps(asdict(config))
         with self._connect() as conn:
             row = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()
@@ -69,14 +69,15 @@ class SQLiteStore:
                 )
                 conn.execute("DELETE FROM rainfall_data WHERE project_id = ?", (project_id,))
 
-            records = [
-                (int(project_id), pd.Timestamp(d).strftime("%Y-%m-%d"), float(p))
-                for d, p in zip(rainfall_df["Date"], rainfall_df["Precipitation"])
-            ]
-            conn.executemany(
-                "INSERT INTO rainfall_data (project_id, date, precipitation) VALUES (?, ?, ?)",
-                records,
-            )
+            if rainfall_df is not None and not rainfall_df.empty:
+                records = [
+                    (int(project_id), pd.Timestamp(d).strftime("%Y-%m-%d"), float(p))
+                    for d, p in zip(rainfall_df["Date"], rainfall_df["Precipitation"])
+                ]
+                conn.executemany(
+                    "INSERT INTO rainfall_data (project_id, date, precipitation) VALUES (?, ?, ?)",
+                    records,
+                )
             conn.commit()
 
     def load_project(self, name: str) -> tuple[ProjectConfig, pd.DataFrame]:

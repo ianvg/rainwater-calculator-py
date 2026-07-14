@@ -74,6 +74,20 @@ def test_old_saved_project_payload_defaults_simple_daily_demand() -> None:
     assert cfg.demand.simple_daily_demand_gallons == 0.0
 
 
+def test_project_can_be_saved_without_rainfall_data(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "projects.db"))
+    cfg = default_project_config()
+    cfg.name = "No Rainfall Yet"
+
+    store.save_project(cfg)
+
+    loaded_cfg, rainfall = store.load_project("No Rainfall Yet")
+
+    assert loaded_cfg.name == "No Rainfall Yet"
+    assert rainfall.empty
+    assert list(rainfall.columns) == ["Date", "Precipitation"]
+
+
 def test_reliability_curve_does_not_decrease_with_larger_tanks() -> None:
     cfg = default_project_config()
     cfg.surfaces[0].area = 2000

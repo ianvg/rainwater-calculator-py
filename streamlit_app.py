@@ -223,11 +223,8 @@ def _sidebar() -> None:
     if col_save.button("Save"):
         config = st.session_state.config
         rainfall_df = st.session_state.rainfall_df
-        if rainfall_df.empty:
-            st.sidebar.error("Upload rainfall data before saving a project.")
-        else:
-            store.save_project(config, rainfall_df)
-            st.sidebar.success("Project saved.")
+        store.save_project(config, rainfall_df)
+        st.sidebar.success("Project saved.")
 
 
 _ensure_session_state()
