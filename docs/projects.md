@@ -10,7 +10,7 @@ The country is stored as an ISO 3166-1 alpha-3 code. The other fields represent 
 
 ### Select a location on OpenStreetMap
 
-Select **Find on OpenStreetMap...** to open an interactive map in the default browser. Click a point and select **Use selected location**. The exact clicked latitude and longitude are stored with the project and displayed below the address fields. The application sends the selected coordinate to OpenStreetMap Nominatim once to retrieve the nearest mapped address, then fills the structured address fields. Review the result because reverse geocoding identifies the nearest suitable mapped object and may not return the physical or postal address expected for the site.
+Select **Find on OpenStreetMap...** to open an interactive map in the default browser. Click a point and select **Use selected location**. After the application accepts the location, the map requests that its browser window close and focus returns to the calculator. The exact clicked latitude and longitude are stored with the project and displayed below the address fields. The application sends the selected coordinate to OpenStreetMap Nominatim once to retrieve the nearest mapped address, then fills the structured address fields. Review the result because reverse geocoding identifies the nearest suitable mapped object and may not return the physical or postal address expected for the site.
 
 Map tiles and address lookup require an internet connection. The map displays OpenStreetMap attribution, requests only tiles needed for the interactive viewport, and does not provide bulk or offline downloading. Do not submit personal or confidential locations. Production deployments can replace the services with the `RWH_OSM_TILE_URL` and `RWH_NOMINATIM_URL` environment variables.
 
@@ -26,7 +26,7 @@ Select **File > Save project as...** or press `Ctrl+Shift+S` to choose another d
 
 ## Open a project
 
-Select **File > Open project...** or press `Ctrl+O`, then choose the project database file. Opening the file also loads the project. Progress is shown in the lower-right status area.
+Select **File > Open project...** or press `Ctrl+O`, then choose the project database file. The file picker starts in the current user's home directory. Opening the file also loads the project. Progress is shown in the lower-right status area.
 
 Use **File > Open recent project** to reopen a recently used file. Missing recent files are removed from the list when appropriate.
 

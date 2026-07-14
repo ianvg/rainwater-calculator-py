@@ -97,10 +97,27 @@ def test_simple_daily_demand_is_added_to_daily_demand() -> None:
     assert demand.tolist() == [125.0, 125.0, 125.0]
 
 
+def test_daily_demand_schedule_applies_recurring_demand_on_selected_weekdays() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 125.0
+    cfg.demand.daily_demand_days_per_week = 5
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-03-03", periods=7, freq="D"),
+            "Precipitation": [0.0] * 7,
+        }
+    )
+
+    demand = demand_series(cfg, rainfall)
+
+    assert demand.tolist() == [125.0, 125.0, 125.0, 125.0, 125.0, 0.0, 0.0]
+
+
 def test_old_saved_project_payload_defaults_simple_daily_demand() -> None:
     cfg = SQLiteStore._config_from_dict({"name": "Old Project", "demand": {}})
 
     assert cfg.demand.simple_daily_demand_gallons == 0.0
+    assert cfg.demand.daily_demand_days_per_week == 7
 
 
 def test_default_surface_runoff_values_match_named_surfaces() -> None:

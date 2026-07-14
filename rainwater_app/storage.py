@@ -146,7 +146,11 @@ class SQLiteStore:
     @staticmethod
     def _config_from_dict(payload: dict[str, Any]) -> ProjectConfig:
         surfaces = [Surface(**s) for s in payload.get("surfaces", [])]
-        demand_payload = {"simple_daily_demand_gallons": 0.0, **payload.get("demand", {})}
+        demand_payload = {
+            "simple_daily_demand_gallons": 0.0,
+            "daily_demand_days_per_week": 7,
+            **payload.get("demand", {}),
+        }
         demand = DemandProfile(**demand_payload)
         tank_params = TankParameters(**payload.get("tank_parameters", {}))
 

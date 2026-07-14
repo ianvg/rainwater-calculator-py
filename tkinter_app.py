@@ -304,6 +304,18 @@ def _wrap_pdf_text(value: str, width: int) -> list[str]:
     return lines
 
 
+def _report_surface_rows(config: ProjectConfig) -> list[dict[str, object]]:
+    return [
+        {
+            "name": surface.name,
+            "area": area_to_display(surface.area, config),
+            "runoff_coefficient": surface.runoff_coefficient,
+        }
+        for surface in config.surfaces
+        if surface.area > 0
+    ]
+
+
 class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
     def log_message(self, _format: str, *args: object) -> None:
         pass
@@ -371,7 +383,7 @@ L.tileLayer(__TILE_URL__,{maxZoom:19,attribution:'&copy; <a href="https://www.op
 let marker=null; let selected=null;
 if (__SHOW_MARKER__) { selected={lat:__LAT__,lng:__LON__}; marker=L.marker(selected).addTo(map); document.getElementById('coordinates').textContent=`${selected.lat.toFixed(6)}, ${selected.lng.toFixed(6)}`; document.getElementById('use').disabled=false; }
 map.on('click',event=>{selected=event.latlng;if(marker){marker.setLatLng(selected);}else{marker=L.marker(selected).addTo(map);}document.getElementById('coordinates').textContent=`${selected.lat.toFixed(6)}, ${selected.lng.toFixed(6)}`;document.getElementById('use').disabled=false;});
-document.getElementById('use').addEventListener('click',async()=>{if(!selected)return;const button=document.getElementById('use');button.disabled=true;await fetch(`/select?lat=${encodeURIComponent(selected.lat)}&lon=${encodeURIComponent(selected.lng)}`);button.textContent='Location selected';});
+document.getElementById('use').addEventListener('click',async()=>{if(!selected)return;const button=document.getElementById('use');button.disabled=true;const response=await fetch(`/select?lat=${encodeURIComponent(selected.lat)}&lon=${encodeURIComponent(selected.lng)}`);if(!response.ok){button.disabled=false;return;}button.textContent='Location selected';window.opener=null;window.open('','_self');window.close();});
 </script></body></html>"""
     return (
         template.replace("__LAT__", f"{latitude:.8f}")
@@ -420,6 +432,7 @@ class RainwaterTkApp(tk.Tk):
         self.saved_project_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
         self.simple_daily_var = tk.StringVar(value="0")
+        self.daily_demand_days_var = tk.StringVar(value="7")
         self.flushes_var = tk.StringVar(value="0")
         self.toilet_flush_var = tk.StringVar(value="0")
         self.urinal_flush_var = tk.StringVar(value="0")
@@ -461,6 +474,9 @@ class RainwaterTkApp(tk.Tk):
         self.report_preview_servers: list[http.server.ThreadingHTTPServer] = []
         self.location_result_queue: queue.Queue = queue.Queue()
         self.location_poll_after_id: str | None = None
+        self.station_lookup_queue: queue.Queue = queue.Queue()
+        self.station_lookup_poll_after_id: str | None = None
+        self.station_lookup_in_progress = False
 
         self._build_ui()
         self.selected_tank_var.trace_add("write", self._update_selected_tank_warning)
@@ -802,22 +818,32 @@ class RainwaterTkApp(tk.Tk):
         settings_frame.columnconfigure(1, weight=1)
 
         self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
-        self._labeled_entry(settings_frame, 1, "Average flushes", self.flushes_var, self.flush_count_unit_var)
-        self._labeled_entry(settings_frame, 2, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
-        self._labeled_entry(settings_frame, 3, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
-        ttk.Separator(settings_frame).grid(row=4, column=0, columnspan=3, sticky="ew", pady=8)
-        self._labeled_entry(settings_frame, 5, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
-        self._labeled_entry(settings_frame, 6, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
-        self._labeled_entry(settings_frame, 7, "Graph step", self.graph_step_var, self.tank_size_unit_var)
-        ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(row=7, column=3, sticky="w", padx=(8, 0), pady=2)
-        self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
+        ttk.Label(settings_frame, text="Daily demand schedule").grid(row=1, column=0, sticky="w", pady=2)
+        self.daily_demand_days_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.daily_demand_days_var,
+            values=[str(value) for value in range(8)],
+            width=8,
+            state="readonly",
+        )
+        self.daily_demand_days_combo.grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(settings_frame, text="days/week").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=2)
+        self._labeled_entry(settings_frame, 2, "Average flushes", self.flushes_var, self.flush_count_unit_var)
+        self._labeled_entry(settings_frame, 3, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
+        self._labeled_entry(settings_frame, 4, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
+        ttk.Separator(settings_frame).grid(row=5, column=0, columnspan=3, sticky="ew", pady=8)
+        self._labeled_entry(settings_frame, 6, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 7, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 8, "Graph step", self.graph_step_var, self.tank_size_unit_var)
+        ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(row=8, column=3, sticky="w", padx=(8, 0), pady=2)
+        self._labeled_entry(settings_frame, 9, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
         ttk.Label(
             settings_frame,
             textvariable=self.selected_tank_warning_var,
             style="Invalid.TLabel",
-        ).grid(row=8, column=3, sticky="w", padx=(8, 0), pady=2)
-        self._labeled_entry(settings_frame, 9, "Initial fill", self.initial_fill_var, self.percent_unit_var)
-        self._labeled_entry(settings_frame, 10, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
+        ).grid(row=9, column=3, sticky="w", padx=(8, 0), pady=2)
+        self._labeled_entry(settings_frame, 10, "Initial fill", self.initial_fill_var, self.percent_unit_var)
+        self._labeled_entry(settings_frame, 11, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
 
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
@@ -1174,6 +1200,7 @@ class RainwaterTkApp(tk.Tk):
         if hasattr(self, "weather_frame"):
             self._update_weather_import_provider()
         self.simple_daily_var.set(f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):.2f}")
+        self.daily_demand_days_var.set(str(min(max(int(cfg.demand.daily_demand_days_per_week), 0), 7)))
         self.flushes_var.set(f"{cfg.demand.avg_flush_per_person:.2f}")
         self.toilet_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_toilet, cfg):.2f}")
         self.urinal_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_urinal, cfg):.2f}")
@@ -1214,6 +1241,10 @@ class RainwaterTkApp(tk.Tk):
             return True
 
         cfg.demand.simple_daily_demand_gallons = volume_to_internal(_float(self.simple_daily_var.get()), cfg)
+        cfg.demand.daily_demand_days_per_week = min(
+            max(int(_float(self.daily_demand_days_var.get(), 7)), 0),
+            7,
+        )
         cfg.demand.avg_flush_per_person = _float(self.flushes_var.get())
         cfg.demand.gallons_per_flush_toilet = volume_to_internal(_float(self.toilet_flush_var.get()), cfg)
         cfg.demand.gallons_per_flush_urinal = volume_to_internal(_float(self.urinal_flush_var.get()), cfg)
@@ -1337,6 +1368,7 @@ class RainwaterTkApp(tk.Tk):
                     self.config_model.latitude = latitude
                     self.config_model.longitude = longitude
                     self._update_coordinates_label()
+                    self.after(150, self._focus_main_window)
                     self.status_var.set("Finding the nearest OpenStreetMap address...")
                     threading.Thread(
                         target=self._reverse_geocode_project_location,
@@ -1355,6 +1387,14 @@ class RainwaterTkApp(tk.Tk):
         except queue.Empty:
             pass
         self.location_poll_after_id = self.after(100, self._poll_location_results)
+
+    def _focus_main_window(self) -> None:
+        if self.state() == "iconic":
+            self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.focus_force()
+        self.after(100, lambda: self.attributes("-topmost", False))
 
     def _reverse_geocode_project_location(self, latitude: float, longitude: float) -> None:
         try:
@@ -1502,7 +1542,7 @@ class RainwaterTkApp(tk.Tk):
     def open_project_from(self) -> None:
         path = filedialog.askopenfilename(
             title="Open project...",
-            initialdir=str(self.project_file_path.parent),
+            initialdir=str(Path.home()),
             filetypes=[("Rainwater project files", "*.db"), ("SQLite database files", "*.sqlite *.sqlite3"), ("All files", "*.*")],
         )
         if not path:
@@ -1632,27 +1672,11 @@ class RainwaterTkApp(tk.Tk):
         if selected_state == STATE_PLACEHOLDER:
             messagebox.showwarning(APP_TITLE, "Select a state before finding ACIS stations.")
             return
-        state = _state_code(selected_state)
-        query = self.weather_filter_var.get().strip().casefold()
-        try:
-            start_date, end_date = default_complete_calendar_range(years)
-            stations = fetch_station_options(state, start_date, end_date)
-            if query:
-                stations = [
-                    station
-                    for station in stations
-                    if query in station["name"].casefold() or query in station["sid"].casefold()
-                ]
-            self.station_options = stations
-            labels = [self._station_label(station) for station in stations]
-            self.station_combo["values"] = labels
-            self.station_var.set(labels[0] if labels else "")
-            self._reset_station_typeahead()
-            self.status_var.set(f"Found {len(stations)} ACIS station(s)")
-        except Exception as exc:  # noqa: BLE001
-            messagebox.showerror(APP_TITLE, f"Could not fetch ACIS stations:\n{exc}")
+        self._start_station_lookup("ACIS", _state_code(selected_state), years)
 
     def find_weather_stations(self) -> None:
+        if self.station_lookup_in_progress:
+            return
         country = self._selected_country_code()
         if country == "USA":
             self.find_acis_stations()
@@ -1665,27 +1689,87 @@ class RainwaterTkApp(tk.Tk):
         if selected_province == PROVINCE_PLACEHOLDER:
             messagebox.showwarning(APP_TITLE, "Select a province or territory before finding ECCC stations.")
             return
-        province = _state_code(selected_province)
+        self._start_station_lookup("ECCC", _state_code(selected_province), years)
+
+    def _start_station_lookup(self, provider: str, region: str, years: int) -> None:
+        if self.station_lookup_in_progress:
+            return
+        start_date, end_date = default_complete_calendar_range(years)
         query = self.weather_filter_var.get().strip().casefold()
+        self.station_lookup_in_progress = True
+        for widget in (
+            self.country_combo,
+            self.state_combo,
+            self.find_stations_button,
+            self.station_combo,
+            self.import_station_button,
+        ):
+            widget.configure(state="disabled")
+        self.analysis_progress.stop()
+        self.analysis_progress.configure(mode="indeterminate", style="Analysis.Horizontal.TProgressbar")
+        self.analysis_progress.start(12)
+        self.status_var.set(f"Finding {provider} stations...")
+        worker = threading.Thread(
+            target=self._station_lookup_worker,
+            args=(provider, region, start_date, end_date, query),
+            name=f"rwh-{provider.casefold()}-station-lookup",
+            daemon=True,
+        )
+        worker.start()
+        self.station_lookup_poll_after_id = self.after(100, self._poll_station_lookup_results)
+
+    def _station_lookup_worker(
+        self,
+        provider: str,
+        region: str,
+        start_date: dt.date,
+        end_date: dt.date,
+        query: str,
+    ) -> None:
         try:
-            self.status_var.set("Finding ECCC climate stations...")
-            self.update_idletasks()
-            start_date, end_date = default_complete_calendar_range(years)
-            stations = fetch_canadian_station_options(province, start_date, end_date)
+            if provider == "ACIS":
+                stations = fetch_station_options(region, start_date, end_date)
+            else:
+                stations = fetch_canadian_station_options(region, start_date, end_date)
             if query:
                 stations = [
                     station
                     for station in stations
                     if query in station["name"].casefold() or query in station["sid"].casefold()
                 ]
-            self.station_options = stations
-            labels = [self._station_label(station) for station in stations]
-            self.station_combo["values"] = labels
-            self.station_var.set(labels[0] if labels else "")
-            self._reset_station_typeahead()
-            self.status_var.set(f"Found {len(stations)} ECCC climate station(s)")
+            self.station_lookup_queue.put(("success", provider, stations))
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror(APP_TITLE, f"Could not fetch ECCC climate stations:\n{exc}")
+            self.station_lookup_queue.put(("error", provider, str(exc)))
+
+    def _poll_station_lookup_results(self) -> None:
+        self.station_lookup_poll_after_id = None
+        try:
+            result, provider, payload = self.station_lookup_queue.get_nowait()
+        except queue.Empty:
+            self.station_lookup_poll_after_id = self.after(100, self._poll_station_lookup_results)
+            return
+
+        self.analysis_progress.stop()
+        self.analysis_progress.configure(mode="determinate")
+        self.analysis_progress_var.set(0)
+        self.station_lookup_in_progress = False
+        self.country_combo.configure(state="readonly")
+        self.state_combo.configure(state="readonly")
+        self.find_stations_button.configure(state="normal")
+        self.station_combo.configure(state="readonly")
+        self.import_station_button.configure(state="normal")
+        if result == "error":
+            self.status_var.set(f"Could not fetch {provider} stations")
+            messagebox.showerror(APP_TITLE, f"Could not fetch {provider} stations:\n{payload}")
+            return
+
+        self.station_options = payload
+        labels = [self._station_label(station) for station in self.station_options]
+        self.station_combo["values"] = labels
+        self.station_var.set(labels[0] if labels else "")
+        self._reset_station_typeahead()
+        descriptor = "ECCC climate station(s)" if provider == "ECCC" else "ACIS station(s)"
+        self.status_var.set(f"Found {len(self.station_options)} {descriptor}")
 
     def _reset_weather_selection(self) -> None:
         if self.state_typeahead_after_id is not None:
@@ -2033,6 +2117,9 @@ class RainwaterTkApp(tk.Tk):
         webbrowser.open(f"http://127.0.0.1:{port}/{quote(html_path.name)}")
 
     def destroy(self) -> None:
+        if self.station_lookup_poll_after_id is not None:
+            self.after_cancel(self.station_lookup_poll_after_id)
+            self.station_lookup_poll_after_id = None
         if self.location_poll_after_id is not None:
             self.after_cancel(self.location_poll_after_id)
             self.location_poll_after_id = None
@@ -2090,14 +2177,7 @@ class RainwaterTkApp(tk.Tk):
             "metadata": dict(metadata),
             "area_unit": area_unit(cfg),
             "volume_unit": volume_unit(cfg),
-            "surfaces": [
-                {
-                    "name": surface.name,
-                    "area": area_to_display(surface.area, cfg),
-                    "runoff_coefficient": surface.runoff_coefficient,
-                }
-                for surface in cfg.surfaces
-            ],
+            "surfaces": _report_surface_rows(cfg),
             "curve": [
                 {
                     "tank_size": volume_to_display(row.TankSizeGallons, cfg),
@@ -2522,7 +2602,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self.results_tree.heading("unmet", text=f"Unmet ({volume_unit(self.config_model)})")
         self.results_tree.heading("tank", text=f"Water in Tank ({volume_unit(self.config_model)})")
         self.results_tree.delete(*self.results_tree.get_children())
-        display = self._display_results_df().head(500)
+        display = self._display_results_df()
         overflow_column = f"Overflow ({volume_unit(self.config_model)}/day)"
         for _, row in display.iterrows():
             overflow_value = row.get(overflow_column)
@@ -2796,7 +2876,8 @@ class SurfaceDialog(tk.Toplevel):
         body = ttk.Frame(self, padding=12)
         body.grid(sticky="nsew")
         ttk.Label(body, text="Surface").grid(row=0, column=0, sticky="w", pady=3)
-        ttk.Entry(body, textvariable=self.name_var, width=36).grid(row=0, column=1, pady=3)
+        self.name_entry = ttk.Entry(body, textvariable=self.name_var, width=36)
+        self.name_entry.grid(row=0, column=1, pady=3)
         ttk.Label(body, text=f"Area ({area_unit(config)})").grid(row=1, column=0, sticky="w", pady=3)
         ttk.Entry(body, textvariable=self.area_var, width=18).grid(row=1, column=1, sticky="w", pady=3)
         ttk.Label(body, text="Runoff coefficient").grid(row=2, column=0, sticky="w", pady=3)
@@ -2813,6 +2894,35 @@ class SurfaceDialog(tk.Toplevel):
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.after_idle(self._focus_dialog)
+
+    def _focus_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        dialog_width = self.winfo_reqwidth()
+        dialog_height = self.winfo_reqheight()
+        target_root_x = parent.winfo_rootx() + (parent.winfo_width() - dialog_width) // 2
+        target_root_y = parent.winfo_rooty() + (parent.winfo_height() - dialog_height) // 2
+        x = self.winfo_x() + target_root_x - self.winfo_rootx()
+        y = self.winfo_y() + target_root_y - self.winfo_rooty()
+        self.geometry(f"{dialog_width}x{dialog_height}{x:+d}{y:+d}")
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(10, self._center_mapped_dialog)
+        self.after(50, lambda: self.attributes("-topmost", False) if self.winfo_exists() else None)
+        self.name_entry.focus_force()
+        self.name_entry.selection_range(0, tk.END)
+
+    def _center_mapped_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        target_root_x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        target_root_y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        x = self.winfo_x() + target_root_x - self.winfo_rootx()
+        y = self.winfo_y() + target_root_y - self.winfo_rooty()
+        self.geometry(f"{self.winfo_width()}x{self.winfo_height()}{x:+d}{y:+d}")
 
     def _save(self) -> None:
         self.result = Surface(

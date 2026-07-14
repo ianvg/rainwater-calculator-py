@@ -20,6 +20,7 @@ class DemandProfile:
     gallons_per_flush_toilet: float = 0.0
     gallons_per_flush_urinal: float = 0.0
     simple_daily_demand_gallons: float = 0.0
+    daily_demand_days_per_week: int = 7
     male_occupancy: Dict[str, float] = field(default_factory=dict)
     female_occupancy: Dict[str, float] = field(default_factory=dict)
     ice_making: Dict[str, float] = field(default_factory=dict)

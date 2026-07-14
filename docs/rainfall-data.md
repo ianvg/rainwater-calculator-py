@@ -12,6 +12,8 @@ Select **Total precipitation** to use the ACIS daily precipitation value. ACIS d
 
 After stations are retrieved, type the first few letters of a station name to preselect a matching station. Choose the date range and import the record.
 
+While the application searches the weather service for stations, the lower-right progress bar animates and the station-selection controls remain disabled until the search finishes.
+
 ACIS importing requires an internet connection. After a successful import, the rainfall summary identifies the station name, station ID, number of rows, and record dates. Station information is retained when the project is saved and reopened.
 
 ## Import Canadian climate data

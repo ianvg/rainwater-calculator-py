@@ -47,8 +47,12 @@ def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
     )
 
     simple_daily = max(float(getattr(demand, "simple_daily_demand_gallons", 0.0)), 0.0)
+    operating_days = min(max(int(getattr(demand, "daily_demand_days_per_week", 7)), 0), 7)
+    recurring_daily = simple_daily + toilet_daily + urinal_daily
+    if date.weekday() >= operating_days:
+        recurring_daily = 0.0
 
-    return float(simple_daily + toilet_daily + urinal_daily + (monthly_other / days))
+    return float(recurring_daily + (monthly_other / days))
 
 
 def collected_water_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series:

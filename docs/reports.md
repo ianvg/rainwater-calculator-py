@@ -2,6 +2,8 @@
 
 Reports summarize the project information, end uses, collection surfaces, selected reliability, and reliability curve.
 
+The surface-area summary includes only collection surfaces whose configured area is greater than zero. Zero-area default and custom surfaces are omitted from PDF, HTML, and LaTeX report output.
+
 ## Report information
 
 When generating a report, review or enter:
