@@ -17,6 +17,12 @@ store = SQLiteStore()
 SQFT_PER_SQM = 10.7639
 LITERS_PER_GALLON = 3.78541
 MM_PER_INCH = 25.4
+US_STATE_CODES = (
+    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA",
+    "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM",
+    "NY", "NC", "ND", "OH", "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
+    "WV", "WI", "WY",
+)
 
 
 def _is_metric(config: ProjectConfig) -> bool:
@@ -280,7 +286,7 @@ demand_edited = st.data_editor(
 
 st.subheader("Rainfall Data")
 w1, w2, w3 = st.columns(3)
-weather_state = w1.text_input("Weather station state", value="NY", max_chars=2).strip().upper()
+weather_state = w1.selectbox("Weather station state", options=US_STATE_CODES, index=US_STATE_CODES.index("NY"))
 weather_years = int(w2.number_input("Historical period (years)", min_value=30, value=30, step=1))
 weather_query = w3.text_input("Filter stations", value="")
 

@@ -53,6 +53,60 @@ DEMAND_FIELDS = [
     ("vehicular_washing", "Vehicle Wash"),
     ("other_outdoor", "Other Outdoor"),
 ]
+STATE_OPTIONS = [
+    ("AL", "Alabama"),
+    ("AK", "Alaska"),
+    ("AZ", "Arizona"),
+    ("AR", "Arkansas"),
+    ("CA", "California"),
+    ("CO", "Colorado"),
+    ("CT", "Connecticut"),
+    ("DE", "Delaware"),
+    ("DC", "District of Columbia"),
+    ("FL", "Florida"),
+    ("GA", "Georgia"),
+    ("HI", "Hawaii"),
+    ("ID", "Idaho"),
+    ("IL", "Illinois"),
+    ("IN", "Indiana"),
+    ("IA", "Iowa"),
+    ("KS", "Kansas"),
+    ("KY", "Kentucky"),
+    ("LA", "Louisiana"),
+    ("ME", "Maine"),
+    ("MD", "Maryland"),
+    ("MA", "Massachusetts"),
+    ("MI", "Michigan"),
+    ("MN", "Minnesota"),
+    ("MS", "Mississippi"),
+    ("MO", "Missouri"),
+    ("MT", "Montana"),
+    ("NE", "Nebraska"),
+    ("NV", "Nevada"),
+    ("NH", "New Hampshire"),
+    ("NJ", "New Jersey"),
+    ("NM", "New Mexico"),
+    ("NY", "New York"),
+    ("NC", "North Carolina"),
+    ("ND", "North Dakota"),
+    ("OH", "Ohio"),
+    ("OK", "Oklahoma"),
+    ("OR", "Oregon"),
+    ("PA", "Pennsylvania"),
+    ("RI", "Rhode Island"),
+    ("SC", "South Carolina"),
+    ("SD", "South Dakota"),
+    ("TN", "Tennessee"),
+    ("TX", "Texas"),
+    ("UT", "Utah"),
+    ("VT", "Vermont"),
+    ("VA", "Virginia"),
+    ("WA", "Washington"),
+    ("WV", "West Virginia"),
+    ("WI", "Wisconsin"),
+    ("WY", "Wyoming"),
+]
+STATE_LABELS = [f"{code} - {name}" for code, name in STATE_OPTIONS]
 
 
 def _app_dir() -> Path:
@@ -66,6 +120,10 @@ def _float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
+
+
+def _state_code(value: str) -> str:
+    return value.split(" - ", 1)[0].strip().upper()
 
 
 class RainwaterTkApp(tk.Tk):
@@ -98,7 +156,7 @@ class RainwaterTkApp(tk.Tk):
         self.reserve_var = tk.StringVar(value=str(self.config_model.tank_parameters.reliable_fill_percent))
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
-        self.weather_state_var = tk.StringVar(value="NY")
+        self.weather_state_var = tk.StringVar(value="NY - New York")
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
@@ -121,21 +179,23 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(toolbar, text="New", command=self.new_project).grid(row=0, column=2, padx=2)
         ttk.Button(toolbar, text="Save", command=self.save_project).grid(row=0, column=3, padx=2)
         ttk.Button(toolbar, text="Load", command=self.load_selected_project).grid(row=0, column=4, sticky="w", padx=2)
-        ttk.Button(toolbar, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=5, padx=(18, 2))
-        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=6, padx=2)
-        ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=7, padx=2)
+        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=5, padx=(18, 2))
+        ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=6, padx=2)
 
         notebook = ttk.Notebook(self)
         notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
 
         self.inputs_tab = ttk.Frame(notebook, padding=10)
+        self.import_tab = ttk.Frame(notebook, padding=10)
         self.demand_tab = ttk.Frame(notebook, padding=10)
         self.results_tab = ttk.Frame(notebook, padding=10)
         notebook.add(self.inputs_tab, text="Project Inputs")
+        notebook.add(self.import_tab, text="Rainwater Data")
         notebook.add(self.demand_tab, text="Monthly Demand")
         notebook.add(self.results_tab, text="Results")
 
         self._build_inputs_tab()
+        self._build_import_tab()
         self._build_demand_tab()
         self._build_results_tab()
 
@@ -191,12 +251,22 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var)
         self._labeled_entry(settings_frame, 9, "Initial fill %", self.initial_fill_var)
         self._labeled_entry(settings_frame, 10, "Reserve threshold %", self.reserve_var)
-        ttk.Label(settings_frame, textvariable=self.rainfall_summary_var).grid(row=11, column=0, columnspan=2, sticky="w", pady=(12, 0))
 
-        weather_frame = ttk.LabelFrame(right_frame, text="ACIS Weather Import", padding=10)
+    def _build_import_tab(self) -> None:
+        self.import_tab.columnconfigure(0, weight=1)
+
+        csv_frame = ttk.LabelFrame(self.import_tab, text="Rainfall CSV", padding=10)
+        csv_frame.grid(row=0, column=0, sticky="ew")
+        csv_frame.columnconfigure(0, weight=1)
+        ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
+        ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+        weather_frame = ttk.LabelFrame(self.import_tab, text="ACIS Weather Import", padding=10)
         weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         weather_frame.columnconfigure(1, weight=1)
-        self._labeled_entry(weather_frame, 0, "State", self.weather_state_var)
+        ttk.Label(weather_frame, text="State").grid(row=0, column=0, sticky="w", pady=2)
+        state_combo = ttk.Combobox(weather_frame, textvariable=self.weather_state_var, values=STATE_LABELS, state="readonly")
+        state_combo.grid(row=0, column=1, sticky="ew", pady=2)
         self._labeled_entry(weather_frame, 1, "Historical years", self.weather_years_var)
         self._labeled_entry(weather_frame, 2, "Station filter", self.weather_filter_var)
         ttk.Button(weather_frame, text="Find Stations", command=self.find_acis_stations).grid(row=3, column=0, sticky="w", pady=(8, 2))
@@ -385,7 +455,7 @@ class RainwaterTkApp(tk.Tk):
 
     def find_acis_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
-        state = self.weather_state_var.get().strip().upper()
+        state = _state_code(self.weather_state_var.get())
         query = self.weather_filter_var.get().strip().casefold()
         try:
             start_date, end_date = default_complete_calendar_range(years)
