@@ -1,7 +1,7 @@
 import pandas as pd
 
 from rainwater_app.acis import _parse_acis_number, default_complete_calendar_range
-from rainwater_app.defaults import default_project_config
+from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.engine import demand_series, reliability_curve, simulate_tank
 from rainwater_app.storage import SQLiteStore
 
@@ -74,6 +74,16 @@ def test_old_saved_project_payload_defaults_simple_daily_demand() -> None:
     assert cfg.demand.simple_daily_demand_gallons == 0.0
 
 
+def test_default_surface_runoff_values_match_named_surfaces() -> None:
+    cfg = default_project_config()
+    default_runoff = {surface.name: surface.runoff_coefficient for surface in cfg.surfaces}
+
+    assert default_runoff["Roof membrane"] == 0.95
+    assert default_runoff["Roof asphalt shingle"] == 0.9
+    assert default_runoff["Roof metal"] == 0.95
+    assert default_surface_runoff("Roof Membrane") == 0.95
+
+
 def test_project_can_be_saved_without_rainfall_data(tmp_path) -> None:
     store = SQLiteStore(str(tmp_path / "projects.db"))
     cfg = default_project_config()
@@ -106,6 +116,35 @@ def test_project_persists_rainfall_source_label(tmp_path) -> None:
 
     assert loaded_cfg.rainfall_source_label == "CENTRAL PARK NY (123456)"
     assert len(loaded_rainfall) == 2
+
+
+def test_project_persists_analysis_outputs(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "projects.db"))
+    cfg = default_project_config()
+    cfg.name = "Analyzed Project"
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "Precipitation": [0.2, 0.0, 0.1],
+        }
+    )
+    curve = pd.DataFrame(
+        {
+            "TankSizeGallons": [500.0, 1000.0],
+            "ReliabilityPercent": [50.0, 75.0],
+        }
+    )
+    results = simulate_tank(cfg, rainfall, 1000.0)
+
+    store.save_project(cfg, rainfall, curve, results)
+
+    loaded_cfg, loaded_rainfall, loaded_curve, loaded_results = store.load_project_with_analysis("Analyzed Project")
+
+    assert loaded_cfg.name == "Analyzed Project"
+    assert len(loaded_rainfall) == 3
+    assert loaded_curve["ReliabilityPercent"].tolist() == [50.0, 75.0]
+    assert not loaded_results.empty
+    assert "WaterInTankGallons" in loaded_results
 
 
 def test_reliability_curve_does_not_decrease_with_larger_tanks() -> None:

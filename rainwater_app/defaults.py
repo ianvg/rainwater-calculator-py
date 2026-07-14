@@ -1,22 +1,32 @@
 from .models import DemandProfile, ProjectConfig, Surface, TankParameters, MONTH_KEYS
 
+DEFAULT_SURFACES = [
+    Surface("Roof membrane", 0.0, 0.95),
+    Surface("Roof asphalt shingle", 0.0, 0.9),
+    Surface("Roof metal", 0.0, 0.95),
+    Surface("Roof green roof", 0.0, 0.6),
+    Surface("Roof terracotta", 0.0, 0.9),
+    Surface("Non-roof impervious", 0.0, 0.85),
+    Surface("Semi-pervious", 0.0, 0.45),
+    Surface("Engineered semi-pervious", 0.0, 0.7),
+    Surface("Other", 0.0, 0.5),
+]
+
 
 def _month_zero_map() -> dict[str, float]:
     return {m: 0.0 for m in MONTH_KEYS}
 
 
+def default_surface_runoff(surface_name: str) -> float:
+    normalized = surface_name.strip().casefold()
+    for surface in DEFAULT_SURFACES:
+        if surface.name.casefold() == normalized:
+            return surface.runoff_coefficient
+    return Surface(name="Default").runoff_coefficient
+
+
 def default_project_config(name: str = "My Project") -> ProjectConfig:
-    surfaces = [
-        Surface("Roof Membrane", 0.0, 0.95),
-        Surface("Roof Asphalt Shingle", 0.0, 0.9),
-        Surface("Roof Metal", 0.0, 0.95),
-        Surface("Roof Green Roof", 0.0, 0.6),
-        Surface("Roof Terracotta", 0.0, 0.9),
-        Surface("Non-Roof Impervious", 0.0, 0.85),
-        Surface("Semi-Pervious", 0.0, 0.45),
-        Surface("Engineered Semi-Pervious", 0.0, 0.7),
-        Surface("Other", 0.0, 0.5),
-    ]
+    surfaces = [Surface(surface.name, surface.area, surface.runoff_coefficient) for surface in DEFAULT_SURFACES]
 
     demand = DemandProfile(
         male_occupancy=_month_zero_map(),

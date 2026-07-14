@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import asdict
+from io import StringIO
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +45,11 @@ class SQLiteStore:
                 )
                 """
             )
+            columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
+            if "curve_json" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN curve_json TEXT")
+            if "results_json" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN results_json TEXT")
             conn.commit()
 
     def list_projects(self) -> list[str]:
@@ -51,21 +57,33 @@ class SQLiteStore:
             rows = conn.execute("SELECT name FROM projects ORDER BY updated_at DESC, name ASC").fetchall()
         return [r["name"] for r in rows]
 
-    def save_project(self, config: ProjectConfig, rainfall_df: pd.DataFrame | None = None) -> None:
+    def save_project(
+        self,
+        config: ProjectConfig,
+        rainfall_df: pd.DataFrame | None = None,
+        curve_df: pd.DataFrame | None = None,
+        results_df: pd.DataFrame | None = None,
+    ) -> None:
         config_json = json.dumps(asdict(config))
+        curve_json = self._df_to_json(curve_df)
+        results_json = self._df_to_json(results_df)
         with self._connect() as conn:
             row = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()
             if row is None:
                 conn.execute(
-                    "INSERT INTO projects (name, config_json) VALUES (?, ?)",
-                    (config.name, config_json),
+                    "INSERT INTO projects (name, config_json, curve_json, results_json) VALUES (?, ?, ?, ?)",
+                    (config.name, config_json, curve_json, results_json),
                 )
                 project_id = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()["id"]
             else:
                 project_id = row["id"]
                 conn.execute(
-                    "UPDATE projects SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                    (config_json, project_id),
+                    """
+                    UPDATE projects
+                    SET config_json = ?, curve_json = ?, results_json = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE id = ?
+                    """,
+                    (config_json, curve_json, results_json, project_id),
                 )
                 conn.execute("DELETE FROM rainfall_data WHERE project_id = ?", (project_id,))
 
@@ -81,8 +99,15 @@ class SQLiteStore:
             conn.commit()
 
     def load_project(self, name: str) -> tuple[ProjectConfig, pd.DataFrame]:
+        config, rainfall_df, _curve_df, _results_df = self.load_project_with_analysis(name)
+        return config, rainfall_df
+
+    def load_project_with_analysis(self, name: str) -> tuple[ProjectConfig, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         with self._connect() as conn:
-            row = conn.execute("SELECT id, config_json FROM projects WHERE name = ?", (name,)).fetchone()
+            row = conn.execute(
+                "SELECT id, config_json, curve_json, results_json FROM projects WHERE name = ?",
+                (name,),
+            ).fetchone()
             if row is None:
                 raise ValueError(f"Project '{name}' not found.")
 
@@ -99,7 +124,24 @@ class SQLiteStore:
                 "Precipitation": [float(r["precipitation"]) for r in rainfall_rows],
             }
         )
-        return config, rainfall_df
+        curve_df = self._df_from_json(row["curve_json"])
+        results_df = self._df_from_json(row["results_json"])
+        return config, rainfall_df, curve_df, results_df
+
+    @staticmethod
+    def _df_to_json(df: pd.DataFrame | None) -> str | None:
+        if df is None or df.empty:
+            return None
+        return df.to_json(orient="split", date_format="iso")
+
+    @staticmethod
+    def _df_from_json(payload: str | None) -> pd.DataFrame:
+        if not payload:
+            return pd.DataFrame()
+        df = pd.read_json(StringIO(payload), orient="split")
+        if "Date" in df:
+            df["Date"] = pd.to_datetime(df["Date"])
+        return df
 
     @staticmethod
     def _config_from_dict(payload: dict[str, Any]) -> ProjectConfig:

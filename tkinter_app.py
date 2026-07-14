@@ -9,7 +9,7 @@ from tkinter import filedialog, messagebox, simpledialog, ttk
 import pandas as pd
 
 from rainwater_app.acis import default_complete_calendar_range, fetch_daily_station_data, fetch_station_options
-from rainwater_app.defaults import default_project_config
+from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.engine import reliability_curve, simulate_tank
 from rainwater_app.models import MONTH_KEYS, ProjectConfig, Surface
 from rainwater_app.rainfall import load_rainfall_csv
@@ -268,20 +268,23 @@ class RainwaterTkApp(tk.Tk):
         unit_combo.grid(row=0, column=3, padx=(8, 0))
         unit_combo.bind("<<ComboboxSelected>>", lambda _event: self._change_units())
 
-        surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection Surfaces", padding=10)
+        surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection surfaces", padding=10)
         surfaces_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
         surfaces_frame.rowconfigure(0, weight=1)
         surfaces_frame.columnconfigure(0, weight=1)
         self.surface_tree = ttk.Treeview(surfaces_frame, columns=("surface", "area", "runoff"), show="headings", height=12)
         self.surface_tree.heading("surface", text="Surface")
         self.surface_tree.heading("area", text="Area")
-        self.surface_tree.heading("runoff", text="Runoff Coeff.")
+        self.surface_tree.heading("runoff", text="Runoff coeff.")
         self.surface_tree.column("surface", width=220)
         self.surface_tree.column("area", width=90, anchor="e")
         self.surface_tree.column("runoff", width=90, anchor="e")
         self.surface_tree.grid(row=0, column=0, sticky="nsew")
         self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
-        ttk.Button(surfaces_frame, text="Edit Selected Surface", command=self.edit_surface).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        surface_buttons = ttk.Frame(surfaces_frame)
+        surface_buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(surface_buttons, text="Add collection surface", command=self.add_surface).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(surface_buttons, text="Edit selected surface", command=self.edit_surface).grid(row=0, column=1)
 
         right_frame = ttk.Frame(self.inputs_tab)
         right_frame.grid(row=1, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
@@ -559,13 +562,19 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Select a saved project first.")
             return
         try:
-            self.config_model, self.rainfall_df = self.store.load_project(name)
+            self.config_model, self.rainfall_df, self.curve_df, self.results_df = self.store.load_project_with_analysis(name)
             self.rainfall_source_label = self.config_model.rainfall_source_label
-            self.results_df = pd.DataFrame()
-            self.curve_df = pd.DataFrame()
             self._clear_results()
             self._populate_from_model()
-            self.status_var.set(f"Loaded project '{name}'")
+            if not self.results_df.empty and not self.curve_df.empty:
+                reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+                self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
+                self._populate_results()
+                self.after_idle(self._draw_saved_analysis_charts)
+                self.status_var.set(f"Loaded project '{name}' with saved analysis")
+            else:
+                self.reliability_var.set("Reliability: --")
+                self.status_var.set(f"Loaded project '{name}'")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not load project:\n{exc}")
 
@@ -594,7 +603,7 @@ class RainwaterTkApp(tk.Tk):
     def _save_current_project(self) -> None:
         self.config_model.rainfall_source_label = self.rainfall_source_label
         try:
-            self.store.save_project(self.config_model, self.rainfall_df)
+            self.store.save_project(self.config_model, self.rainfall_df, self.curve_df, self.results_df)
             self._load_project_list()
             self.saved_project_var.set(self.config_model.name)
             self.status_var.set(f"Saved project '{self.config_model.name}'")
@@ -616,6 +625,10 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = rainfall
             self.rainfall_source_label = None
             self.config_model.rainfall_source_label = None
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
             self._update_rainfall_summary()
             self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
@@ -659,6 +672,10 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
             self.rainfall_source_label = f"{station['name']} ({station['sid']})"
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
             self._update_rainfall_summary()
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
         except Exception as exc:  # noqa: BLE001
@@ -676,6 +693,16 @@ class RainwaterTkApp(tk.Tk):
         if dialog.result:
             self.config_model.surfaces[index] = dialog.result
             self._populate_surfaces()
+
+    def add_surface(self) -> None:
+        dialog = SurfaceDialog(self, Surface("Custom surface", 0.0, Surface(name="Default").runoff_coefficient), self.config_model)
+        self.wait_window(dialog)
+        if dialog.result:
+            self.config_model.surfaces.append(dialog.result)
+            self._populate_surfaces()
+            new_index = str(len(self.config_model.surfaces) - 1)
+            self.surface_tree.selection_set(new_index)
+            self.surface_tree.focus(new_index)
 
     def _edit_surface_from_event(self, event: tk.Event) -> str:
         row_id = self.surface_tree.identify_row(event.y)
@@ -805,23 +832,61 @@ class RainwaterTkApp(tk.Tk):
         self.results_tree.delete(*self.results_tree.get_children())
         self.curve_canvas.delete("all")
         self.tank_canvas.delete("all")
+        self.curve_canvas.hover_points = []
+        self.tank_canvas.hover_points = []
+
+    def _draw_saved_analysis_charts(self) -> None:
+        self.update_idletasks()
+        self._draw_curve()
+        self._draw_tank_chart()
 
     def _draw_curve(self) -> None:
         if self.curve_df.empty:
             return
         x = [volume_to_display(v, self.config_model) for v in self.curve_df["TankSizeGallons"]]
         y = list(self.curve_df["ReliabilityPercent"])
-        self._draw_line_chart(self.curve_canvas, x, y, f"Reliability vs Tank Size ({volume_unit(self.config_model)})", "Reliability %")
+        hover_labels = [
+            f"Tank size: {tank_size:.0f} {volume_unit(self.config_model)}\nReliability: {reliability:.2f}%"
+            for tank_size, reliability in zip(x, y)
+        ]
+        self._draw_line_chart(
+            self.curve_canvas,
+            x,
+            y,
+            f"Reliability vs Tank Size ({volume_unit(self.config_model)})",
+            "Reliability %",
+            hover_labels,
+        )
 
     def _draw_tank_chart(self) -> None:
         if self.results_df.empty:
             return
         x = list(range(len(self.results_df)))
         y = [volume_to_display(v, self.config_model) for v in self.results_df["WaterInTankGallons"]]
-        self._draw_line_chart(self.tank_canvas, x, y, f"Tank Water Over Time ({volume_unit(self.config_model)})", volume_unit(self.config_model))
+        hover_labels = [
+            f"Date: {pd.Timestamp(date).strftime('%Y-%m-%d')}\nWater in tank: {water:.1f} {volume_unit(self.config_model)}"
+            for date, water in zip(self.results_df["Date"], y)
+        ]
+        self._draw_line_chart(
+            self.tank_canvas,
+            x,
+            y,
+            f"Tank Water Over Time ({volume_unit(self.config_model)})",
+            volume_unit(self.config_model),
+            hover_labels,
+        )
 
-    def _draw_line_chart(self, canvas: tk.Canvas, x_values: list[float], y_values: list[float], title: str, y_label: str) -> None:
+    def _draw_line_chart(
+        self,
+        canvas: tk.Canvas,
+        x_values: list[float],
+        y_values: list[float],
+        title: str,
+        y_label: str,
+        hover_labels: list[str] | None = None,
+    ) -> None:
         canvas.delete("all")
+        canvas.hover_points = []
         width = max(canvas.winfo_width(), 420)
         height = max(canvas.winfo_height(), 220)
         pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, 42
@@ -840,19 +905,65 @@ class RainwaterTkApp(tk.Tk):
         if y_min == y_max:
             y_max = y_min + 1
         points: list[float] = []
-        for x, y in zip(x_values, y_values):
+        hover_labels = hover_labels or [f"X: {x:.2f}\nY: {y:.2f}" for x, y in zip(x_values, y_values)]
+        for x, y, hover_label in zip(x_values, y_values, hover_labels):
             px = pad_left + ((x - x_min) / (x_max - x_min)) * plot_w
             py = height - pad_bottom - ((y - y_min) / (y_max - y_min)) * plot_h
             points.extend([px, py])
+            canvas.hover_points.append((px, py, hover_label))
         if len(points) >= 4:
             canvas.create_line(*points, fill="#0b5cab", width=2)
+        for px, py, _hover_label in canvas.hover_points:
+            canvas.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#0b5cab", outline="")
         for i in range(5):
             y = pad_top + (plot_h * i / 4)
             value = y_max - ((y_max - y_min) * i / 4)
-            canvas.create_line(pad_left - 4, y, width - pad_right, y, fill="#e6e6e6")
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
+            canvas.create_line(pad_left - 5, y, pad_left, y, fill="#555")
             canvas.create_text(pad_left - 8, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 8))
-        canvas.create_text(width / 2, height - 14, text=f"{x_min:.0f} to {x_max:.0f}", font=("Segoe UI", 8))
+        for i in range(5):
+            x = pad_left + (plot_w * i / 4)
+            value = x_min + ((x_max - x_min) * i / 4)
+            canvas.create_line(x, height - pad_bottom, x, height - pad_bottom + 5, fill="#555")
+            canvas.create_text(x, height - pad_bottom + 17, text=f"{value:.0f}", font=("Segoe UI", 8))
         canvas.create_text(14, height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
+        canvas.bind("<Motion>", self._show_chart_hover)
+        canvas.bind("<Leave>", self._hide_chart_hover)
+
+    def _show_chart_hover(self, event: tk.Event) -> None:
+        canvas = event.widget
+        points = getattr(canvas, "hover_points", [])
+        if not points:
+            return
+        nearest = min(points, key=lambda point: (point[0] - event.x) ** 2 + (point[1] - event.y) ** 2)
+        distance_squared = (nearest[0] - event.x) ** 2 + (nearest[1] - event.y) ** 2
+        if distance_squared > 225:
+            self._hide_chart_hover(event)
+            return
+
+        canvas.delete("hover")
+        px, py, label = nearest
+        canvas.create_oval(px - 5, py - 5, px + 5, py + 5, outline="#c2410c", width=2, tags="hover")
+        text_x = min(max(px + 12, 72), max(canvas.winfo_width() - 96, 72))
+        text_y = max(py - 30, 24)
+        text_id = canvas.create_text(text_x, text_y, text=label, anchor="nw", font=("Segoe UI", 8), tags="hover")
+        bbox = canvas.bbox(text_id)
+        if bbox is None:
+            return
+        pad = 5
+        rect_id = canvas.create_rectangle(
+            bbox[0] - pad,
+            bbox[1] - pad,
+            bbox[2] + pad,
+            bbox[3] + pad,
+            fill="#fffff0",
+            outline="#666",
+            tags="hover",
+        )
+        canvas.tag_lower(rect_id, text_id)
+
+    def _hide_chart_hover(self, event: tk.Event) -> None:
+        event.widget.delete("hover")
 
 
 class SurfaceDialog(tk.Toplevel):
@@ -873,7 +984,7 @@ class SurfaceDialog(tk.Toplevel):
         ttk.Entry(body, textvariable=self.area_var, width=18).grid(row=1, column=1, sticky="w", pady=3)
         ttk.Label(body, text="Runoff coefficient").grid(row=2, column=0, sticky="w", pady=3)
         ttk.Entry(body, textvariable=self.runoff_var, width=18).grid(row=2, column=1, sticky="w", pady=3)
-        default_runoff = Surface(name="Default").runoff_coefficient
+        default_runoff = default_surface_runoff(surface.name)
         tk.Label(
             body,
             text=f"Default runoff coefficient: {default_runoff:.3f}",

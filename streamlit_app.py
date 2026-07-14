@@ -81,6 +81,10 @@ def _ensure_session_state() -> None:
         st.session_state.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
     if "rainfall_source_label" not in st.session_state:
         st.session_state.rainfall_source_label = None
+    if "curve_df" not in st.session_state:
+        st.session_state.curve_df = pd.DataFrame()
+    if "results_df" not in st.session_state:
+        st.session_state.results_df = pd.DataFrame()
 
 
 def _migrate_config(config: ProjectConfig) -> None:
@@ -93,7 +97,7 @@ def _migrate_config(config: ProjectConfig) -> None:
 def _surfaces_df(config: ProjectConfig) -> pd.DataFrame:
     area_label = f"Area ({_area_unit(config)})"
     return pd.DataFrame([
-        {"Surface": s.name, area_label: _area_to_display(s.area, config), "Runoff Coefficient": s.runoff_coefficient}
+        {"Surface": s.name, area_label: _area_to_display(s.area, config), "Runoff coefficient": s.runoff_coefficient}
         for s in config.surfaces
     ])
 
@@ -137,7 +141,7 @@ def _apply_surfaces(config: ProjectConfig, edited: pd.DataFrame) -> None:
             Surface(
                 name=str(row.get("Surface", "Other")),
                 area=_area_to_internal(float(row.get(area_label, 0.0) or 0.0), config),
-                runoff_coefficient=float(row.get("Runoff Coefficient", 0.0) or 0.0),
+                runoff_coefficient=float(row.get("Runoff coefficient", 0.0) or 0.0),
             )
         )
     config.surfaces = surfaces
@@ -232,21 +236,25 @@ def _sidebar() -> None:
         st.session_state.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         st.session_state.rainfall_source_label = None
         st.session_state.config.rainfall_source_label = None
+        st.session_state.curve_df = pd.DataFrame()
+        st.session_state.results_df = pd.DataFrame()
         st.rerun()
 
     if col_load.button("Load") and selected != "(none)":
-        config, rainfall_df = store.load_project(selected)
+        config, rainfall_df, curve_df, results_df = store.load_project_with_analysis(selected)
         _migrate_config(config)
         st.session_state.config = config
         st.session_state.rainfall_df = rainfall_df
         st.session_state.rainfall_source_label = config.rainfall_source_label
+        st.session_state.curve_df = curve_df
+        st.session_state.results_df = results_df
         st.rerun()
 
     if col_save.button("Save"):
         config = st.session_state.config
         rainfall_df = st.session_state.rainfall_df
         config.rainfall_source_label = st.session_state.get("rainfall_source_label")
-        store.save_project(config, rainfall_df)
+        store.save_project(config, rainfall_df, st.session_state.curve_df, st.session_state.results_df)
         st.sidebar.success("Project saved.")
 
 
@@ -262,7 +270,7 @@ col_a, col_b = st.columns(2)
 config.name = col_a.text_input("Project name", value=config.name)
 config.unit_system = col_b.selectbox("Unit system", options=["Imperial", "Metric"], index=0 if config.unit_system == "Imperial" else 1)
 
-st.subheader("Collection Surfaces")
+st.subheader("Collection surfaces")
 surfaces_edited = st.data_editor(
     _surfaces_df(config),
     num_rows="dynamic",
@@ -337,6 +345,8 @@ if station_options:
             source_label = f"{selected_station['name']} ({selected_station['sid']})"
             st.session_state.rainfall_source_label = source_label
             st.session_state.config.rainfall_source_label = source_label
+            st.session_state.curve_df = pd.DataFrame()
+            st.session_state.results_df = pd.DataFrame()
             st.success(_rainfall_summary(rainfall_df, source_label))
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not import ACIS weather data: {exc}")
@@ -363,6 +373,8 @@ if uploaded is not None:
         rainfall_df = st.session_state.rainfall_df
         st.session_state.rainfall_source_label = None
         st.session_state.config.rainfall_source_label = None
+        st.session_state.curve_df = pd.DataFrame()
+        st.session_state.results_df = pd.DataFrame()
         st.success(f"Loaded {len(rainfall_df)} rainfall rows.")
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
@@ -430,19 +442,25 @@ if st.button("Run Analysis", width="stretch"):
         progress.progress(50, text="Analysis running: Part B - selected tank simulation")
         single = simulate_tank(config, rainfall_df, config.selected_tank_size_gal)
         progress.progress(75, text="Analysis running: Part B - preparing charts")
-        curve_display = _curve_to_display_df(curve, config)
-        single_display = _results_to_display_df(single, config)
+        st.session_state.curve_df = curve
+        st.session_state.results_df = single
         progress.progress(100, text="Analysis complete")
 
-        st.subheader("Reliability vs Tank Size")
-        st.line_chart(curve_display, x=f"Tank Size ({_volume_unit(config)})", y="Reliability (%)", width="stretch")
+curve_df = st.session_state.get("curve_df", pd.DataFrame())
+results_df = st.session_state.get("results_df", pd.DataFrame())
+if not curve_df.empty and not results_df.empty:
+    curve_display = _curve_to_display_df(curve_df, config)
+    single_display = _results_to_display_df(results_df, config)
 
-        reliability = float(single["ReliabilityPercent"].iloc[0]) if not single.empty else 0.0
-        st.metric("Reliability (selected tank)", f"{reliability:.2f}%")
+    st.subheader("Reliability vs Tank Size")
+    st.line_chart(curve_display, x=f"Tank Size ({_volume_unit(config)})", y="Reliability (%)", width="stretch")
 
-        st.subheader("Tank Water Over Time")
-        st.line_chart(single_display, x="Date", y=f"Water in Tank ({_volume_unit(config)})", width="stretch")
+    reliability = float(results_df["ReliabilityPercent"].iloc[0]) if not results_df.empty else 0.0
+    st.metric("Reliability (selected tank)", f"{reliability:.2f}%")
 
-        st.subheader("Detailed Results")
-        st.dataframe(single_display, width="stretch")
+    st.subheader("Tank Water Over Time")
+    st.line_chart(single_display, x="Date", y=f"Water in Tank ({_volume_unit(config)})", width="stretch")
+
+    st.subheader("Detailed Results")
+    st.dataframe(single_display, width="stretch")
 
