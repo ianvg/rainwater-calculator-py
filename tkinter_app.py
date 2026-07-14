@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import csv
+import datetime as dt
+import shutil
+import subprocess
 import sys
 import tkinter as tk
+import tempfile
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -27,6 +31,7 @@ from rainwater_app.units import (
 )
 
 APP_TITLE = "Rainwater Harvesting Calculator"
+GRAPH_AUTO_STEP_COUNT = 40
 ABOUT_TEXT = """RWH Calculator
 
 Copyright (c) 2026 RWH Calculator contributors
@@ -171,6 +176,63 @@ def _state_code(value: str) -> str:
     return value.split(" - ", 1)[0].strip().upper()
 
 
+def _safe_project_file_name(name: str) -> str:
+    safe = "".join(char if char.isalnum() or char in " ._-" else "_" for char in name).strip()
+    return f"{safe or 'rainwater_project'}.db"
+
+
+def _latex_escape(value: object) -> str:
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    return "".join(replacements.get(char, char) for char in str(value))
+
+
+def _latex_row(*values: object) -> str:
+    return " & ".join(_latex_escape(value) for value in values) + r" \\"
+
+
+def _latex_number(value: object) -> str:
+    return f"{float(value):.6g}"
+
+
+def _pdf_escape(value: object) -> str:
+    text = str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+    return text.encode("latin-1", errors="replace").decode("latin-1")
+
+
+def _clip_pdf_text(value: object, max_chars: int) -> str:
+    text = str(value)
+    if len(text) <= max_chars:
+        return text
+    return text[: max(0, max_chars - 3)] + "..."
+
+
+def _wrap_pdf_text(value: str, width: int) -> list[str]:
+    words = value.split()
+    if not words:
+        return [""]
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        if len(current) + 1 + len(word) <= width:
+            current = f"{current} {word}"
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -178,7 +240,8 @@ class RainwaterTkApp(tk.Tk):
         self.geometry("1200x760")
         self.minsize(1000, 680)
 
-        self.store = SQLiteStore(str(_app_dir() / "rainwater_projects.db"))
+        self.project_file_path = _app_dir() / "rainwater_projects.db"
+        self.store = SQLiteStore(str(self.project_file_path))
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.curve_df = pd.DataFrame()
@@ -208,6 +271,7 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
+        self.show_tank_points_var = tk.BooleanVar(value=True)
         self.weather_state_var = tk.StringVar(value="NY - New York")
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
@@ -266,9 +330,15 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_command(label="Load project", accelerator="Ctrl+L", command=self.load_selected_project)
+        file_menu.add_command(label="Open project from...", accelerator="Ctrl+O", command=self.open_project_from)
+        file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
         file_menu.add_separator()
         file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        view_menu = tk.Menu(menubar, tearoff=False)
+        view_menu.add_command(label="PDF report", command=self.generate_pdf_report)
+        menubar.add_cascade(label="View", menu=view_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
         help_menu.add_command(label="About RWH Calculator", command=self._show_about_dialog)
@@ -280,6 +350,8 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-Shift-S>", self._shortcut_save_project_as)
         self.bind_all("<Control-Shift-s>", self._shortcut_save_project_as)
         self.bind_all("<Control-l>", self._shortcut_load_project)
+        self.bind_all("<Control-o>", self._shortcut_open_project_from)
+        self.bind_all("<Control-r>", self._shortcut_run_analysis)
         self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _shortcut_create_new_project(self, _event: tk.Event) -> str:
@@ -296,6 +368,14 @@ class RainwaterTkApp(tk.Tk):
 
     def _shortcut_load_project(self, _event: tk.Event) -> str:
         self.load_selected_project()
+        return "break"
+
+    def _shortcut_open_project_from(self, _event: tk.Event) -> str:
+        self.open_project_from()
+        return "break"
+
+    def _shortcut_run_analysis(self, _event: tk.Event) -> str:
+        self.run_analysis()
         return "break"
 
     def _shortcut_exit(self, _event: tk.Event) -> str:
@@ -379,6 +459,7 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 5, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
         self._labeled_entry(settings_frame, 6, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
         self._labeled_entry(settings_frame, 7, "Graph step", self.graph_step_var, self.tank_size_unit_var)
+        ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(row=7, column=3, sticky="w", padx=(8, 0), pady=2)
         self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
         self._labeled_entry(settings_frame, 9, "Initial fill", self.initial_fill_var, self.percent_unit_var)
         self._labeled_entry(settings_frame, 10, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
@@ -432,7 +513,13 @@ class RainwaterTkApp(tk.Tk):
         self.results_tab.rowconfigure(1, weight=1)
         self.results_tab.rowconfigure(2, weight=1)
 
-        ttk.Label(self.results_tab, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(self.results_tab, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            self.results_tab,
+            text="Show tank chart points",
+            variable=self.show_tank_points_var,
+            command=self._draw_tank_chart,
+        ).grid(row=0, column=1, sticky="e")
         self.curve_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
         self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
         self.tank_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
@@ -543,6 +630,8 @@ class RainwaterTkApp(tk.Tk):
     def _load_project_list(self) -> None:
         projects = self.store.list_projects()
         self.project_combo["values"] = projects
+        if self.saved_project_var.get() not in projects:
+            self.saved_project_var.set("")
         if projects and not self.saved_project_var.get():
             self.saved_project_var.set(projects[0])
 
@@ -638,6 +727,20 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.unit_system = self.unit_var.get()
         self._populate_from_model()
 
+    def auto_set_graph_step(self) -> None:
+        self.config_model.unit_system = self.unit_var.get() or "Imperial"
+        cfg = self.config_model
+        start_gal = volume_to_internal(_float(self.graph_start_var.get(), 500), cfg)
+        end_gal = volume_to_internal(_float(self.graph_end_var.get(), 20000), cfg)
+        if end_gal <= start_gal:
+            messagebox.showwarning(APP_TITLE, "Graph end tank size must be greater than graph start tank size.")
+            return
+
+        step_gal = (end_gal - start_gal) / (GRAPH_AUTO_STEP_COUNT - 1)
+        step_display = max(1.0, volume_to_display(step_gal, cfg))
+        self.graph_step_var.set(f"{step_display:.0f}")
+        self.status_var.set(f"Auto-set graph step to {step_display:.0f} {volume_unit(cfg)} for {GRAPH_AUTO_STEP_COUNT} graph points")
+
     def new_project(self) -> None:
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
@@ -672,12 +775,52 @@ class RainwaterTkApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not load project:\n{exc}")
 
+    def open_project_from(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Open project from...",
+            initialdir=str(self.project_file_path.parent),
+            filetypes=[("Rainwater project files", "*.db"), ("SQLite database files", "*.sqlite *.sqlite3"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+
+        previous_path = self.project_file_path
+        previous_store = self.store
+        try:
+            selected_path = Path(path)
+            selected_store = SQLiteStore(str(selected_path))
+            projects = selected_store.list_projects()
+            if not projects:
+                messagebox.showinfo(APP_TITLE, "No saved projects were found in that file.")
+                return
+
+            self.project_file_path = selected_path
+            self.store = selected_store
+            self.saved_project_var.set(projects[0])
+            self._load_project_list()
+            self.load_selected_project()
+            self.status_var.set(f"Opened project '{self.config_model.name}' from {self.project_file_path}")
+        except Exception as exc:  # noqa: BLE001
+            self.project_file_path = previous_path
+            self.store = previous_store
+            self._load_project_list()
+            messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
+
     def save_project(self) -> None:
         self._apply_form_to_model()
         self._save_current_project()
 
     def save_project_as(self) -> None:
         self._apply_form_to_model()
+        path = filedialog.asksaveasfilename(
+            title="Save project as...",
+            initialdir=str(self.project_file_path.parent),
+            initialfile=_safe_project_file_name(self.config_model.name),
+            defaultextension=".db",
+            filetypes=[("Rainwater project files", "*.db"), ("SQLite database files", "*.sqlite *.sqlite3"), ("All files", "*.*")],
+        )
+        if not path:
+            return
         name = simpledialog.askstring(
             APP_TITLE,
             "Project name",
@@ -690,6 +833,8 @@ class RainwaterTkApp(tk.Tk):
         if not name:
             messagebox.showwarning(APP_TITLE, "Project name cannot be blank.")
             return
+        self.project_file_path = Path(path)
+        self.store = SQLiteStore(str(self.project_file_path))
         self.config_model.name = name
         self.project_name_var.set(name)
         self._save_current_project()
@@ -700,7 +845,7 @@ class RainwaterTkApp(tk.Tk):
             self.store.save_project(self.config_model, self.rainfall_df, self.curve_df, self.results_df)
             self._load_project_list()
             self.saved_project_var.set(self.config_model.name)
-            self.status_var.set(f"Saved project '{self.config_model.name}'")
+            self.status_var.set(f"Saved project '{self.config_model.name}' to {self.project_file_path}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not save project:\n{exc}")
 
@@ -884,6 +1029,337 @@ class RainwaterTkApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not export results:\n{exc}")
 
+    def generate_pdf_report(self) -> None:
+        self._apply_form_to_model()
+        if self.curve_df.empty:
+            messagebox.showinfo(APP_TITLE, "Run the analysis before generating a PDF report.")
+            return
+
+        dialog = ReportDialog(self, self._default_report_metadata())
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save PDF report",
+            initialfile=_safe_project_file_name(self.config_model.name).replace(".db", "_report.pdf"),
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+        )
+        if not path:
+            return
+
+        pdf_path = Path(path)
+        tex_path = pdf_path.with_suffix(".tex")
+        try:
+            latex = self._build_report_latex(dialog.result)
+            tex_path.write_text(latex, encoding="utf-8")
+            self._compile_latex_report(tex_path, pdf_path, dialog.result)
+            self.status_var.set(f"Generated PDF report: {pdf_path.name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not generate PDF report:\n{exc}")
+
+    def _default_report_metadata(self) -> dict[str, str]:
+        end_uses = self._default_end_uses_text()
+        location = self.rainfall_source_label or self.config_model.rainfall_source_label or ""
+        return {
+            "client_name": "",
+            "date": dt.date.today().isoformat(),
+            "location": location,
+            "project_name": self.project_name_var.get().strip() or self.config_model.name,
+            "end_uses": end_uses,
+        }
+
+    def _default_end_uses_text(self) -> str:
+        uses: list[str] = []
+        if _float(self.simple_daily_var.get()) > 0:
+            uses.append("Simple daily demand")
+        if _float(self.flushes_var.get()) > 0 and (_float(self.toilet_flush_var.get()) > 0 or _float(self.urinal_flush_var.get()) > 0):
+            uses.append("Toilet and urinal flushing")
+        for field, label in DEMAND_FIELDS:
+            if field in {"male_occupancy", "female_occupancy"}:
+                continue
+            monthly_values = getattr(self.config_model.demand, field)
+            if any(float(value) > 0 for value in monthly_values.values()):
+                uses.append(label)
+        return ", ".join(dict.fromkeys(uses)) or "Not specified"
+
+    def _build_report_latex(self, metadata: dict[str, str]) -> str:
+        cfg = self.config_model
+        area = area_unit(cfg)
+        volume = volume_unit(cfg)
+        surface_rows = "\n".join(
+            _latex_row(
+                surface.name,
+                f"{area_to_display(surface.area, cfg):,.2f}",
+                f"{surface.runoff_coefficient:.3f}",
+            )
+            for surface in cfg.surfaces
+        )
+        if not surface_rows:
+            surface_rows = _latex_row("No collection surfaces", "0.00", "0.000")
+
+        coordinates = "\n".join(
+            f"({_latex_number(volume_to_display(row.TankSizeGallons, cfg))},{_latex_number(row.ReliabilityPercent)})"
+            for row in self.curve_df.itertuples(index=False)
+        )
+        selected_reliability = "--"
+        if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
+            selected_reliability = f"{float(self.results_df['ReliabilityPercent'].iloc[0]):.2f}\\%"
+
+        return rf"""\documentclass[11pt]{{article}}
+\usepackage[margin=0.75in]{{geometry}}
+\usepackage{{booktabs}}
+\usepackage{{pgfplots}}
+\usepackage{{longtable}}
+\usepackage{{array}}
+\pgfplotsset{{compat=1.18}}
+
+\title{{RWH Calculator Report}}
+\date{{}}
+
+\begin{{document}}
+\maketitle
+
+\section*{{Project Information}}
+\begin{{tabular}}{{@{{}}p{{1.6in}}p{{4.8in}}@{{}}}}
+\textbf{{Client name}} & {_latex_escape(metadata["client_name"])} \\
+\textbf{{Date}} & {_latex_escape(metadata["date"])} \\
+\textbf{{Location}} & {_latex_escape(metadata["location"])} \\
+\textbf{{Project name}} & {_latex_escape(metadata["project_name"])} \\
+\textbf{{End-uses of water}} & {_latex_escape(metadata["end_uses"])} \\
+\textbf{{Selected tank reliability}} & {selected_reliability} \\
+\end{{tabular}}
+
+\section*{{Surface Area Summary}}
+\begin{{longtable}}{{@{{}}p{{2.8in}}rr@{{}}}}
+\toprule
+Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
+\midrule
+{surface_rows}
+\bottomrule
+\end{{longtable}}
+
+\section*{{Reliability Curve}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    width=6.6in,
+    height=3.8in,
+    xlabel={{Tank size ({_latex_escape(volume)})}},
+    ylabel={{Reliability (\%)}},
+    ymin=0,
+    ymax=100,
+    grid=major,
+    mark=*,
+]
+\addplot+[blue, thick] coordinates {{
+{coordinates}
+}};
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+
+\end{{document}}
+"""
+
+    def _compile_latex_report(self, tex_path: Path, pdf_path: Path, metadata: dict[str, str]) -> None:
+        pdflatex = shutil.which("pdflatex")
+        if pdflatex is None:
+            self._write_fallback_pdf_report(pdf_path, metadata)
+            return
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            work_dir = Path(temp_dir)
+            work_tex = work_dir / tex_path.name
+            work_tex.write_text(tex_path.read_text(encoding="utf-8"), encoding="utf-8")
+            result = subprocess.run(
+                [pdflatex, "-interaction=nonstopmode", "-halt-on-error", work_tex.name],
+                cwd=work_dir,
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+            if result.returncode != 0:
+                log = (result.stdout + "\n" + result.stderr).strip()
+                raise RuntimeError(f"LaTeX failed. Source saved to {tex_path}.\n\n{log[-2000:]}")
+            compiled_pdf = work_dir / work_tex.with_suffix(".pdf").name
+            if not compiled_pdf.exists():
+                raise RuntimeError(f"LaTeX did not create a PDF. Source saved to {tex_path}.")
+            shutil.copyfile(compiled_pdf, pdf_path)
+
+    def _write_fallback_pdf_report(self, pdf_path: Path, metadata: dict[str, str]) -> None:
+        cfg = self.config_model
+        surface_rows = [
+            (
+                surface.name,
+                f"{area_to_display(surface.area, cfg):,.2f}",
+                f"{surface.runoff_coefficient:.3f}",
+            )
+            for surface in cfg.surfaces
+        ]
+        if not surface_rows:
+            surface_rows = [("No collection surfaces", "0.00", "0.000")]
+
+        selected_reliability = "--"
+        if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
+            selected_reliability = f"{float(self.results_df['ReliabilityPercent'].iloc[0]):.2f}%"
+
+        pages: list[list[str]] = [[]]
+        y = 744.0
+
+        def page() -> list[str]:
+            return pages[-1]
+
+        def add_page() -> None:
+            nonlocal y
+            pages.append([])
+            y = 744.0
+
+        def text(x: float, y_pos: float, value: object, size: int = 10, bold: bool = False) -> None:
+            font = "F2" if bold else "F1"
+            safe = _pdf_escape(value)
+            page().append(f"BT /{font} {size} Tf 1 0 0 1 {x:.2f} {y_pos:.2f} Tm ({safe}) Tj ET")
+
+        def line(x1: float, y1: float, x2: float, y2: float, width: float = 0.5) -> None:
+            page().append(f"{width:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
+
+        def add_wrapped(value: object, x: float = 54.0, size: int = 10, width: int = 90, indent: float = 0.0) -> None:
+            nonlocal y
+            for wrapped in _wrap_pdf_text(str(value), width):
+                if y < 72:
+                    add_page()
+                text(x + indent, y, wrapped, size=size)
+                y -= size + 4
+
+        def heading(value: str) -> None:
+            nonlocal y
+            if y < 112:
+                add_page()
+            y -= 10
+            text(54, y, value, size=14, bold=True)
+            y -= 18
+            line(54, y + 8, 558, y + 8)
+
+        text(54, y, "RWH Calculator Report", size=20, bold=True)
+        y -= 34
+        heading("Project Information")
+        for label, value in [
+            ("Client name", metadata["client_name"]),
+            ("Date", metadata["date"]),
+            ("Location", metadata["location"]),
+            ("Project name", metadata["project_name"]),
+            ("End-uses of water", metadata["end_uses"]),
+            ("Selected tank reliability", selected_reliability),
+        ]:
+            if y < 84:
+                add_page()
+            text(54, y, f"{label}:", size=10, bold=True)
+            add_wrapped(value or "Not specified", x=190, size=10, width=58)
+            y -= 2
+
+        heading("Surface Area Summary")
+        text(54, y, "Surface", size=10, bold=True)
+        text(330, y, f"Area ({area_unit(cfg)})", size=10, bold=True)
+        text(450, y, "Runoff coeff.", size=10, bold=True)
+        y -= 8
+        line(54, y, 558, y)
+        y -= 14
+        for name, area_text, runoff in surface_rows:
+            if y < 72:
+                add_page()
+            text(54, y, _clip_pdf_text(name, 46), size=9)
+            text(330, y, area_text, size=9)
+            text(450, y, runoff, size=9)
+            y -= 14
+
+        heading("Reliability Curve")
+        self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250)
+
+        self._write_pdf(pdf_path, pages)
+
+    def _draw_pdf_reliability_curve(self, commands: list[str], x: float, y: float, width: float, height: float) -> None:
+        cfg = self.config_model
+        rows = list(self.curve_df.itertuples(index=False))
+        if not rows:
+            return
+        values = [(volume_to_display(row.TankSizeGallons, cfg), float(row.ReliabilityPercent)) for row in rows]
+        x_min = min(v[0] for v in values)
+        x_max = max(v[0] for v in values)
+        if x_min == x_max:
+            x_max = x_min + 1
+
+        def sx(value: float) -> float:
+            return x + ((value - x_min) / (x_max - x_min)) * width
+
+        def sy(value: float) -> float:
+            return y + (max(0.0, min(value, 100.0)) / 100.0) * height
+
+        commands.append("0.50 w 0.85 0.85 0.85 RG")
+        for i in range(6):
+            gy = y + (height * i / 5)
+            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
+        commands.append("0 0 0 RG 0.75 w")
+        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
+        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
+        for i in range(6):
+            tick_y = y + (height * i / 5)
+            label = _pdf_escape(f"{i * 20}")
+            commands.append(f"BT /F1 8 Tf 1 0 0 1 {x - 24:.2f} {tick_y - 3:.2f} Tm ({label}) Tj ET")
+        for i in range(5):
+            value = x_min + ((x_max - x_min) * i / 4)
+            tick_x = x + (width * i / 4)
+            label = _pdf_escape(f"{value:.0f}")
+            commands.append(f"BT /F1 8 Tf 1 0 0 1 {tick_x - 12:.2f} {y - 18:.2f} Tm ({label}) Tj ET")
+        commands.append(f"BT /F2 10 Tf 1 0 0 1 {x + width / 2 - 56:.2f} {y + height + 18:.2f} Tm (Reliability Curve) Tj ET")
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(volume_unit(cfg))})) Tj ET")
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 42:.2f} {y + height / 2:.2f} Tm (Reliability %) Tj ET")
+        points = [(sx(tank), sy(reliability)) for tank, reliability in values]
+        if len(points) >= 2:
+            path = [f"{points[0][0]:.2f} {points[0][1]:.2f} m"]
+            path.extend(f"{px:.2f} {py:.2f} l" for px, py in points[1:])
+            commands.append("0.04 0.36 0.67 RG 1.50 w " + " ".join(path) + " S")
+        commands.append("0.04 0.36 0.67 rg")
+        for px, py in points:
+            commands.append(f"{px - 1.5:.2f} {py - 1.5:.2f} {3:.2f} {3:.2f} re f")
+        commands.append("0 0 0 rg 0 0 0 RG")
+
+    def _write_pdf(self, pdf_path: Path, pages: list[list[str]]) -> None:
+        objects: list[bytes] = [
+            b"<< /Type /Catalog /Pages 2 0 R >>",
+            b"",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+        ]
+        page_refs: list[str] = []
+        for page_commands in pages:
+            content = "\n".join(page_commands).encode("latin-1", errors="replace")
+            content_obj = len(objects) + 1
+            page_obj = len(objects) + 2
+            objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
+            objects.append(
+                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+                f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_obj} 0 R >>".encode("ascii")
+            )
+            page_refs.append(f"{page_obj} 0 R")
+        objects[1] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("ascii")
+
+        chunks = [b"%PDF-1.4\n"]
+        offsets = [0]
+        for index, obj in enumerate(objects, start=1):
+            offsets.append(sum(len(chunk) for chunk in chunks))
+            chunks.append(f"{index} 0 obj\n".encode("ascii") + obj + b"\nendobj\n")
+        xref_offset = sum(len(chunk) for chunk in chunks)
+        chunks.append(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
+        chunks.append(b"0000000000 65535 f \n")
+        for offset in offsets[1:]:
+            chunks.append(f"{offset:010d} 00000 n \n".encode("ascii"))
+        chunks.append(
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
+        )
+        pdf_path.write_bytes(b"".join(chunks))
+
     def _display_results_df(self) -> pd.DataFrame:
         cfg = self.config_model
         out = self.results_df.copy()
@@ -976,6 +1452,7 @@ class RainwaterTkApp(tk.Tk):
             f"Tank Water Over Time ({volume_unit(self.config_model)})",
             volume_unit(self.config_model),
             hover_labels,
+            show_points=self.show_tank_points_var.get(),
         )
 
     def _draw_line_chart(
@@ -986,6 +1463,7 @@ class RainwaterTkApp(tk.Tk):
         title: str,
         y_label: str,
         hover_labels: list[str] | None = None,
+        show_points: bool = True,
     ) -> None:
         canvas.delete("all")
         canvas.hover_points = []
@@ -1015,8 +1493,9 @@ class RainwaterTkApp(tk.Tk):
             canvas.hover_points.append((px, py, hover_label))
         if len(points) >= 4:
             canvas.create_line(*points, fill="#0b5cab", width=2)
-        for px, py, _hover_label in canvas.hover_points:
-            canvas.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#0b5cab", outline="")
+        if show_points:
+            for px, py, _hover_label in canvas.hover_points:
+                canvas.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#0b5cab", outline="")
         for i in range(5):
             y = pad_top + (plot_h * i / 4)
             value = y_max - ((y_max - y_min) * i / 4)
@@ -1105,6 +1584,52 @@ class SurfaceDialog(tk.Toplevel):
             area=max(0.0, area_to_internal(_float(self.area_var.get()), self.config_model)),
             runoff_coefficient=min(max(_float(self.runoff_var.get(), 0.0), 0.0), 1.0),
         )
+        self.destroy()
+
+
+class ReportDialog(tk.Toplevel):
+    def __init__(self, parent: RainwaterTkApp, defaults: dict[str, str]) -> None:
+        super().__init__(parent)
+        self.title("PDF Report")
+        self.resizable(True, False)
+        self.result: dict[str, str] | None = None
+        self.vars = {
+            "client_name": tk.StringVar(value=defaults["client_name"]),
+            "date": tk.StringVar(value=defaults["date"]),
+            "location": tk.StringVar(value=defaults["location"]),
+            "project_name": tk.StringVar(value=defaults["project_name"]),
+        }
+
+        body = ttk.Frame(self, padding=12)
+        body.grid(sticky="nsew")
+        body.columnconfigure(1, weight=1)
+
+        fields = [
+            ("client_name", "Client name"),
+            ("date", "Date"),
+            ("location", "Location"),
+            ("project_name", "Project name"),
+        ]
+        for row, (key, label) in enumerate(fields):
+            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3)
+            ttk.Entry(body, textvariable=self.vars[key], width=52).grid(row=row, column=1, sticky="ew", pady=3)
+
+        ttk.Label(body, text="End-uses of water").grid(row=4, column=0, sticky="nw", pady=3)
+        self.end_uses_text = tk.Text(body, width=52, height=4, wrap="word")
+        self.end_uses_text.grid(row=4, column=1, sticky="ew", pady=3)
+        self.end_uses_text.insert("1.0", defaults["end_uses"])
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
+        ttk.Button(buttons, text="Continue", command=self._save).grid(row=0, column=1)
+
+        self.transient(parent)
+        self.grab_set()
+
+    def _save(self) -> None:
+        self.result = {key: var.get().strip() for key, var in self.vars.items()}
+        self.result["end_uses"] = self.end_uses_text.get("1.0", "end").strip() or "Not specified"
         self.destroy()
 
 
