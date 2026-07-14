@@ -1,0 +1,42 @@
+site_name: RWH Calculator User Guide
+site_description: User documentation for the Rainwater Harvesting Calculator
+site_url: https://ianvg.github.io/rainwater-calculator-py/
+repo_url: https://github.com/ianvg/rainwater-calculator-py
+repo_name: ianvg/rainwater-calculator-py
+copyright: Copyright &copy; 2026 RWH Calculator contributors. Released under the 0BSD license.
+
+theme:
+  name: material
+  language: en
+  features:
+    - navigation.footer
+    - navigation.indexes
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+  palette:
+    primary: teal
+    accent: blue
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Projects: projects.md
+  - Rainfall data: rainfall-data.md
+  - Collection surfaces: collection-surfaces.md
+  - Water demand: water-demand.md
+  - Analysis and results: analysis.md
+  - Reports: reports.md
+  - Shortcuts: shortcuts.md
+  - Troubleshooting: troubleshooting.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+
+strict: true

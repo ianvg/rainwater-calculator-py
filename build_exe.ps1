@@ -21,12 +21,13 @@ if (-not (Test-Path $python)) {
 }
 
 Invoke-Checked $python @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Checked $python @("-m", "pip", "install", "-e", ".[desktop-build]")
+Invoke-Checked $python @("-m", "pip", "install", "-e", ".[desktop-build,docs]")
 
 if ($InstallBuildTools) {
     Invoke-Checked $python @("-m", "pip", "install", "pyinstaller")
 }
 
+Invoke-Checked $python @("-m", "mkdocs", "build", "--clean", "--strict")
 Invoke-Checked $python @("-m", "PyInstaller", "--clean", "--noconfirm", "RainwaterCalculator.spec")
 
 Write-Host ""

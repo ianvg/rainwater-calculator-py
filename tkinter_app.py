@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tkinter as tk
 import tempfile
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
@@ -37,6 +38,7 @@ from rainwater_app.units import (
 APP_TITLE = "Rainwater Harvesting Calculator"
 GRAPH_AUTO_STEP_COUNT = 40
 MAX_RECENT_PROJECTS = 8
+ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
 ABOUT_TEXT = """RWH Calculator
 
 Copyright (c) 2026 RWH Calculator contributors
@@ -168,6 +170,12 @@ def _app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def _help_index_path() -> Path | None:
+    bundled_root = Path(getattr(sys, "_MEIPASS", _app_dir()))
+    candidates = [bundled_root / "help" / "index.html", _app_dir() / "site" / "index.html"]
+    return next((path for path in candidates if path.is_file()), None)
 
 
 def _float(value: object, default: float = 0.0) -> float:
@@ -360,6 +368,9 @@ class RainwaterTkApp(tk.Tk):
         menubar.add_cascade(label="View", menu=view_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="User guide", command=self.open_user_guide)
+        help_menu.add_command(label="Online documentation", command=self.open_online_documentation)
+        help_menu.add_separator()
         help_menu.add_command(label="About RWH Calculator", command=self._show_about_dialog)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.config(menu=menubar)
@@ -373,6 +384,20 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-r>", self._shortcut_run_analysis)
         self.bind_all("<Control-w>", self._shortcut_close_project)
         self.bind_all("<Control-q>", self._shortcut_exit)
+
+    def open_user_guide(self) -> None:
+        index_path = _help_index_path()
+        if index_path is None:
+            messagebox.showinfo(
+                APP_TITLE,
+                "The local user guide has not been built yet.\n\n"
+                "Run '.\\.venv\\Scripts\\python.exe -m mkdocs build' or use Help > Online documentation.",
+            )
+            return
+        webbrowser.open(index_path.resolve().as_uri())
+
+    def open_online_documentation(self) -> None:
+        webbrowser.open(ONLINE_HELP_URL)
 
     def _shortcut_create_new_project(self, _event: tk.Event) -> str:
         self.new_project()

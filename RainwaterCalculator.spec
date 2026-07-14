@@ -4,7 +4,7 @@ a = Analysis(
     ["tkinter_app.py"],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[("site", "help")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

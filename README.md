@@ -89,6 +89,17 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+### Build the user documentation
+
+The end-user guide is written in Markdown under `docs/` and built with MkDocs Material:
+
+```powershell
+python -m pip install -e ".[docs]"
+python -m mkdocs serve
+```
+
+Use `python -m mkdocs build --strict` to generate the offline guide in `site/`. The Windows executable build performs this step automatically and bundles the guide for **Help > User guide**.
+
 ### 4. Run tests
 ```powershell
 python -m pytest

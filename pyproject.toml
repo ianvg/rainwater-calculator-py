@@ -23,6 +23,9 @@ dev = [
 desktop-build = [
   "pyinstaller>=6.0",
 ]
+docs = [
+  "mkdocs-material>=9.5",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
