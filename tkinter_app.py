@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import json
 import shutil
 import subprocess
 import sys
@@ -11,6 +12,8 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import pandas as pd
+from pypdf import PdfWriter
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from rainwater_app.acis import default_complete_calendar_range, fetch_daily_station_data, fetch_station_options
 from rainwater_app.defaults import default_project_config, default_surface_runoff
@@ -32,6 +35,7 @@ from rainwater_app.units import (
 
 APP_TITLE = "Rainwater Harvesting Calculator"
 GRAPH_AUTO_STEP_COUNT = 40
+MAX_RECENT_PROJECTS = 8
 ABOUT_TEXT = """RWH Calculator
 
 Copyright (c) 2026 RWH Calculator contributors
@@ -242,6 +246,8 @@ class RainwaterTkApp(tk.Tk):
 
         self.project_file_path = _app_dir() / "rainwater_projects.db"
         self.store = SQLiteStore(str(self.project_file_path))
+        self.recent_projects_path = _app_dir() / "recent_projects.json"
+        self.recent_project_paths = self._load_recent_project_paths()
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.curve_df = pd.DataFrame()
@@ -331,8 +337,11 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_command(label="Load project", accelerator="Ctrl+L", command=self.load_selected_project)
         file_menu.add_command(label="Open project from...", accelerator="Ctrl+O", command=self.open_project_from)
+        self.recent_menu = tk.Menu(file_menu, tearoff=False)
+        file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
         file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
         file_menu.add_separator()
+        file_menu.add_command(label="Close project", accelerator="Ctrl+W", command=self.close_project)
         file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
 
@@ -344,6 +353,7 @@ class RainwaterTkApp(tk.Tk):
         help_menu.add_command(label="About RWH Calculator", command=self._show_about_dialog)
         menubar.add_cascade(label="Help", menu=help_menu)
         self.config(menu=menubar)
+        self._refresh_recent_projects_menu()
 
         self.bind_all("<Control-n>", self._shortcut_create_new_project)
         self.bind_all("<Control-s>", self._shortcut_save_project)
@@ -352,6 +362,7 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-l>", self._shortcut_load_project)
         self.bind_all("<Control-o>", self._shortcut_open_project_from)
         self.bind_all("<Control-r>", self._shortcut_run_analysis)
+        self.bind_all("<Control-w>", self._shortcut_close_project)
         self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _shortcut_create_new_project(self, _event: tk.Event) -> str:
@@ -378,9 +389,54 @@ class RainwaterTkApp(tk.Tk):
         self.run_analysis()
         return "break"
 
+    def _shortcut_close_project(self, _event: tk.Event) -> str:
+        self.close_project()
+        return "break"
+
     def _shortcut_exit(self, _event: tk.Event) -> str:
         self.destroy()
         return "break"
+
+    def _load_recent_project_paths(self) -> list[str]:
+        try:
+            payload = json.loads(self.recent_projects_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return []
+        if not isinstance(payload, list):
+            return []
+        paths: list[str] = []
+        for item in payload:
+            if isinstance(item, str) and item.strip() and item not in paths:
+                paths.append(item)
+        return paths[:MAX_RECENT_PROJECTS]
+
+    def _save_recent_project_paths(self) -> None:
+        try:
+            self.recent_projects_path.write_text(json.dumps(self.recent_project_paths, indent=2), encoding="utf-8")
+        except OSError:
+            pass
+
+    def _add_recent_project_path(self, path: Path) -> None:
+        recent_path = str(path.expanduser().resolve(strict=False))
+        self.recent_project_paths = [
+            existing for existing in self.recent_project_paths if existing.casefold() != recent_path.casefold()
+        ]
+        self.recent_project_paths.insert(0, recent_path)
+        self.recent_project_paths = self.recent_project_paths[:MAX_RECENT_PROJECTS]
+        self._save_recent_project_paths()
+        self._refresh_recent_projects_menu()
+
+    def _refresh_recent_projects_menu(self) -> None:
+        self.recent_menu.delete(0, tk.END)
+        if not self.recent_project_paths:
+            self.recent_menu.add_command(label="No recent projects", state="disabled")
+            return
+        for index, path_text in enumerate(self.recent_project_paths, start=1):
+            path = Path(path_text)
+            label = f"{index}. {path.name} ({path.parent})"
+            self.recent_menu.add_command(label=label, command=lambda value=path_text: self.open_recent_project(value))
+        self.recent_menu.add_separator()
+        self.recent_menu.add_command(label="Clear recent projects", command=self.clear_recent_projects)
 
     def _show_about_dialog(self) -> None:
         dialog = tk.Toplevel(self)
@@ -753,6 +809,24 @@ class RainwaterTkApp(tk.Tk):
         self._populate_from_model()
         self.status_var.set("Started a new project")
 
+    def close_project(self) -> None:
+        self.config_model = default_project_config()
+        self.project_name_var.set("")
+        self.saved_project_var.set("")
+        self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+        self.rainfall_source_label = None
+        self.config_model.rainfall_source_label = None
+        self.results_df = pd.DataFrame()
+        self.curve_df = pd.DataFrame()
+        self.rainfall_summary_var.set("No rainfall file loaded")
+        self.reliability_var.set("Reliability: --")
+        self.analysis_progress_var.set(0)
+        self._clear_results()
+        self._populate_from_model()
+        self.project_name_var.set("")
+        self.saved_project_var.set("")
+        self.status_var.set("Closed project")
+
     def load_selected_project(self) -> None:
         name = self.saved_project_var.get()
         if not name:
@@ -763,6 +837,7 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self._populate_from_model()
+            self._add_recent_project_path(self.project_file_path)
             if not self.results_df.empty and not self.curve_df.empty:
                 reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
                 self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
@@ -783,11 +858,29 @@ class RainwaterTkApp(tk.Tk):
         )
         if not path:
             return
+        self._open_project_file(Path(path))
 
+    def open_recent_project(self, path_text: str) -> None:
+        self._open_project_file(Path(path_text))
+
+    def clear_recent_projects(self) -> None:
+        self.recent_project_paths = []
+        self._save_recent_project_paths()
+        self._refresh_recent_projects_menu()
+        self.status_var.set("Cleared recent projects")
+
+    def _open_project_file(self, selected_path: Path) -> None:
         previous_path = self.project_file_path
         previous_store = self.store
         try:
-            selected_path = Path(path)
+            if not selected_path.exists():
+                messagebox.showinfo(APP_TITLE, "That project file no longer exists.")
+                self.recent_project_paths = [
+                    existing for existing in self.recent_project_paths if existing.casefold() != str(selected_path).casefold()
+                ]
+                self._save_recent_project_paths()
+                self._refresh_recent_projects_menu()
+                return
             selected_store = SQLiteStore(str(selected_path))
             projects = selected_store.list_projects()
             if not projects:
@@ -799,6 +892,7 @@ class RainwaterTkApp(tk.Tk):
             self.saved_project_var.set(projects[0])
             self._load_project_list()
             self.load_selected_project()
+            self._add_recent_project_path(self.project_file_path)
             self.status_var.set(f"Opened project '{self.config_model.name}' from {self.project_file_path}")
         except Exception as exc:  # noqa: BLE001
             self.project_file_path = previous_path
@@ -845,6 +939,7 @@ class RainwaterTkApp(tk.Tk):
             self.store.save_project(self.config_model, self.rainfall_df, self.curve_df, self.results_df)
             self._load_project_list()
             self.saved_project_var.set(self.config_model.name)
+            self._add_recent_project_path(self.project_file_path)
             self.status_var.set(f"Saved project '{self.config_model.name}' to {self.project_file_path}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not save project:\n{exc}")
@@ -1277,7 +1372,7 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
         heading("Reliability Curve")
         self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250)
 
-        self._write_pdf(pdf_path, pages)
+        self._write_pdf_with_pypdf(pdf_path, pages)
 
     def _draw_pdf_reliability_curve(self, commands: list[str], x: float, y: float, width: float, height: float) -> None:
         cfg = self.config_model
@@ -1325,40 +1420,46 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
             commands.append(f"{px - 1.5:.2f} {py - 1.5:.2f} {3:.2f} {3:.2f} re f")
         commands.append("0 0 0 rg 0 0 0 RG")
 
-    def _write_pdf(self, pdf_path: Path, pages: list[list[str]]) -> None:
-        objects: list[bytes] = [
-            b"<< /Type /Catalog /Pages 2 0 R >>",
-            b"",
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
-        ]
-        page_refs: list[str] = []
-        for page_commands in pages:
-            content = "\n".join(page_commands).encode("latin-1", errors="replace")
-            content_obj = len(objects) + 1
-            page_obj = len(objects) + 2
-            objects.append(b"<< /Length " + str(len(content)).encode("ascii") + b" >>\nstream\n" + content + b"\nendstream")
-            objects.append(
-                f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
-                f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {content_obj} 0 R >>".encode("ascii")
+    def _write_pdf_with_pypdf(self, pdf_path: Path, pages: list[list[str]]) -> None:
+        writer = PdfWriter()
+        regular_font = writer._add_object(
+            DictionaryObject(
+                {
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/Type1"),
+                    NameObject("/BaseFont"): NameObject("/Helvetica"),
+                }
             )
-            page_refs.append(f"{page_obj} 0 R")
-        objects[1] = f"<< /Type /Pages /Kids [{' '.join(page_refs)}] /Count {len(page_refs)} >>".encode("ascii")
-
-        chunks = [b"%PDF-1.4\n"]
-        offsets = [0]
-        for index, obj in enumerate(objects, start=1):
-            offsets.append(sum(len(chunk) for chunk in chunks))
-            chunks.append(f"{index} 0 obj\n".encode("ascii") + obj + b"\nendobj\n")
-        xref_offset = sum(len(chunk) for chunk in chunks)
-        chunks.append(f"xref\n0 {len(objects) + 1}\n".encode("ascii"))
-        chunks.append(b"0000000000 65535 f \n")
-        for offset in offsets[1:]:
-            chunks.append(f"{offset:010d} 00000 n \n".encode("ascii"))
-        chunks.append(
-            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{xref_offset}\n%%EOF\n".encode("ascii")
         )
-        pdf_path.write_bytes(b"".join(chunks))
+        bold_font = writer._add_object(
+            DictionaryObject(
+                {
+                    NameObject("/Type"): NameObject("/Font"),
+                    NameObject("/Subtype"): NameObject("/Type1"),
+                    NameObject("/BaseFont"): NameObject("/Helvetica-Bold"),
+                }
+            )
+        )
+        resources = DictionaryObject(
+            {
+                NameObject("/Font"): DictionaryObject(
+                    {
+                        NameObject("/F1"): regular_font,
+                        NameObject("/F2"): bold_font,
+                    }
+                )
+            }
+        )
+
+        for page_commands in pages:
+            page = writer.add_blank_page(width=612, height=792)
+            page[NameObject("/Resources")] = resources
+            content = DecodedStreamObject()
+            content.set_data("\n".join(page_commands).encode("latin-1", errors="replace"))
+            page[NameObject("/Contents")] = writer._add_object(content)
+
+        with pdf_path.open("wb") as handle:
+            writer.write(handle)
 
     def _display_results_df(self) -> pd.DataFrame:
         cfg = self.config_model
