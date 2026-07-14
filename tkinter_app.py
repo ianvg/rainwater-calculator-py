@@ -14,6 +14,7 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import pandas as pd
+import pycountry
 from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
@@ -36,6 +37,9 @@ from rainwater_app.units import (
 )
 
 APP_TITLE = "Rainwater Harvesting Calculator"
+DEFAULT_WINDOW_WIDTH = 1200
+DEFAULT_WINDOW_HEIGHT = 680
+MINIMUM_WINDOW_WIDTH = 1000
 GRAPH_AUTO_STEP_COUNT = 40
 MAX_RECENT_PROJECTS = 8
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
@@ -164,6 +168,13 @@ STATE_OPTIONS = [
     ("WY", "Wyoming"),
 ]
 STATE_LABELS = [f"{code} - {name}" for code, name in STATE_OPTIONS]
+STATE_PLACEHOLDER = "-- Select state --"
+COUNTRY_OPTIONS = sorted(
+    ((country.alpha_3, country.name) for country in pycountry.countries),
+    key=lambda item: item[1],
+)
+COUNTRY_LABELS = [f"{code} - {name}" for code, name in COUNTRY_OPTIONS]
+COUNTRY_LABEL_BY_CODE = {code: f"{code} - {name}" for code, name in COUNTRY_OPTIONS}
 
 
 def _app_dir() -> Path:
@@ -249,12 +260,15 @@ def _wrap_pdf_text(value: str, width: int) -> list[str]:
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        self.withdraw()
         self.title(APP_TITLE)
-        self.geometry("1200x760")
-        self.minsize(1000, 680)
+        self.active_project_name: str | None = None
+        self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
+        self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
         self.progress_style = ttk.Style(self)
         self.progress_style.configure("Analysis.Horizontal.TProgressbar")
         self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
+        self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
 
         self.project_file_path = _app_dir() / "rainwater_projects.db"
         self.store = SQLiteStore(str(self.project_file_path))
@@ -268,6 +282,7 @@ class RainwaterTkApp(tk.Tk):
 
         self.project_name_var = tk.StringVar(value=self.config_model.name)
         self.unit_var = tk.StringVar(value=self.config_model.unit_system)
+        self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
         self.saved_project_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
         self.simple_daily_var = tk.StringVar(value="0")
@@ -278,6 +293,7 @@ class RainwaterTkApp(tk.Tk):
         self.graph_end_var = tk.StringVar(value=str(self.config_model.graph_end_gal))
         self.graph_step_var = tk.StringVar(value=str(self.config_model.graph_step_gal))
         self.selected_tank_var = tk.StringVar(value=str(self.config_model.selected_tank_size_gal))
+        self.selected_tank_warning_var = tk.StringVar()
         self.initial_fill_var = tk.StringVar(value=str(self.config_model.tank_parameters.initial_fill_percent))
         self.reserve_var = tk.StringVar(value=str(self.config_model.tank_parameters.reliable_fill_percent))
         self.simple_daily_unit_var = tk.StringVar()
@@ -290,17 +306,55 @@ class RainwaterTkApp(tk.Tk):
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
         self.show_tank_points_var = tk.BooleanVar(value=True)
-        self.weather_state_var = tk.StringVar(value="NY - New York")
+        self.weather_state_var = tk.StringVar(value=STATE_PLACEHOLDER)
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
         self.rainfall_source_label: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
+        self.state_typeahead = ""
+        self.state_typeahead_after_id: str | None = None
+        self.state_popdown_key_command: str | None = None
+        self.country_typeahead = ""
+        self.country_typeahead_after_id: str | None = None
+        self.country_popdown_key_command: str | None = None
+        self.results_chart_redraw_after_id: str | None = None
 
         self._build_ui()
+        self.selected_tank_var.trace_add("write", self._update_selected_tank_warning)
+        self._update_selected_tank_warning()
         self._load_project_list()
         self._populate_from_model()
+        self._center_main_window()
+        self.deiconify()
+
+    def _center_main_window(self) -> None:
+        self.update_idletasks()
+        work_x, work_y, work_width, work_height = self._screen_work_area()
+        x = work_x + max((work_width - DEFAULT_WINDOW_WIDTH) // 2, 0)
+        y = work_y + max((work_height - DEFAULT_WINDOW_HEIGHT) // 2, 0)
+        self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}+{x}+{y}")
+
+    def _screen_work_area(self) -> tuple[int, int, int, int]:
+        if sys.platform == "win32":
+            try:
+                import ctypes
+
+                class Rect(ctypes.Structure):
+                    _fields_ = [
+                        ("left", ctypes.c_long),
+                        ("top", ctypes.c_long),
+                        ("right", ctypes.c_long),
+                        ("bottom", ctypes.c_long),
+                    ]
+
+                rect = Rect()
+                if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):
+                    return rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top
+            except (AttributeError, OSError):
+                pass
+        return self.winfo_vrootx(), self.winfo_vrooty(), self.winfo_vrootwidth(), self.winfo_vrootheight()
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
@@ -514,8 +568,19 @@ class RainwaterTkApp(tk.Tk):
         ttk.Entry(project_frame, textvariable=self.project_name_var).grid(row=0, column=1, sticky="ew", padx=(8, 20))
         ttk.Label(project_frame, text="Units").grid(row=0, column=2, sticky="w")
         unit_combo = ttk.Combobox(project_frame, textvariable=self.unit_var, values=["Imperial", "Metric"], width=12, state="readonly")
-        unit_combo.grid(row=0, column=3, padx=(8, 0))
+        unit_combo.grid(row=0, column=3, padx=(8, 20))
         unit_combo.bind("<<ComboboxSelected>>", lambda _event: self._change_units())
+        ttk.Label(project_frame, text="Country").grid(row=0, column=4, sticky="w")
+        self.country_combo = ttk.Combobox(
+            project_frame,
+            textvariable=self.country_var,
+            values=COUNTRY_LABELS,
+            width=30,
+            state="readonly",
+        )
+        self.country_combo.grid(row=0, column=5, padx=(8, 0))
+        self.country_combo.configure(postcommand=self._bind_country_combo_dropdown)
+        self.country_combo.bind("<KeyPress>", self._select_country_by_typed_prefix)
 
         surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection surfaces", padding=10)
         surfaces_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
@@ -530,6 +595,7 @@ class RainwaterTkApp(tk.Tk):
         self.surface_tree.column("runoff", width=90, anchor="e")
         self.surface_tree.grid(row=0, column=0, sticky="nsew")
         self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
+        self.surface_tree.bind("<Return>", self._edit_selected_surface_from_event)
         surface_buttons = ttk.Frame(surfaces_frame)
         surface_buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Button(surface_buttons, text="Add collection surface", command=self.add_surface).grid(row=0, column=0, padx=(0, 6))
@@ -553,6 +619,11 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 7, "Graph step", self.graph_step_var, self.tank_size_unit_var)
         ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(row=7, column=3, sticky="w", padx=(8, 0), pady=2)
         self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
+        ttk.Label(
+            settings_frame,
+            textvariable=self.selected_tank_warning_var,
+            style="Invalid.TLabel",
+        ).grid(row=8, column=3, sticky="w", padx=(8, 0), pady=2)
         self._labeled_entry(settings_frame, 9, "Initial fill", self.initial_fill_var, self.percent_unit_var)
         self._labeled_entry(settings_frame, 10, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
 
@@ -569,7 +640,12 @@ class RainwaterTkApp(tk.Tk):
         weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         weather_frame.columnconfigure(1, weight=1)
         ttk.Label(weather_frame, text="State").grid(row=0, column=0, sticky="w", pady=2)
-        self.state_combo = ttk.Combobox(weather_frame, textvariable=self.weather_state_var, values=STATE_LABELS, state="readonly")
+        self.state_combo = ttk.Combobox(
+            weather_frame,
+            textvariable=self.weather_state_var,
+            values=[STATE_PLACEHOLDER, *STATE_LABELS],
+            state="readonly",
+        )
         self.state_combo.configure(postcommand=self._bind_state_combo_dropdown)
         self.state_combo.grid(row=0, column=1, sticky="ew", pady=2)
         self.state_combo.bind("<KeyPress>", self._select_state_by_first_letter)
@@ -602,6 +678,7 @@ class RainwaterTkApp(tk.Tk):
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
         self.results_tab.columnconfigure(1, weight=1)
+        self.results_tab.columnconfigure(2, weight=1)
         self.results_tab.rowconfigure(1, weight=1)
         self.results_tab.rowconfigure(2, weight=1)
 
@@ -611,11 +688,22 @@ class RainwaterTkApp(tk.Tk):
             text="Show tank chart points",
             variable=self.show_tank_points_var,
             command=self._draw_tank_chart,
-        ).grid(row=0, column=1, sticky="e")
+        ).grid(row=0, column=1, columnspan=2, sticky="e")
         self.curve_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
         self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
         self.tank_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
-        self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=(5, 0))
+        self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=5)
+        self.histogram_canvas = tk.Canvas(
+            self.results_tab,
+            height=230,
+            bg="white",
+            highlightthickness=1,
+            highlightbackground="#b7b7b7",
+        )
+        self.histogram_canvas.grid(row=1, column=2, sticky="nsew", pady=(8, 8), padx=(5, 0))
+        self.curve_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
+        self.tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
+        self.histogram_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
         columns = ("date", "precip", "collected", "demand", "unmet", "tank")
         self.results_tree = ttk.Treeview(self.results_tab, columns=columns, show="headings", height=12)
@@ -630,11 +718,11 @@ class RainwaterTkApp(tk.Tk):
         for col, heading in headings.items():
             self.results_tree.heading(col, text=heading)
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
-        self.results_tree.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        self.results_tree.grid(row=2, column=0, columnspan=3, sticky="nsew")
         results_scroll_y = ttk.Scrollbar(self.results_tab, orient="vertical", command=self.results_tree.yview)
-        results_scroll_y.grid(row=2, column=2, sticky="ns")
+        results_scroll_y.grid(row=2, column=3, sticky="ns")
         results_scroll_x = ttk.Scrollbar(self.results_tab, orient="horizontal", command=self.results_tree.xview)
-        results_scroll_x.grid(row=3, column=0, columnspan=2, sticky="ew")
+        results_scroll_x.grid(row=3, column=0, columnspan=3, sticky="ew")
         self.results_tree.configure(yscrollcommand=results_scroll_y.set, xscrollcommand=results_scroll_x.set)
 
     def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
@@ -643,23 +731,125 @@ class RainwaterTkApp(tk.Tk):
         if unit_var is not None:
             ttk.Label(parent, textvariable=unit_var).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=2)
 
+    def _update_selected_tank_warning(self, *_args: object) -> None:
+        value = self.selected_tank_var.get().strip()
+        try:
+            show_warning = bool(value) and float(value) <= 0
+        except ValueError:
+            show_warning = False
+        self.selected_tank_warning_var.set("!" if show_warning else "")
+
     def _select_state_by_first_letter(self, event: tk.Event) -> str | None:
         return self._select_state_by_char(str(event.char))
 
-    def _select_state_by_char(self, char: str, listbox: tk.Listbox | None = None) -> str | None:
-        key = char.upper()
+    def _select_state_by_char(self, char: str, listbox: tk.Listbox | str | None = None) -> str | None:
+        key = char.casefold()
         if len(key) != 1 or not key.isalpha():
             return None
-        for index, label in enumerate(STATE_LABELS):
-            if label.startswith(key):
-                self.state_combo.current(index)
+
+        if self.state_typeahead_after_id is not None:
+            self.after_cancel(self.state_typeahead_after_id)
+
+        self.state_typeahead += key
+        if not self._select_state_by_prefix(self.state_typeahead, listbox):
+            self.state_typeahead = key
+            self._select_state_by_prefix(self.state_typeahead, listbox)
+
+        self.state_typeahead_after_id = self.after(1000, self._reset_state_typeahead)
+        return "break"
+
+    def _select_state_by_prefix(self, prefix: str, listbox: tk.Listbox | str | None = None) -> bool:
+        for index, (code, name) in enumerate(STATE_OPTIONS):
+            if code.casefold().startswith(prefix) or name.casefold().startswith(prefix):
+                combo_index = index + 1
+                self.state_combo.current(combo_index)
                 if listbox is not None:
-                    listbox.selection_clear(0, tk.END)
-                    listbox.selection_set(index)
-                    listbox.activate(index)
-                    listbox.see(index)
-                return "break"
-        return None
+                    if isinstance(listbox, str):
+                        self.tk.call(listbox, "selection", "clear", 0, "end")
+                        self.tk.call(listbox, "selection", "set", combo_index)
+                        self.tk.call(listbox, "activate", combo_index)
+                        self.tk.call(listbox, "see", combo_index)
+                    else:
+                        listbox.selection_clear(0, tk.END)
+                        listbox.selection_set(combo_index)
+                        listbox.activate(combo_index)
+                        listbox.see(combo_index)
+                return True
+        return False
+
+    def _reset_state_typeahead(self) -> None:
+        self.state_typeahead = ""
+        self.state_typeahead_after_id = None
+
+    def _select_country_by_typed_prefix(self, event: tk.Event) -> str | None:
+        return self._select_country_by_char(str(event.char))
+
+    def _select_country_by_char(self, char: str, listbox_path: str | None = None) -> str | None:
+        key = char.casefold()
+        if len(key) != 1 or not key.isalpha():
+            return None
+
+        if self.country_typeahead_after_id is not None:
+            self.after_cancel(self.country_typeahead_after_id)
+            self.country_typeahead_after_id = None
+        if len(self.country_typeahead) >= 3:
+            self.country_typeahead = ""
+
+        self.country_typeahead += key
+        if not self._select_country_by_prefix(self.country_typeahead, listbox_path):
+            self.country_typeahead = key
+            self._select_country_by_prefix(self.country_typeahead, listbox_path)
+
+        if len(self.country_typeahead) >= 3:
+            self._reset_country_typeahead()
+        else:
+            self.country_typeahead_after_id = self.after(1000, self._reset_country_typeahead)
+        return "break"
+
+    def _select_country_by_prefix(self, prefix: str, listbox_path: str | None = None) -> bool:
+        for index, (code, name) in enumerate(COUNTRY_OPTIONS):
+            if code.casefold().startswith(prefix) or name.casefold().startswith(prefix):
+                self.country_combo.current(index)
+                if listbox_path is not None:
+                    self.tk.call(listbox_path, "selection", "clear", 0, "end")
+                    self.tk.call(listbox_path, "selection", "set", index)
+                    self.tk.call(listbox_path, "activate", index)
+                    self.tk.call(listbox_path, "see", index)
+                return True
+        return False
+
+    def _reset_country_typeahead(self) -> None:
+        self.country_typeahead = ""
+        self.country_typeahead_after_id = None
+
+    def _select_country_in_expanded_dropdown(self, char: str) -> bool:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.country_combo}")
+            return self._select_country_by_char(char, f"{popdown}.f.l") == "break"
+        except tk.TclError:
+            return False
+
+    def _bind_country_combo_dropdown(self) -> None:
+        self.after_idle(self._bind_country_combo_listbox)
+
+    def _bind_country_combo_listbox(self) -> None:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.country_combo}")
+            listbox_path = f"{popdown}.f.l"
+            if self.country_popdown_key_command is None:
+                self.country_popdown_key_command = self.register(self._select_country_in_expanded_dropdown)
+            binding = f"if {{[{self.country_popdown_key_command} %K]}} {{break}}"
+            self.tk.call("bind", listbox_path, "<KeyPress>", binding)
+        except tk.TclError:
+            return
+
+    def _select_state_in_expanded_dropdown(self, char: str) -> bool:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.state_combo}")
+            listbox_path = f"{popdown}.f.l"
+            return self._select_state_by_char(char, listbox_path) == "break"
+        except tk.TclError:
+            return False
 
     def _bind_state_combo_dropdown(self) -> None:
         self.after_idle(self._bind_state_combo_listbox)
@@ -667,10 +857,13 @@ class RainwaterTkApp(tk.Tk):
     def _bind_state_combo_listbox(self) -> None:
         try:
             popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.state_combo}")
-            listbox = self.nametowidget(f"{popdown}.f.l")
-        except (KeyError, tk.TclError):
+            listbox_path = f"{popdown}.f.l"
+            if self.state_popdown_key_command is None:
+                self.state_popdown_key_command = self.register(self._select_state_in_expanded_dropdown)
+            binding = f"if {{[{self.state_popdown_key_command} %K]}} {{break}}"
+            self.tk.call("bind", listbox_path, "<KeyPress>", binding)
+        except tk.TclError:
             return
-        listbox.bind("<KeyPress>", lambda event: self._select_state_by_char(str(event.char), listbox))
 
     def _select_station_by_typed_prefix(self, event: tk.Event) -> str | None:
         return self._select_station_by_char(str(event.char))
@@ -731,6 +924,7 @@ class RainwaterTkApp(tk.Tk):
         cfg = self.config_model
         self.project_name_var.set(cfg.name)
         self.unit_var.set(cfg.unit_system)
+        self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         self.simple_daily_var.set(f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):.2f}")
         self.flushes_var.set(f"{cfg.demand.avg_flush_per_person:.2f}")
         self.toilet_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_toilet, cfg):.2f}")
@@ -755,6 +949,7 @@ class RainwaterTkApp(tk.Tk):
     def _apply_form_to_model(self) -> bool:
         cfg = self.config_model
         cfg.name = self.project_name_var.get().strip() or "Unnamed Project"
+        cfg.country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
         old_unit = cfg.unit_system
         cfg.unit_system = self.unit_var.get() or "Imperial"
         if old_unit != cfg.unit_system:
@@ -768,7 +963,7 @@ class RainwaterTkApp(tk.Tk):
         cfg.graph_start_gal = max(1, int(round(volume_to_internal(_float(self.graph_start_var.get(), 500), cfg))))
         cfg.graph_end_gal = max(2, int(round(volume_to_internal(_float(self.graph_end_var.get(), 20000), cfg))))
         cfg.graph_step_gal = max(1, int(round(volume_to_internal(_float(self.graph_step_var.get(), 500), cfg))))
-        cfg.selected_tank_size_gal = max(1.0, volume_to_internal(_float(self.selected_tank_var.get(), 5000), cfg))
+        cfg.selected_tank_size_gal = max(0.0, volume_to_internal(_float(self.selected_tank_var.get(), 5000), cfg))
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.reliable_fill_percent = min(max(_float(self.reserve_var.get(), 25), 0), 100)
         return True
@@ -819,6 +1014,11 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.unit_system = self.unit_var.get()
         self._populate_from_model()
 
+    def _set_active_project(self, project_name: str | None) -> None:
+        self.active_project_name = project_name.strip() if project_name and project_name.strip() else None
+        title = APP_TITLE if self.active_project_name is None else f"{APP_TITLE} - {self.active_project_name}"
+        self.title(title)
+
     def auto_set_graph_step(self) -> None:
         self.config_model.unit_system = self.unit_var.get() or "Imperial"
         cfg = self.config_model
@@ -834,6 +1034,8 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set(f"Auto-set graph step to {step_display:.0f} {volume_unit(cfg)} for {GRAPH_AUTO_STEP_COUNT} graph points")
 
     def new_project(self) -> None:
+        self._set_active_project(None)
+        self._reset_weather_selection()
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.rainfall_source_label = None
@@ -846,6 +1048,8 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set("Started a new project")
 
     def close_project(self) -> None:
+        self._set_active_project(None)
+        self._reset_weather_selection()
         self.config_model = default_project_config()
         self.project_name_var.set("")
         self.saved_project_var.set("")
@@ -873,6 +1077,8 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self._populate_from_model()
+            self._reset_weather_selection()
+            self._set_active_project(self.config_model.name)
             self._add_recent_project_path(self.project_file_path)
             if not self.results_df.empty and not self.curve_df.empty:
                 reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
@@ -982,6 +1188,7 @@ class RainwaterTkApp(tk.Tk):
             self.store.save_project(self.config_model, self.rainfall_df, self.curve_df, self.results_df)
             self._load_project_list()
             self.saved_project_var.set(self.config_model.name)
+            self._set_active_project(self.config_model.name)
             self._add_recent_project_path(self.project_file_path)
             self.status_var.set(f"Saved project '{self.config_model.name}' to {self.project_file_path}")
         except Exception as exc:  # noqa: BLE001
@@ -1006,6 +1213,7 @@ class RainwaterTkApp(tk.Tk):
             self.results_df = pd.DataFrame()
             self.reliability_var.set("Reliability: --")
             self._clear_results()
+            self._reset_weather_selection()
             self._update_rainfall_summary()
             self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
@@ -1013,7 +1221,11 @@ class RainwaterTkApp(tk.Tk):
 
     def find_acis_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
-        state = _state_code(self.weather_state_var.get())
+        selected_state = self.weather_state_var.get()
+        if selected_state == STATE_PLACEHOLDER:
+            messagebox.showwarning(APP_TITLE, "Select a state before finding ACIS stations.")
+            return
+        state = _state_code(selected_state)
         query = self.weather_filter_var.get().strip().casefold()
         try:
             start_date, end_date = default_complete_calendar_range(years)
@@ -1032,6 +1244,18 @@ class RainwaterTkApp(tk.Tk):
             self.status_var.set(f"Found {len(stations)} ACIS station(s)")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not fetch ACIS stations:\n{exc}")
+
+    def _reset_weather_selection(self) -> None:
+        if self.state_typeahead_after_id is not None:
+            self.after_cancel(self.state_typeahead_after_id)
+        self._reset_state_typeahead()
+        self.weather_state_var.set(STATE_PLACEHOLDER)
+        self.weather_filter_var.set("")
+        self.station_var.set("")
+        self.station_options = []
+        if hasattr(self, "station_combo"):
+            self.station_combo["values"] = []
+        self._reset_station_typeahead()
 
     def import_acis_weather(self) -> None:
         selected = self.station_var.get()
@@ -1089,6 +1313,11 @@ class RainwaterTkApp(tk.Tk):
             self.edit_surface()
         return "break"
 
+    def _edit_selected_surface_from_event(self, _event: tk.Event) -> str:
+        if self.surface_tree.selection():
+            self.edit_surface()
+        return "break"
+
     def edit_demand_month(self) -> None:
         selected = self.demand_tree.selection()
         if not selected:
@@ -1117,6 +1346,12 @@ class RainwaterTkApp(tk.Tk):
         if cfg.graph_end_gal <= cfg.graph_start_gal:
             messagebox.showwarning(APP_TITLE, "Graph end tank size must be greater than graph start tank size.")
             return
+        if cfg.selected_tank_size_gal <= 0:
+            messagebox.showwarning(APP_TITLE, "Selected tank size must be greater than zero.")
+            return
+        if cfg.selected_tank_size_gal > cfg.graph_end_gal:
+            messagebox.showwarning(APP_TITLE, "Selected tank size cannot be greater than the graph end tank size.")
+            return
         try:
             tank_sizes = list(range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal))
             total_parts = 2
@@ -1142,8 +1377,7 @@ class RainwaterTkApp(tk.Tk):
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
             self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
             self._populate_results()
-            self._draw_curve()
-            self._draw_tank_chart()
+            self._draw_saved_analysis_charts()
             self.analysis_progress_var.set(100)
             self.status_var.set("Analysis complete")
         except Exception as exc:  # noqa: BLE001
@@ -1701,13 +1935,29 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self.results_tree.delete(*self.results_tree.get_children())
         self.curve_canvas.delete("all")
         self.tank_canvas.delete("all")
+        self.histogram_canvas.delete("all")
         self.curve_canvas.hover_points = []
         self.tank_canvas.hover_points = []
+        self.histogram_canvas.hover_points = []
 
     def _draw_saved_analysis_charts(self) -> None:
+        if not self.results_tab.winfo_ismapped():
+            return
         self.update_idletasks()
         self._draw_curve()
         self._draw_tank_chart()
+        self._draw_tank_level_histogram()
+
+    def _schedule_results_chart_redraw(self, _event: tk.Event | None = None) -> None:
+        if self.results_df.empty and self.curve_df.empty:
+            return
+        if self.results_chart_redraw_after_id is not None:
+            self.after_cancel(self.results_chart_redraw_after_id)
+        self.results_chart_redraw_after_id = self.after(100, self._redraw_results_charts_after_resize)
+
+    def _redraw_results_charts_after_resize(self) -> None:
+        self.results_chart_redraw_after_id = None
+        self._draw_saved_analysis_charts()
 
     def _draw_curve(self) -> None:
         if self.curve_df.empty:
@@ -1746,6 +1996,53 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             show_points=self.show_tank_points_var.get(),
         )
 
+    def _draw_tank_level_histogram(self) -> None:
+        canvas = self.histogram_canvas
+        canvas.delete("all")
+        canvas.hover_points = []
+        if self.results_df.empty:
+            return
+
+        bin_count = 6
+        unit = volume_unit(self.config_model)
+        levels = [volume_to_display(value, self.config_model) for value in self.results_df["WaterInTankGallons"]]
+        selected_capacity = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
+        upper = max(selected_capacity, max(levels, default=0.0), 1.0)
+        bin_width = upper / bin_count
+        counts = [0] * bin_count
+        for level in levels:
+            index = min(max(int(max(level, 0.0) / bin_width), 0), bin_count - 1)
+            counts[index] += 1
+
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 220)
+        pad_left, pad_right, pad_top, pad_bottom = 48, 14, 32, 48
+        plot_width = width - pad_left - pad_right
+        plot_height = height - pad_top - pad_bottom
+        max_count = max(counts) or 1
+        canvas.create_text(width / 2, 16, text=f"Tank Level Distribution ({unit})", font=("Segoe UI", 10, "bold"))
+
+        for tick in range(5):
+            y = pad_top + plot_height * tick / 4
+            value = max_count * (4 - tick) / 4
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
+            canvas.create_text(pad_left - 7, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 8))
+        canvas.create_line(pad_left, pad_top, pad_left, height - pad_bottom, fill="#555")
+        canvas.create_line(pad_left, height - pad_bottom, width - pad_right, height - pad_bottom, fill="#555")
+
+        slot_width = plot_width / bin_count
+        for index, count in enumerate(counts):
+            left = pad_left + index * slot_width + 3
+            right = pad_left + (index + 1) * slot_width - 3
+            top = height - pad_bottom - (count / max_count) * plot_height
+            bottom = height - pad_bottom
+            canvas.create_rectangle(left, top, right, bottom, fill="#2e8b57", outline="#246b49")
+            low = index * bin_width
+            high = (index + 1) * bin_width
+            canvas.create_text((left + right) / 2, bottom + 15, text=f"{low:.0f}-{high:.0f}", font=("Segoe UI", 7))
+            canvas.create_text((left + right) / 2, max(top - 9, pad_top + 7), text=str(count), font=("Segoe UI", 8))
+        canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
+
     def _draw_line_chart(
         self,
         canvas: tk.Canvas,
@@ -1758,7 +2055,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
     ) -> None:
         canvas.delete("all")
         canvas.hover_points = []
-        width = max(canvas.winfo_width(), 420)
+        width = max(canvas.winfo_width(), 300)
         height = max(canvas.winfo_height(), 220)
         pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, 42
         plot_w = width - pad_left - pad_right
@@ -1777,7 +2074,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             y_max = y_min + 1
         points: list[float] = []
         hover_labels = hover_labels or [f"X: {x:.2f}\nY: {y:.2f}" for x, y in zip(x_values, y_values)]
-        for x, y, hover_label in zip(x_values, y_values, hover_labels):
+        render_indices = self._chart_render_indices(y_values, max(int(plot_w * 2), 300))
+        for index in render_indices:
+            x = x_values[index]
+            y = y_values[index]
+            hover_label = hover_labels[index]
             px = pad_left + ((x - x_min) / (x_max - x_min)) * plot_w
             py = height - pad_bottom - ((y - y_min) / (y_max - y_min)) * plot_h
             points.extend([px, py])
@@ -1801,6 +2102,25 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         canvas.create_text(14, height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
         canvas.bind("<Motion>", self._show_chart_hover)
         canvas.bind("<Leave>", self._hide_chart_hover)
+
+    @staticmethod
+    def _chart_render_indices(y_values: list[float], max_points: int) -> list[int]:
+        point_count = len(y_values)
+        if point_count <= max_points:
+            return list(range(point_count))
+
+        bucket_count = max((max_points - 2) // 2, 1)
+        interior_count = point_count - 2
+        bucket_size = max((interior_count + bucket_count - 1) // bucket_count, 1)
+        indices = [0]
+        for start in range(1, point_count - 1, bucket_size):
+            stop = min(start + bucket_size, point_count - 1)
+            bucket = range(start, stop)
+            low = min(bucket, key=y_values.__getitem__)
+            high = max(bucket, key=y_values.__getitem__)
+            indices.extend(sorted({low, high}))
+        indices.append(point_count - 1)
+        return indices
 
     def _show_chart_hover(self, event: tk.Event) -> None:
         canvas = event.widget

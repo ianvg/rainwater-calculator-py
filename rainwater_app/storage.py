@@ -153,6 +153,7 @@ class SQLiteStore:
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
             unit_system=payload.get("unit_system", "Imperial"),
+            country_code=payload.get("country_code", "USA"),
             surfaces=surfaces,
             demand=demand,
             graph_start_gal=int(payload.get("graph_start_gal", 500)),

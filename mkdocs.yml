@@ -1,6 +1,7 @@
 site_name: RWH Calculator User Guide
 site_description: User documentation for the Rainwater Harvesting Calculator
 site_url: https://ianvg.github.io/rainwater-calculator-py/
+use_directory_urls: false
 repo_url: https://github.com/ianvg/rainwater-calculator-py
 repo_name: ianvg/rainwater-calculator-py
 copyright: Copyright &copy; 2026 RWH Calculator contributors. Released under the 0BSD license.
