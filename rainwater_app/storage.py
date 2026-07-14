@@ -154,6 +154,8 @@ class SQLiteStore:
             name=payload.get("name", "Unnamed Project"),
             unit_system=payload.get("unit_system", "Imperial"),
             country_code=payload.get("country_code", "USA"),
+            acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
+            canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,
             demand=demand,
             graph_start_gal=int(payload.get("graph_start_gal", 500)),

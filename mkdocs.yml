@@ -31,6 +31,7 @@ nav:
   - Reports: reports.md
   - Shortcuts: shortcuts.md
   - Troubleshooting: troubleshooting.md
+  - Roadmap: roadmap.md
 
 markdown_extensions:
   - admonition

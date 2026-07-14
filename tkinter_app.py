@@ -20,6 +20,7 @@ from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from rainwater_app.acis import default_complete_calendar_range, fetch_daily_station_data, fetch_station_options
 from rainwater_app.defaults import default_project_config, default_surface_runoff
+from rainwater_app.eccc import fetch_canadian_daily_station_data, fetch_canadian_station_options
 from rainwater_app.engine import reliability_curve, simulate_tank
 from rainwater_app.models import MONTH_KEYS, ProjectConfig, Surface
 from rainwater_app.rainfall import load_rainfall_csv
@@ -169,6 +170,28 @@ STATE_OPTIONS = [
 ]
 STATE_LABELS = [f"{code} - {name}" for code, name in STATE_OPTIONS]
 STATE_PLACEHOLDER = "-- Select state --"
+PROVINCE_OPTIONS = [
+    ("AB", "Alberta"),
+    ("BC", "British Columbia"),
+    ("MB", "Manitoba"),
+    ("NB", "New Brunswick"),
+    ("NL", "Newfoundland and Labrador"),
+    ("NS", "Nova Scotia"),
+    ("NT", "Northwest Territories"),
+    ("NU", "Nunavut"),
+    ("ON", "Ontario"),
+    ("PE", "Prince Edward Island"),
+    ("QC", "Quebec"),
+    ("SK", "Saskatchewan"),
+    ("YT", "Yukon"),
+]
+PROVINCE_LABELS = [f"{code} - {name}" for code, name in PROVINCE_OPTIONS]
+PROVINCE_PLACEHOLDER = "-- Select province / territory --"
+CANADIAN_PRECIPITATION_OPTIONS = {
+    "Total precipitation": "TOTAL_PRECIPITATION",
+    "Rain only": "TOTAL_RAIN",
+}
+CANADIAN_PRECIPITATION_LABELS = {value: label for label, value in CANADIAN_PRECIPITATION_OPTIONS.items()}
 COUNTRY_OPTIONS = sorted(
     ((country.alpha_3, country.name) for country in pycountry.countries),
     key=lambda item: item[1],
@@ -310,6 +333,7 @@ class RainwaterTkApp(tk.Tk):
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
+        self.canadian_precip_var = tk.StringVar(value="Total precipitation")
         self.rainfall_source_label: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
@@ -581,6 +605,7 @@ class RainwaterTkApp(tk.Tk):
         self.country_combo.grid(row=0, column=5, padx=(8, 0))
         self.country_combo.configure(postcommand=self._bind_country_combo_dropdown)
         self.country_combo.bind("<KeyPress>", self._select_country_by_typed_prefix)
+        self.country_combo.bind("<<ComboboxSelected>>", self._country_changed)
 
         surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection surfaces", padding=10)
         surfaces_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
@@ -636,12 +661,13 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
         ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
-        weather_frame = ttk.LabelFrame(self.import_tab, text="ACIS Weather Import", padding=10)
-        weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        weather_frame.columnconfigure(1, weight=1)
-        ttk.Label(weather_frame, text="State").grid(row=0, column=0, sticky="w", pady=2)
+        self.weather_frame = ttk.LabelFrame(self.import_tab, text="ACIS Weather Import", padding=10)
+        self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.weather_frame.columnconfigure(1, weight=1)
+        self.weather_location_label = ttk.Label(self.weather_frame, text="State")
+        self.weather_location_label.grid(row=0, column=0, sticky="w", pady=2)
         self.state_combo = ttk.Combobox(
-            weather_frame,
+            self.weather_frame,
             textvariable=self.weather_state_var,
             values=[STATE_PLACEHOLDER, *STATE_LABELS],
             state="readonly",
@@ -649,14 +675,29 @@ class RainwaterTkApp(tk.Tk):
         self.state_combo.configure(postcommand=self._bind_state_combo_dropdown)
         self.state_combo.grid(row=0, column=1, sticky="ew", pady=2)
         self.state_combo.bind("<KeyPress>", self._select_state_by_first_letter)
-        self._labeled_entry(weather_frame, 1, "Historical years", self.weather_years_var)
-        self._labeled_entry(weather_frame, 2, "Station filter", self.weather_filter_var)
-        ttk.Button(weather_frame, text="Find Stations", command=self.find_acis_stations).grid(row=3, column=0, sticky="w", pady=(8, 2))
-        self.station_combo = ttk.Combobox(weather_frame, textvariable=self.station_var, state="readonly")
+        self._labeled_entry(self.weather_frame, 1, "Historical years", self.weather_years_var)
+        self._labeled_entry(self.weather_frame, 2, "Station filter", self.weather_filter_var)
+        self.canadian_precip_label = ttk.Label(self.weather_frame, text="Precipitation basis")
+        self.canadian_precip_label.grid(row=3, column=0, sticky="w", pady=2)
+        self.canadian_precip_combo = ttk.Combobox(
+            self.weather_frame,
+            textvariable=self.canadian_precip_var,
+            values=list(CANADIAN_PRECIPITATION_OPTIONS),
+            state="readonly",
+        )
+        self.canadian_precip_combo.grid(row=3, column=1, sticky="ew", pady=2)
+        self.find_stations_button = ttk.Button(self.weather_frame, text="Find Stations", command=self.find_weather_stations)
+        self.find_stations_button.grid(row=4, column=0, sticky="w", pady=(8, 2))
+        self.station_combo = ttk.Combobox(self.weather_frame, textvariable=self.station_var, state="readonly")
         self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
-        self.station_combo.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
+        self.station_combo.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
         self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
-        ttk.Button(weather_frame, text="Import Selected Station", command=self.import_acis_weather).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.import_station_button = ttk.Button(
+            self.weather_frame,
+            text="Import Selected Station",
+            command=self.import_selected_weather,
+        )
+        self.import_station_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
     def _build_demand_tab(self) -> None:
         self.demand_tab.columnconfigure(0, weight=1)
@@ -759,7 +800,7 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _select_state_by_prefix(self, prefix: str, listbox: tk.Listbox | str | None = None) -> bool:
-        for index, (code, name) in enumerate(STATE_OPTIONS):
+        for index, (code, name) in enumerate(self._weather_location_options()):
             if code.casefold().startswith(prefix) or name.casefold().startswith(prefix):
                 combo_index = index + 1
                 self.state_combo.current(combo_index)
@@ -815,6 +856,7 @@ class RainwaterTkApp(tk.Tk):
                     self.tk.call(listbox_path, "selection", "set", index)
                     self.tk.call(listbox_path, "activate", index)
                     self.tk.call(listbox_path, "see", index)
+                self._update_weather_import_provider()
                 return True
         return False
 
@@ -925,6 +967,14 @@ class RainwaterTkApp(tk.Tk):
         self.project_name_var.set(cfg.name)
         self.unit_var.set(cfg.unit_system)
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
+        precipitation_field = (
+            cfg.canadian_precipitation_field if cfg.country_code == "CAN" else cfg.acis_precipitation_field
+        )
+        self.canadian_precip_var.set(
+            CANADIAN_PRECIPITATION_LABELS.get(precipitation_field, "Total precipitation")
+        )
+        if hasattr(self, "weather_frame"):
+            self._update_weather_import_provider()
         self.simple_daily_var.set(f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):.2f}")
         self.flushes_var.set(f"{cfg.demand.avg_flush_per_person:.2f}")
         self.toilet_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_toilet, cfg):.2f}")
@@ -950,6 +1000,11 @@ class RainwaterTkApp(tk.Tk):
         cfg = self.config_model
         cfg.name = self.project_name_var.get().strip() or "Unnamed Project"
         cfg.country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
+        precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(self.canadian_precip_var.get(), "TOTAL_PRECIPITATION")
+        if cfg.country_code == "CAN":
+            cfg.canadian_precipitation_field = precipitation_field
+        else:
+            cfg.acis_precipitation_field = precipitation_field
         old_unit = cfg.unit_system
         cfg.unit_system = self.unit_var.get() or "Imperial"
         if old_unit != cfg.unit_system:
@@ -1013,6 +1068,55 @@ class RainwaterTkApp(tk.Tk):
     def _change_units(self) -> None:
         self.config_model.unit_system = self.unit_var.get()
         self._populate_from_model()
+
+    def _country_changed(self, _event: tk.Event | None = None) -> None:
+        self.config_model.country_code = self._selected_country_code()
+        precipitation_field = (
+            self.config_model.canadian_precipitation_field
+            if self.config_model.country_code == "CAN"
+            else self.config_model.acis_precipitation_field
+        )
+        self.canadian_precip_var.set(
+            CANADIAN_PRECIPITATION_LABELS.get(precipitation_field, "Total precipitation")
+        )
+        self._update_weather_import_provider()
+
+    def _selected_country_code(self) -> str:
+        return self.country_var.get().split(" - ", 1)[0].strip() or "USA"
+
+    def _weather_location_options(self) -> list[tuple[str, str]]:
+        return PROVINCE_OPTIONS if self._selected_country_code() == "CAN" else STATE_OPTIONS
+
+    def _update_weather_import_provider(self) -> None:
+        if not hasattr(self, "weather_frame"):
+            return
+        country = self._selected_country_code()
+        self._reset_weather_selection()
+        if country == "USA":
+            self.weather_frame.configure(text="ACIS Weather Import")
+            self.weather_location_label.configure(text="State")
+            self.state_combo.configure(values=[STATE_PLACEHOLDER, *STATE_LABELS], state="readonly")
+            self.canadian_precip_label.grid()
+            self.canadian_precip_combo.grid()
+            enabled = True
+        elif country == "CAN":
+            self.weather_frame.configure(text="ECCC Canadian Climate Import")
+            self.weather_location_label.configure(text="Province / territory")
+            self.state_combo.configure(values=[PROVINCE_PLACEHOLDER, *PROVINCE_LABELS], state="readonly")
+            self.canadian_precip_label.grid()
+            self.canadian_precip_combo.grid()
+            enabled = True
+        else:
+            self.weather_frame.configure(text="Weather Import")
+            self.weather_location_label.configure(text="Region")
+            self.state_combo.configure(values=["-- Weather import unavailable --"], state="disabled")
+            self.weather_state_var.set("-- Weather import unavailable --")
+            self.canadian_precip_label.grid_remove()
+            self.canadian_precip_combo.grid_remove()
+            enabled = False
+        self.station_combo.configure(state="readonly" if enabled else "disabled")
+        self.find_stations_button.configure(state="normal" if enabled else "disabled")
+        self.import_station_button.configure(state="normal" if enabled else "disabled")
 
     def _set_active_project(self, project_name: str | None) -> None:
         self.active_project_name = project_name.strip() if project_name and project_name.strip() else None
@@ -1245,11 +1349,50 @@ class RainwaterTkApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not fetch ACIS stations:\n{exc}")
 
+    def find_weather_stations(self) -> None:
+        country = self._selected_country_code()
+        if country == "USA":
+            self.find_acis_stations()
+        elif country == "CAN":
+            self.find_eccc_stations()
+
+    def find_eccc_stations(self) -> None:
+        years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        selected_province = self.weather_state_var.get()
+        if selected_province == PROVINCE_PLACEHOLDER:
+            messagebox.showwarning(APP_TITLE, "Select a province or territory before finding ECCC stations.")
+            return
+        province = _state_code(selected_province)
+        query = self.weather_filter_var.get().strip().casefold()
+        try:
+            self.status_var.set("Finding ECCC climate stations...")
+            self.update_idletasks()
+            start_date, end_date = default_complete_calendar_range(years)
+            stations = fetch_canadian_station_options(province, start_date, end_date)
+            if query:
+                stations = [
+                    station
+                    for station in stations
+                    if query in station["name"].casefold() or query in station["sid"].casefold()
+                ]
+            self.station_options = stations
+            labels = [self._station_label(station) for station in stations]
+            self.station_combo["values"] = labels
+            self.station_var.set(labels[0] if labels else "")
+            self._reset_station_typeahead()
+            self.status_var.set(f"Found {len(stations)} ECCC climate station(s)")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not fetch ECCC climate stations:\n{exc}")
+
     def _reset_weather_selection(self) -> None:
         if self.state_typeahead_after_id is not None:
             self.after_cancel(self.state_typeahead_after_id)
         self._reset_state_typeahead()
-        self.weather_state_var.set(STATE_PLACEHOLDER)
+        country = self._selected_country_code()
+        if country == "CAN":
+            self.weather_state_var.set(PROVINCE_PLACEHOLDER)
+        elif country == "USA":
+            self.weather_state_var.set(STATE_PLACEHOLDER)
         self.weather_filter_var.set("")
         self.station_var.set("")
         self.station_options = []
@@ -1267,20 +1410,83 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Select an ACIS station first.")
             return
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        basis_label = self.canadian_precip_var.get()
+        precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
         try:
             start_date, end_date = default_complete_calendar_range(years)
-            weather_df = fetch_daily_station_data(station["sid"], start_date, end_date)
+            weather_df = fetch_daily_station_data(station["sid"], start_date, end_date, precipitation_field)
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
-            self.rainfall_source_label = f"{station['name']} ({station['sid']})"
+            self.rainfall_source_label = f"{station['name']} ({station['sid']}) via ACIS, {basis_label}"
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self.config_model.country_code = "USA"
+            self.config_model.acis_precipitation_field = precipitation_field
             self.curve_df = pd.DataFrame()
             self.results_df = pd.DataFrame()
             self.reliability_var.set("Reliability: --")
             self._clear_results()
             self._update_rainfall_summary()
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
+            if precipitation_field == "TOTAL_RAIN":
+                excluded_days = int(weather_df.attrs.get("rain_only_excluded_days", 0))
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "ACIS does not provide a native rain-only field. "
+                    f"Precipitation was excluded on {excluded_days:,} day(s) with reported snowfall. "
+                    "Mixed rain and snow days may therefore undercount rain.",
+                )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not import ACIS weather:\n{exc}")
+
+    def import_selected_weather(self) -> None:
+        country = self._selected_country_code()
+        if country == "USA":
+            self.import_acis_weather()
+        elif country == "CAN":
+            self.import_eccc_weather()
+
+    def import_eccc_weather(self) -> None:
+        selected = self.station_var.get()
+        if not selected:
+            messagebox.showinfo(APP_TITLE, "Find and select an ECCC climate station first.")
+            return
+        station = next((item for item in self.station_options if self._station_label(item) == selected), None)
+        if station is None:
+            messagebox.showinfo(APP_TITLE, "Select an ECCC climate station first.")
+            return
+
+        years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        basis_label = self.canadian_precip_var.get()
+        precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
+        try:
+            self.status_var.set(f"Importing ECCC data for {station['name']}...")
+            self.update_idletasks()
+            start_date, end_date = default_complete_calendar_range(years)
+            weather_df = fetch_canadian_daily_station_data(
+                station["sid"],
+                start_date,
+                end_date,
+                precipitation_field,
+            )
+            missing_days = int(weather_df.attrs.get("missing_days", 0))
+            self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
+            self.rainfall_source_label = f"{station['name']} ({station['sid']}) via ECCC, {basis_label}"
+            self.config_model.rainfall_source_label = self.rainfall_source_label
+            self.config_model.country_code = "CAN"
+            self.config_model.canadian_precipitation_field = precipitation_field
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
+            self._update_rainfall_summary()
+            self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
+            if missing_days:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"The ECCC record contained {missing_days:,} missing day(s). "
+                    "They were treated as zero precipitation so daily demand remains continuous.",
+                )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not import ECCC climate data:\n{exc}")
 
     def edit_surface(self) -> None:
         selected = self.surface_tree.selection()

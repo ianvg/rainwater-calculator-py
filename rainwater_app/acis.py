@@ -60,8 +60,11 @@ def fetch_daily_station_data(
     station_id: str,
     start_date: date,
     end_date: date,
+    precipitation_basis: str = "TOTAL_PRECIPITATION",
     cache_dir: Path = DEFAULT_CACHE_DIR,
 ) -> pd.DataFrame:
+    if precipitation_basis not in {"TOTAL_PRECIPITATION", "TOTAL_RAIN"}:
+        raise ValueError(f"Unsupported ACIS precipitation basis: {precipitation_basis}")
     cache_dir.mkdir(parents=True, exist_ok=True)
     cache_file = cache_dir / f"acis_{_safe_cache_part(station_id)}_{start_date:%Y%m%d}_{end_date:%Y%m%d}.json"
 
@@ -83,22 +86,30 @@ def fetch_daily_station_data(
         cache_file.write_text(json.dumps(response, indent=2), encoding="utf-8")
 
     rows = []
+    excluded_snowfall_days = 0
     for row in response.get("data", []):
         if len(row) < 5:
             continue
+        precipitation = _parse_acis_number(row[3])
+        snowfall = _parse_acis_number(row[4])
+        if precipitation_basis == "TOTAL_RAIN" and snowfall > 0:
+            precipitation = 0.0
+            excluded_snowfall_days += 1
         rows.append(
             {
                 "Date": pd.to_datetime(row[0], errors="coerce"),
                 "MaxTemperature": _parse_acis_number(row[1]),
                 "MinTemperature": _parse_acis_number(row[2]),
-                "Precipitation": _parse_acis_number(row[3]),
-                "Snowfall": _parse_acis_number(row[4]),
+                "Precipitation": precipitation,
+                "Snowfall": snowfall,
             }
         )
 
     data = pd.DataFrame(rows).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
     if data.empty:
         raise ValueError("ACIS returned no valid daily weather rows for this station and date range.")
+
+    data.attrs["rain_only_excluded_days"] = excluded_snowfall_days
 
     return data
 

@@ -43,6 +43,8 @@ class ProjectConfig:
     name: str
     unit_system: str = "Imperial"
     country_code: str = "USA"
+    acis_precipitation_field: str = "TOTAL_PRECIPITATION"
+    canadian_precipitation_field: str = "TOTAL_PRECIPITATION"
     surfaces: List[Surface] = field(default_factory=list)
     demand: DemandProfile = field(default_factory=DemandProfile)
     graph_start_gal: int = 500
