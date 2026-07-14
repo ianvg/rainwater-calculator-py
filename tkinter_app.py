@@ -339,10 +339,11 @@ class RainwaterTkApp(tk.Tk):
         self.demand_tree = ttk.Treeview(self.demand_tab, columns=columns, show="headings", height=14)
         self.demand_tree.heading("month", text="Month")
         self.demand_tree.column("month", width=80, anchor="w")
-        for field, label in DEMAND_FIELDS:
-            self.demand_tree.heading(field, text=label)
+        for field, _label in DEMAND_FIELDS:
             self.demand_tree.column(field, width=105, anchor="e")
+        self._update_demand_headings()
         self.demand_tree.grid(row=0, column=0, sticky="nsew")
+        self.demand_tree.bind("<Double-1>", self._edit_demand_month_from_event)
         scroll_x = ttk.Scrollbar(self.demand_tab, orient="horizontal", command=self.demand_tree.xview)
         scroll_x.grid(row=1, column=0, sticky="ew")
         self.demand_tree.configure(xscrollcommand=scroll_x.set)
@@ -352,6 +353,7 @@ class RainwaterTkApp(tk.Tk):
         self.results_tab.columnconfigure(0, weight=1)
         self.results_tab.columnconfigure(1, weight=1)
         self.results_tab.rowconfigure(1, weight=1)
+        self.results_tab.rowconfigure(2, weight=1)
 
         ttk.Label(self.results_tab, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, columnspan=2, sticky="w")
         self.curve_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
@@ -373,6 +375,11 @@ class RainwaterTkApp(tk.Tk):
             self.results_tree.heading(col, text=heading)
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
         self.results_tree.grid(row=2, column=0, columnspan=2, sticky="nsew")
+        results_scroll_y = ttk.Scrollbar(self.results_tab, orient="vertical", command=self.results_tree.yview)
+        results_scroll_y.grid(row=2, column=2, sticky="ns")
+        results_scroll_x = ttk.Scrollbar(self.results_tab, orient="horizontal", command=self.results_tree.xview)
+        results_scroll_x.grid(row=3, column=0, columnspan=2, sticky="ew")
+        self.results_tree.configure(yscrollcommand=results_scroll_y.set, xscrollcommand=results_scroll_x.set)
 
     def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -520,6 +527,7 @@ class RainwaterTkApp(tk.Tk):
             )
 
     def _populate_demand(self) -> None:
+        self._update_demand_headings()
         self.demand_tree.delete(*self.demand_tree.get_children())
         monthly_volume_fields = {field for field, _label in DEMAND_FIELDS if field not in {"male_occupancy", "female_occupancy"}}
         for month in MONTH_KEYS:
@@ -530,6 +538,15 @@ class RainwaterTkApp(tk.Tk):
                     value = volume_to_display(value, self.config_model)
                 row.append(f"{value:.2f}")
             self.demand_tree.insert("", "end", iid=month, values=row)
+
+    def _update_demand_headings(self) -> None:
+        unit = volume_unit(self.config_model)
+        for field, label in DEMAND_FIELDS:
+            if field in {"male_occupancy", "female_occupancy"}:
+                heading = f"{label} (people/day)"
+            else:
+                heading = f"{label} ({unit}/month)"
+            self.demand_tree.heading(field, text=heading)
 
     def _update_rainfall_summary(self) -> None:
         if self.rainfall_df.empty:
@@ -722,6 +739,14 @@ class RainwaterTkApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.saved:
             self._populate_demand()
+
+    def _edit_demand_month_from_event(self, event: tk.Event) -> str:
+        row_id = self.demand_tree.identify_row(event.y)
+        if row_id:
+            self.demand_tree.selection_set(row_id)
+            self.demand_tree.focus(row_id)
+            self.edit_demand_month()
+        return "break"
 
     def run_analysis(self) -> None:
         self._apply_form_to_model()
@@ -1017,17 +1042,24 @@ class DemandDialog(tk.Toplevel):
         self.vars: dict[str, tk.StringVar] = {}
         body = ttk.Frame(self, padding=12)
         body.grid(sticky="nsew")
+        ttk.Label(body, text="Field").grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(body, text="Value").grid(row=0, column=1, sticky="w", pady=(0, 6))
+        ttk.Label(body, text="Unit").grid(row=0, column=2, sticky="w", pady=(0, 6), padx=(8, 0))
         for row, (field, label) in enumerate(DEMAND_FIELDS):
             value = getattr(config.demand, field)[month]
-            if field not in {"male_occupancy", "female_occupancy"}:
-                label = f"{label} ({volume_unit(config)}/month)"
+            if field in {"male_occupancy", "female_occupancy"}:
+                unit = "people/day"
+            else:
+                unit = f"{volume_unit(config)}/month"
                 value = volume_to_display(value, config)
             var = tk.StringVar(value=f"{value:.2f}")
             self.vars[field] = var
-            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=2)
-            ttk.Entry(body, textvariable=var, width=18).grid(row=row, column=1, sticky="w", pady=2)
+            grid_row = row + 1
+            ttk.Label(body, text=label).grid(row=grid_row, column=0, sticky="w", pady=2)
+            ttk.Entry(body, textvariable=var, width=18).grid(row=grid_row, column=1, sticky="w", pady=2)
+            ttk.Label(body, text=unit).grid(row=grid_row, column=2, sticky="w", padx=(8, 0), pady=2)
         buttons = ttk.Frame(body)
-        buttons.grid(row=len(DEMAND_FIELDS), column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=len(DEMAND_FIELDS) + 1, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.transient(parent)
