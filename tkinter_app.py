@@ -113,14 +113,14 @@ class RainwaterTkApp(tk.Tk):
 
         toolbar = ttk.Frame(self, padding=(10, 8))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(3, weight=1)
+        toolbar.columnconfigure(4, weight=1)
 
         ttk.Label(toolbar, text="Project").grid(row=0, column=0, sticky="w")
         self.project_combo = ttk.Combobox(toolbar, textvariable=self.saved_project_var, width=24, state="readonly")
         self.project_combo.grid(row=0, column=1, padx=(6, 8), sticky="w")
         ttk.Button(toolbar, text="New", command=self.new_project).grid(row=0, column=2, padx=2)
-        ttk.Button(toolbar, text="Load", command=self.load_selected_project).grid(row=0, column=3, sticky="w", padx=2)
-        ttk.Button(toolbar, text="Save", command=self.save_project).grid(row=0, column=4, padx=2)
+        ttk.Button(toolbar, text="Save", command=self.save_project).grid(row=0, column=3, padx=2)
+        ttk.Button(toolbar, text="Load", command=self.load_selected_project).grid(row=0, column=4, sticky="w", padx=2)
         ttk.Button(toolbar, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=5, padx=(18, 2))
         ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=6, padx=2)
         ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=7, padx=2)

@@ -207,7 +207,7 @@ def _sidebar() -> None:
     projects = store.list_projects()
     selected = st.sidebar.selectbox("Saved projects", options=["(none)"] + projects)
 
-    col_new, col_load, col_save = st.sidebar.columns(3)
+    col_new, col_save, col_load = st.sidebar.columns(3)
     if col_new.button("New"):
         st.session_state.config = default_project_config()
         st.session_state.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
