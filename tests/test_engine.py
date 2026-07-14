@@ -131,6 +131,12 @@ def test_project_persists_rainfall_source_label(tmp_path) -> None:
     store = SQLiteStore(str(tmp_path / "projects.db"))
     cfg = default_project_config()
     cfg.name = "ACIS Project"
+    cfg.street_address = "1121 Brittain Estates Drive"
+    cfg.city = "Kingsport"
+    cfg.state_or_province = "Tennessee"
+    cfg.postal_code = "37664"
+    cfg.latitude = 36.548921
+    cfg.longitude = -82.456789
     cfg.rainfall_source_label = "CENTRAL PARK NY (123456)"
     rainfall = pd.DataFrame(
         {
@@ -144,6 +150,12 @@ def test_project_persists_rainfall_source_label(tmp_path) -> None:
     loaded_cfg, loaded_rainfall = store.load_project("ACIS Project")
 
     assert loaded_cfg.rainfall_source_label == "CENTRAL PARK NY (123456)"
+    assert loaded_cfg.street_address == "1121 Brittain Estates Drive"
+    assert loaded_cfg.city == "Kingsport"
+    assert loaded_cfg.state_or_province == "Tennessee"
+    assert loaded_cfg.postal_code == "37664"
+    assert loaded_cfg.latitude == 36.548921
+    assert loaded_cfg.longitude == -82.456789
     assert len(loaded_rainfall) == 2
 
 

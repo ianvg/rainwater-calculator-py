@@ -37,3 +37,19 @@ Provider results should be normalized to include:
 The import screen and saved project should retain this provenance. Results and reports should identify whether rainfall is observed station data, interpolated data, or gridded reanalysis data.
 
 Before enabling a provider in a distributed or hosted production release, verify its current API terms, data licensing, attribution requirements, rate limits, and commercial-use conditions.
+
+## Address lookup and geocoding
+
+The project settings currently retain structured street, locality, administrative-region, postcode, and ISO country components without transmitting them to an external service. A future explicit **Find address** action could convert those components to coordinates for nearby weather-station searches. Country-specific rendering could use ISO 19160-4 / UPU S42 templates rather than assuming one universal address order.
+
+Possible OpenStreetMap-based approaches include:
+
+- Nominatim forward geocoding for free-form or structured address searches
+- Nominatim reverse geocoding from coordinates to an address
+- a self-hosted Nominatim instance for controlled production use
+- an OSM-based hosted provider that supports autocomplete, service guarantees, and application-specific API keys
+- Photon or Pelias when richer autocomplete or multi-source indexing is required
+
+The public OpenStreetMap Foundation Nominatim endpoint is suitable only for moderate, user-triggered searches under its usage policy. It must not be used for client-side autocomplete, is limited to one request per second, requires an identifying user agent and attribution, and should be replaceable without an application update. Addresses can be sensitive, so lookup must be initiated explicitly and the UI should disclose the selected provider before transmitting an address.
+
+Other production options include commercial geocoding and address-validation APIs. Provider selection should account for geographic coverage, address validation versus coordinate lookup, autocomplete support, result-storage rights, privacy, pricing, offline requirements, and whether coordinates may be saved permanently in project files. A Python adapter can use direct HTTP requests or a provider-neutral client such as GeoPy, but the underlying service's terms still govern usage.

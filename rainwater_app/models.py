@@ -41,6 +41,12 @@ class TankParameters:
 @dataclass
 class ProjectConfig:
     name: str
+    street_address: str = ""
+    city: str = ""
+    state_or_province: str = ""
+    postal_code: str = ""
+    latitude: float | None = None
+    longitude: float | None = None
     unit_system: str = "Imperial"
     country_code: str = "USA"
     acis_precipitation_field: str = "TOTAL_PRECIPITATION"
@@ -52,6 +58,7 @@ class ProjectConfig:
     graph_step_gal: int = 500
     selected_tank_size_gal: float = 5000.0
     rainfall_source_label: str | None = None
+    analysis_input_signature: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)
 
     def to_dict(self) -> Dict:

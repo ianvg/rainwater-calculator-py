@@ -3,15 +3,21 @@ from __future__ import annotations
 import csv
 import datetime as dt
 import html
+import http.server
 import json
+import os
+import queue
 import shutil
 import subprocess
 import sys
 import tkinter as tk
 import tempfile
+import threading
 import webbrowser
+from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
+from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 import pycountry
@@ -19,9 +25,11 @@ from pypdf import PdfWriter
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from rainwater_app.acis import default_complete_calendar_range, fetch_daily_station_data, fetch_station_options
+from rainwater_app.analysis_state import analysis_input_signature
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.eccc import fetch_canadian_daily_station_data, fetch_canadian_station_options
 from rainwater_app.engine import reliability_curve, simulate_tank
+from rainwater_app.geocoding import reverse_geocode_osm
 from rainwater_app.models import MONTH_KEYS, ProjectConfig, Surface
 from rainwater_app.rainfall import load_rainfall_csv
 from rainwater_app.storage import SQLiteStore
@@ -44,6 +52,7 @@ MINIMUM_WINDOW_WIDTH = 1000
 GRAPH_AUTO_STEP_COUNT = 40
 MAX_RECENT_PROJECTS = 8
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
+OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
 ABOUT_TEXT = """RWH Calculator
 
 Copyright (c) 2026 RWH Calculator contributors
@@ -59,6 +68,10 @@ purpose with or without fee is hereby granted.
 APPLICATION ICON:
 The water-drop icon is adapted from the MIT-licensed Tabler Icons collection.
 Copyright (c) 2020-2026 Paweł Kuna. https://github.com/tabler/tabler-icons
+
+MAP AND ADDRESS DATA:
+Map and reverse-geocoding data are provided by OpenStreetMap contributors
+under the Open Data Commons Open Database License (ODbL).
 
 NOTICE:
 This software is provided to assist with rainwater harvesting calculations.
@@ -291,6 +304,84 @@ def _wrap_pdf_text(value: str, width: int) -> list[str]:
     return lines
 
 
+class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
+    def log_message(self, _format: str, *args: object) -> None:
+        pass
+
+
+class _MapSelectionHandler(http.server.BaseHTTPRequestHandler):
+    def __init__(
+        self,
+        *args: object,
+        page_html: str,
+        selection_queue: queue.Queue,
+        **kwargs: object,
+    ) -> None:
+        self.page_html = page_html
+        self.selection_queue = selection_queue
+        super().__init__(*args, **kwargs)
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path == "/":
+            self._send(200, "text/html; charset=utf-8", self.page_html.encode("utf-8"))
+            return
+        if parsed.path == "/select":
+            try:
+                values = parse_qs(parsed.query)
+                latitude = float(values["lat"][0])
+                longitude = float(values["lon"][0])
+                if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+                    raise ValueError
+            except (KeyError, IndexError, TypeError, ValueError):
+                self._send(400, "text/plain; charset=utf-8", b"Invalid coordinates")
+                return
+            self.selection_queue.put(("selected", latitude, longitude))
+            self._send(200, "application/json", b'{"accepted":true}')
+            return
+        self._send(404, "text/plain; charset=utf-8", b"Not found")
+
+    def _send(self, status: int, content_type: str, body: bytes) -> None:
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, _format: str, *args: object) -> None:
+        pass
+
+
+def _build_osm_picker_html(latitude: float, longitude: float, zoom: int, show_marker: bool) -> str:
+    template = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Select project location</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<style>
+html,body,#map { height:100%; margin:0; } body { font-family:Arial,sans-serif; }
+#map { cursor:crosshair; }
+.action { position:fixed; z-index:1000; left:50%; bottom:24px; transform:translateX(-50%); display:flex; gap:10px; align-items:center; padding:10px; background:#fff; border:1px solid #c9d4d8; box-shadow:0 4px 18px rgba(0,0,0,.18); }
+button { border:0; padding:10px 16px; background:#176b9c; color:#fff; font-weight:700; cursor:pointer; }
+button:disabled { background:#87959b; cursor:default; }
+#coordinates { min-width:210px; color:#26383f; font-variant-numeric:tabular-nums; }
+</style></head><body><div id="map"></div><div class="action"><span id="coordinates">No location selected</span><button id="use" disabled>Use selected location</button></div>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script><script>
+const map=L.map('map').setView([__LAT__,__LON__],__ZOOM__);
+L.tileLayer(__TILE_URL__,{maxZoom:19,attribution:'&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>'}).addTo(map);
+let marker=null; let selected=null;
+if (__SHOW_MARKER__) { selected={lat:__LAT__,lng:__LON__}; marker=L.marker(selected).addTo(map); document.getElementById('coordinates').textContent=`${selected.lat.toFixed(6)}, ${selected.lng.toFixed(6)}`; document.getElementById('use').disabled=false; }
+map.on('click',event=>{selected=event.latlng;if(marker){marker.setLatLng(selected);}else{marker=L.marker(selected).addTo(map);}document.getElementById('coordinates').textContent=`${selected.lat.toFixed(6)}, ${selected.lng.toFixed(6)}`;document.getElementById('use').disabled=false;});
+document.getElementById('use').addEventListener('click',async()=>{if(!selected)return;const button=document.getElementById('use');button.disabled=true;await fetch(`/select?lat=${encodeURIComponent(selected.lat)}&lon=${encodeURIComponent(selected.lng)}`);button.textContent='Location selected';});
+</script></body></html>"""
+    return (
+        template.replace("__LAT__", f"{latitude:.8f}")
+        .replace("__LON__", f"{longitude:.8f}")
+        .replace("__ZOOM__", str(zoom))
+        .replace("__SHOW_MARKER__", "true" if show_marker else "false")
+        .replace("__TILE_URL__", json.dumps(OSM_TILE_URL))
+    )
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -319,6 +410,11 @@ class RainwaterTkApp(tk.Tk):
         self.station_options: list[dict] = []
 
         self.project_name_var = tk.StringVar(value=self.config_model.name)
+        self.street_address_var = tk.StringVar(value=self.config_model.street_address)
+        self.city_var = tk.StringVar(value=self.config_model.city)
+        self.state_or_province_var = tk.StringVar(value=self.config_model.state_or_province)
+        self.postal_code_var = tk.StringVar(value=self.config_model.postal_code)
+        self.coordinates_var = tk.StringVar(value="Coordinates: not selected")
         self.unit_var = tk.StringVar(value=self.config_model.unit_system)
         self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
         self.saved_project_var = tk.StringVar()
@@ -352,6 +448,7 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_source_label: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
+        self.station_popdown_key_command: str | None = None
         self.state_typeahead = ""
         self.state_typeahead_after_id: str | None = None
         self.state_popdown_key_command: str | None = None
@@ -359,6 +456,11 @@ class RainwaterTkApp(tk.Tk):
         self.country_typeahead_after_id: str | None = None
         self.country_popdown_key_command: str | None = None
         self.results_chart_redraw_after_id: str | None = None
+        self.last_analysis_warning_key: str | None = None
+        self.report_preview_directories: list[tempfile.TemporaryDirectory] = []
+        self.report_preview_servers: list[http.server.ThreadingHTTPServer] = []
+        self.location_result_queue: queue.Queue = queue.Queue()
+        self.location_poll_after_id: str | None = None
 
         self._build_ui()
         self.selected_tank_var.trace_add("write", self._update_selected_tank_warning)
@@ -410,17 +512,18 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=3, padx=(18, 2))
         ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=4, padx=2)
 
-        notebook = ttk.Notebook(self)
-        notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
+        self.notebook = ttk.Notebook(self)
+        self.notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
 
-        self.inputs_tab = ttk.Frame(notebook, padding=10)
-        self.import_tab = ttk.Frame(notebook, padding=10)
-        self.demand_tab = ttk.Frame(notebook, padding=10)
-        self.results_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(self.inputs_tab, text="Project Inputs")
-        notebook.add(self.import_tab, text="Rainwater Data")
-        notebook.add(self.demand_tab, text="Monthly Demand")
-        notebook.add(self.results_tab, text="Results")
+        self.inputs_tab = ttk.Frame(self.notebook, padding=10)
+        self.import_tab = ttk.Frame(self.notebook, padding=10)
+        self.demand_tab = ttk.Frame(self.notebook, padding=10)
+        self.results_tab = ttk.Frame(self.notebook, padding=10)
+        self.notebook.add(self.inputs_tab, text="Project Inputs")
+        self.notebook.add(self.import_tab, text="Rainwater Data")
+        self.notebook.add(self.demand_tab, text="Monthly Demand")
+        self.notebook.add(self.results_tab, text="Results")
+        self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_inputs_tab()
         self._build_import_tab()
@@ -451,13 +554,16 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
         file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
         file_menu.add_separator()
+        file_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
+        file_menu.add_command(label="Export HTML report...", command=self.export_html_report)
+        file_menu.add_separator()
         file_menu.add_command(label="Close project", accelerator="Ctrl+W", command=self.close_project)
         file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
 
         view_menu = tk.Menu(menubar, tearoff=False)
-        view_menu.add_command(label="PDF report", command=self.generate_pdf_report)
-        view_menu.add_command(label="HTML report", command=self.generate_html_report)
+        view_menu.add_command(label="View PDF report", command=self.view_pdf_report)
+        view_menu.add_command(label="View HTML report", command=self.view_html_report)
         menubar.add_cascade(label="View", menu=view_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
@@ -477,6 +583,25 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-r>", self._shortcut_run_analysis)
         self.bind_all("<Control-w>", self._shortcut_close_project)
         self.bind_all("<Control-q>", self._shortcut_exit)
+
+    def _on_notebook_tab_changed(self, _event: tk.Event) -> None:
+        if self.notebook.select() != str(self.results_tab):
+            self.last_analysis_warning_key = None
+            return
+        previous_signature = self.config_model.analysis_input_signature
+        if not previous_signature:
+            return
+        self._apply_form_to_model()
+        current_signature = analysis_input_signature(self.config_model, self.rainfall_df)
+        if current_signature != previous_signature:
+            warning_key = f"{previous_signature}:{current_signature}"
+            if self.last_analysis_warning_key == warning_key:
+                return
+            self.last_analysis_warning_key = warning_key
+            messagebox.showwarning(
+                APP_TITLE,
+                "Simulation parameters have changed. The analysis needs to be re-run.",
+            )
 
     def open_user_guide(self) -> None:
         index_path = _help_index_path()
@@ -621,6 +746,33 @@ class RainwaterTkApp(tk.Tk):
         self.country_combo.configure(postcommand=self._bind_country_combo_dropdown)
         self.country_combo.bind("<KeyPress>", self._select_country_by_typed_prefix)
         self.country_combo.bind("<<ComboboxSelected>>", self._country_changed)
+        ttk.Button(project_frame, text="Find on OpenStreetMap...", command=self.find_project_location).grid(
+            row=1, column=0, columnspan=6, sticky="w", pady=(8, 0)
+        )
+        ttk.Label(project_frame, text="Street address").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.street_address_var).grid(
+            row=2,
+            column=1,
+            columnspan=5,
+            sticky="ew",
+            padx=(8, 0),
+            pady=(8, 0),
+        )
+        ttk.Label(project_frame, text="City").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.city_var).grid(
+            row=3, column=1, sticky="ew", padx=(8, 20), pady=(8, 0)
+        )
+        ttk.Label(project_frame, text="State / province / region").grid(row=3, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.state_or_province_var, width=18).grid(
+            row=3, column=3, sticky="ew", padx=(8, 20), pady=(8, 0)
+        )
+        ttk.Label(project_frame, text="Postal code").grid(row=3, column=4, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.postal_code_var, width=14).grid(
+            row=3, column=5, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Label(project_frame, textvariable=self.coordinates_var, foreground="#5f6b70").grid(
+            row=4, column=1, columnspan=5, sticky="w", pady=(6, 0)
+        )
 
         surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection surfaces", padding=10)
         surfaces_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
@@ -926,32 +1078,46 @@ class RainwaterTkApp(tk.Tk):
     def _select_station_by_typed_prefix(self, event: tk.Event) -> str | None:
         return self._select_station_by_char(str(event.char))
 
-    def _select_station_by_char(self, char: str, listbox: tk.Listbox | None = None) -> str | None:
+    def _select_station_by_char(self, char: str, listbox: tk.Listbox | str | None = None) -> str | None:
         key = char.casefold()
         if len(key) != 1 or not key.isalnum():
             return None
 
         if self.station_typeahead_after_id is not None:
             self.after_cancel(self.station_typeahead_after_id)
+            self.station_typeahead_after_id = None
+
+        max_characters = 4 if self._selected_country_code() == "CAN" else None
+        if max_characters is not None and len(self.station_typeahead) >= max_characters:
+            self.station_typeahead = ""
 
         self.station_typeahead += key
         if not self._select_station_by_prefix(self.station_typeahead, listbox):
             self.station_typeahead = key
             self._select_station_by_prefix(self.station_typeahead, listbox)
 
-        self.station_typeahead_after_id = self.after(1000, self._reset_station_typeahead)
+        if max_characters is not None and len(self.station_typeahead) >= max_characters:
+            self._reset_station_typeahead()
+        else:
+            self.station_typeahead_after_id = self.after(1000, self._reset_station_typeahead)
         return "break"
 
-    def _select_station_by_prefix(self, prefix: str, listbox: tk.Listbox | None = None) -> bool:
+    def _select_station_by_prefix(self, prefix: str, listbox: tk.Listbox | str | None = None) -> bool:
         labels = list(self.station_combo["values"])
         for index, label in enumerate(labels):
             if str(label).casefold().startswith(prefix):
                 self.station_combo.current(index)
                 if listbox is not None:
-                    listbox.selection_clear(0, tk.END)
-                    listbox.selection_set(index)
-                    listbox.activate(index)
-                    listbox.see(index)
+                    if isinstance(listbox, str):
+                        self.tk.call(listbox, "selection", "clear", 0, "end")
+                        self.tk.call(listbox, "selection", "set", index)
+                        self.tk.call(listbox, "activate", index)
+                        self.tk.call(listbox, "see", index)
+                    else:
+                        listbox.selection_clear(0, tk.END)
+                        listbox.selection_set(index)
+                        listbox.activate(index)
+                        listbox.see(index)
                 return True
         return False
 
@@ -962,13 +1128,24 @@ class RainwaterTkApp(tk.Tk):
     def _bind_station_combo_dropdown(self) -> None:
         self.after_idle(self._bind_station_combo_listbox)
 
+    def _select_station_in_expanded_dropdown(self, char: str) -> bool:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.station_combo}")
+            listbox_path = f"{popdown}.f.l"
+            return self._select_station_by_char(char, listbox_path) == "break"
+        except tk.TclError:
+            return False
+
     def _bind_station_combo_listbox(self) -> None:
         try:
             popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.station_combo}")
-            listbox = self.nametowidget(f"{popdown}.f.l")
-        except (KeyError, tk.TclError):
+            listbox_path = f"{popdown}.f.l"
+            if self.station_popdown_key_command is None:
+                self.station_popdown_key_command = self.register(self._select_station_in_expanded_dropdown)
+            binding = f"if {{[{self.station_popdown_key_command} %K]}} {{break}}"
+            self.tk.call("bind", listbox_path, "<KeyPress>", binding)
+        except tk.TclError:
             return
-        listbox.bind("<KeyPress>", lambda event: self._select_station_by_char(str(event.char), listbox))
 
     def _load_project_list(self) -> None:
         projects = self.store.list_projects()
@@ -981,6 +1158,11 @@ class RainwaterTkApp(tk.Tk):
     def _populate_from_model(self) -> None:
         cfg = self.config_model
         self.project_name_var.set(cfg.name)
+        self.street_address_var.set(cfg.street_address)
+        self.city_var.set(cfg.city)
+        self.state_or_province_var.set(cfg.state_or_province)
+        self.postal_code_var.set(cfg.postal_code)
+        self._update_coordinates_label()
         self.unit_var.set(cfg.unit_system)
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -1015,6 +1197,10 @@ class RainwaterTkApp(tk.Tk):
     def _apply_form_to_model(self) -> bool:
         cfg = self.config_model
         cfg.name = self.project_name_var.get().strip() or "Unnamed Project"
+        cfg.street_address = self.street_address_var.get().strip()
+        cfg.city = self.city_var.get().strip()
+        cfg.state_or_province = self.state_or_province_var.get().strip()
+        cfg.postal_code = self.postal_code_var.get().strip()
         cfg.country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(self.canadian_precip_var.get(), "TOTAL_PRECIPITATION")
         if cfg.country_code == "CAN":
@@ -1096,6 +1282,99 @@ class RainwaterTkApp(tk.Tk):
             CANADIAN_PRECIPITATION_LABELS.get(precipitation_field, "Total precipitation")
         )
         self._update_weather_import_provider()
+
+    def _update_coordinates_label(self) -> None:
+        latitude = self.config_model.latitude
+        longitude = self.config_model.longitude
+        if latitude is None or longitude is None:
+            self.coordinates_var.set("Coordinates: not selected")
+        else:
+            self.coordinates_var.set(f"Coordinates: {latitude:.6f}, {longitude:.6f}")
+
+    def find_project_location(self) -> None:
+        latitude = self.config_model.latitude
+        longitude = self.config_model.longitude
+        has_location = latitude is not None and longitude is not None
+        if not has_location:
+            country = self._selected_country_code()
+            if country == "CAN":
+                latitude, longitude, initial_zoom = 56.1304, -106.3468, 3
+            elif country == "USA":
+                latitude, longitude, initial_zoom = 39.5, -98.35, 3
+            else:
+                latitude, longitude, initial_zoom = 20.0, 0.0, 2
+        else:
+            initial_zoom = 16
+        page_html = _build_osm_picker_html(
+            float(latitude),
+            float(longitude),
+            initial_zoom,
+            has_location,
+        )
+        handler = partial(
+            _MapSelectionHandler,
+            page_html=page_html,
+            selection_queue=self.location_result_queue,
+        )
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, name="rwh-map-picker", daemon=True)
+        thread.start()
+        self.report_preview_servers.append(server)
+        port = server.server_address[1]
+        webbrowser.open(f"http://127.0.0.1:{port}/")
+        self.status_var.set("OpenStreetMap location picker opened")
+        if self.location_poll_after_id is None:
+            self.location_poll_after_id = self.after(100, self._poll_location_results)
+
+    def _poll_location_results(self) -> None:
+        self.location_poll_after_id = None
+        try:
+            while True:
+                result = self.location_result_queue.get_nowait()
+                kind = result[0]
+                if kind == "selected":
+                    latitude, longitude = float(result[1]), float(result[2])
+                    self.config_model.latitude = latitude
+                    self.config_model.longitude = longitude
+                    self._update_coordinates_label()
+                    self.status_var.set("Finding the nearest OpenStreetMap address...")
+                    threading.Thread(
+                        target=self._reverse_geocode_project_location,
+                        args=(latitude, longitude),
+                        name="rwh-reverse-geocode",
+                        daemon=True,
+                    ).start()
+                elif kind == "address":
+                    self._apply_reverse_geocode_result(result[1])
+                elif kind == "error":
+                    self.status_var.set("Coordinates selected; address lookup failed")
+                    messagebox.showwarning(
+                        APP_TITLE,
+                        f"The exact coordinates were saved, but the nearest address could not be found:\n{result[1]}",
+                    )
+        except queue.Empty:
+            pass
+        self.location_poll_after_id = self.after(100, self._poll_location_results)
+
+    def _reverse_geocode_project_location(self, latitude: float, longitude: float) -> None:
+        try:
+            address = reverse_geocode_osm(latitude, longitude)
+            self.location_result_queue.put(("address", address))
+        except Exception as exc:  # noqa: BLE001
+            self.location_result_queue.put(("error", str(exc)))
+
+    def _apply_reverse_geocode_result(self, address: dict[str, str]) -> None:
+        self.street_address_var.set(address.get("street_address", ""))
+        self.city_var.set(address.get("city", ""))
+        self.state_or_province_var.set(address.get("state_or_province", ""))
+        self.postal_code_var.set(address.get("postal_code", ""))
+        country = pycountry.countries.get(alpha_2=address.get("country_code_alpha2", ""))
+        if country is not None:
+            self.country_var.set(COUNTRY_LABEL_BY_CODE.get(country.alpha_3, self.country_var.get()))
+            self.config_model.country_code = country.alpha_3
+            self._update_weather_import_provider()
+        self._apply_form_to_model()
+        self.status_var.set("Project location and nearest OpenStreetMap address selected")
 
     def _selected_country_code(self) -> str:
         return self.country_var.get().split(" - ", 1)[0].strip() or "USA"
@@ -1194,6 +1473,14 @@ class RainwaterTkApp(tk.Tk):
             return
         try:
             self.config_model, self.rainfall_df, self.curve_df, self.results_df = self.store.load_project_with_analysis(name)
+            if (
+                not self.results_df.empty
+                and not self.curve_df.empty
+                and not self.config_model.analysis_input_signature
+            ):
+                self.config_model.analysis_input_signature = analysis_input_signature(
+                    self.config_model, self.rainfall_df
+                )
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self._populate_from_model()
@@ -1606,6 +1893,8 @@ class RainwaterTkApp(tk.Tk):
             self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
             self._populate_results()
             self._draw_saved_analysis_charts()
+            cfg.analysis_input_signature = analysis_input_signature(cfg, self.rainfall_df)
+            self.last_analysis_warning_key = None
             self.analysis_progress_var.set(100)
             self.status_var.set("Analysis complete")
         except Exception as exc:  # noqa: BLE001
@@ -1630,68 +1919,146 @@ class RainwaterTkApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not export results:\n{exc}")
 
-    def generate_pdf_report(self) -> None:
-        self._apply_form_to_model()
-        if self.curve_df.empty:
-            messagebox.showinfo(APP_TITLE, "Run the analysis before generating a PDF report.")
+    def view_pdf_report(self) -> None:
+        report = self._request_report_content("PDF")
+        if report is None:
             return
+        preview_dir = self._new_report_preview_directory()
+        pdf_path = preview_dir / self._default_report_filename(".pdf")
+        try:
+            self._write_pdf_report(pdf_path, report)
+            self._open_local_file(pdf_path)
+            self.status_var.set(f"Opened PDF report preview: {pdf_path.name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not view PDF report:\n{exc}")
 
-        dialog = ReportDialog(self, self._default_report_metadata())
-        self.wait_window(dialog)
-        if dialog.result is None:
+    def view_html_report(self) -> None:
+        report = self._request_report_content("HTML")
+        if report is None:
             return
+        preview_dir = self._new_report_preview_directory()
+        html_path = preview_dir / self._default_report_filename(".html")
+        try:
+            self._write_html_report(html_path, report)
+            self._open_html_preview(html_path)
+            self.status_var.set(f"Opened HTML report preview: {html_path.name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not view HTML report:\n{exc}")
 
+    def export_pdf_report(self) -> None:
+        report = self._request_report_content("PDF")
+        if report is None:
+            return
         path = filedialog.asksaveasfilename(
-            title="Save PDF report",
-            initialfile=_safe_project_file_name(self.config_model.name).replace(".db", "_report.pdf"),
+            title="Export PDF report",
+            initialfile=self._default_report_filename(".pdf"),
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf")],
         )
         if not path:
             return
-
         pdf_path = Path(path)
-        tex_path = pdf_path.with_suffix(".tex")
         try:
-            report = self._build_report_content(dialog.result)
-            latex = self._build_report_latex(report)
-            tex_path.write_text(latex, encoding="utf-8")
-            self._compile_latex_report(tex_path, pdf_path, report)
-            self.status_var.set(f"Generated PDF report: {pdf_path.name}")
+            self._write_pdf_report(pdf_path, report)
+            self.status_var.set(f"Exported PDF report: {pdf_path.name}")
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror(APP_TITLE, f"Could not generate PDF report:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not export PDF report:\n{exc}")
 
-    def generate_html_report(self) -> None:
-        self._apply_form_to_model()
-        if self.curve_df.empty:
-            messagebox.showinfo(APP_TITLE, "Run the analysis before generating an HTML report.")
+    def export_html_report(self) -> None:
+        report = self._request_report_content("HTML")
+        if report is None:
             return
-
-        dialog = ReportDialog(self, self._default_report_metadata())
-        self.wait_window(dialog)
-        if dialog.result is None:
-            return
-
         path = filedialog.asksaveasfilename(
-            title="Save HTML report",
-            initialfile=_safe_project_file_name(self.config_model.name).replace(".db", "_report.html"),
+            title="Export HTML report",
+            initialfile=self._default_report_filename(".html"),
             defaultextension=".html",
             filetypes=[("HTML files", "*.html;*.htm")],
         )
         if not path:
             return
-
         html_path = Path(path)
         try:
-            report = self._build_report_content(dialog.result)
-            html_path.write_text(self._build_report_html(report), encoding="utf-8")
-            self.status_var.set(f"Generated HTML report: {html_path.name}")
+            self._write_html_report(html_path, report)
+            self.status_var.set(f"Exported HTML report: {html_path.name}")
         except Exception as exc:  # noqa: BLE001
-            messagebox.showerror(APP_TITLE, f"Could not generate HTML report:\n{exc}")
+            messagebox.showerror(APP_TITLE, f"Could not export HTML report:\n{exc}")
+
+    def _request_report_content(self, report_format: str) -> dict[str, object] | None:
+        self._apply_form_to_model()
+        if self.curve_df.empty:
+            article = "an" if report_format == "HTML" else "a"
+            messagebox.showinfo(APP_TITLE, f"Run the analysis before generating {article} {report_format} report.")
+            return None
+
+        dialog = ReportDialog(self, self._default_report_metadata())
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return None
+        return self._build_report_content(dialog.result)
+
+    def _default_report_filename(self, suffix: str) -> str:
+        return _safe_project_file_name(self.config_model.name).replace(".db", f"_report{suffix}")
+
+    def _write_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
+        tex_path = pdf_path.with_suffix(".tex")
+        latex = self._build_report_latex(report)
+        tex_path.write_text(latex, encoding="utf-8")
+        self._compile_latex_report(tex_path, pdf_path, report)
+
+    def _write_html_report(self, html_path: Path, report: dict[str, object]) -> None:
+        html_path.write_text(self._build_report_html(report), encoding="utf-8")
+
+    def _new_report_preview_directory(self) -> Path:
+        preview = tempfile.TemporaryDirectory(prefix="rwh-calculator-report-")
+        self.report_preview_directories.append(preview)
+        return Path(preview.name)
+
+    @staticmethod
+    def _open_local_file(path: Path) -> None:
+        resolved = path.resolve()
+        if sys.platform == "win32":
+            os.startfile(resolved)  # type: ignore[attr-defined]
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(resolved)])
+        else:
+            subprocess.Popen(["xdg-open", str(resolved)])
+
+    def _open_html_preview(self, html_path: Path) -> None:
+        handler = partial(_QuietReportHandler, directory=str(html_path.parent))
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(target=server.serve_forever, name="rwh-report-preview", daemon=True)
+        thread.start()
+        self.report_preview_servers.append(server)
+        port = server.server_address[1]
+        webbrowser.open(f"http://127.0.0.1:{port}/{quote(html_path.name)}")
+
+    def destroy(self) -> None:
+        if self.location_poll_after_id is not None:
+            self.after_cancel(self.location_poll_after_id)
+            self.location_poll_after_id = None
+        for server in self.report_preview_servers:
+            server.shutdown()
+            server.server_close()
+        self.report_preview_servers.clear()
+        for preview in self.report_preview_directories:
+            preview.cleanup()
+        self.report_preview_directories.clear()
+        super().destroy()
 
     def _default_report_metadata(self) -> dict[str, str]:
         end_uses = self._default_end_uses_text()
-        location = self.rainfall_source_label or self.config_model.rainfall_source_label or ""
+        address_parts = [
+            self.street_address_var.get().strip(),
+            self.city_var.get().strip(),
+            self.state_or_province_var.get().strip(),
+            self.postal_code_var.get().strip(),
+        ]
+        location = ", ".join(part for part in address_parts if part)
+        if location:
+            country = self.country_var.get().split(" - ", 1)[-1].strip()
+            location = f"{location}, {country}" if country else location
+        if not location:
+            location = self.rainfall_source_label or self.config_model.rainfall_source_label or ""
         return {
             "client_name": "",
             "date": dt.date.today().isoformat(),

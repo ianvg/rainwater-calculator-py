@@ -1,5 +1,7 @@
 # Analysis and results
 
+When an analysis has already been run, the calculator records a fingerprint of the rainfall and simulation inputs used for that run. If rainfall, collection surfaces, demand, tank parameters, or reliability-curve settings change, opening the **Results** tab displays a warning that the analysis must be run again. Project metadata such as the name, address, coordinates, and display units does not invalidate an analysis.
+
 The analysis simulates storage behavior through the rainfall record for a range of tank sizes.
 
 ## Analysis settings

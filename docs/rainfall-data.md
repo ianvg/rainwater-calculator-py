@@ -23,6 +23,8 @@ Set the project country to **CAN - Canada**. The import tab changes to the Envir
 3. Find and select an ECCC climate station.
 4. Import the selected station.
 
+With the station dropdown focused or expanded, type up to four letters in quick succession to move to the first station whose name begins with that prefix. The expanded list scrolls to keep the highlighted station visible. The prefix resets after one second or after the fourth character.
+
 **Total precipitation** includes liquid precipitation and the water equivalent represented by snowfall observations. This may be appropriate when snow is retained and later melts into the collection system. **Rain only** excludes snowfall and may be more appropriate where snow is expected to blow, slide, or be removed from the collection surface. Select the basis that matches the roof, climate, and operating assumptions.
 
 ECCC values are provided in millimetres and are converted automatically into the calculator's internal rainfall units. The application follows all API result pages and completes the requested daily calendar. Missing daily values are treated as zero precipitation so water demand is still simulated for those days; a warning reports how many values were missing.

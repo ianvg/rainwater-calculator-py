@@ -5,6 +5,10 @@ def test_legacy_project_defaults_to_united_states() -> None:
     config = SQLiteStore._config_from_dict({"name": "Legacy project"})
 
     assert config.country_code == "USA"
+    assert config.street_address == ""
+    assert config.city == ""
+    assert config.state_or_province == ""
+    assert config.postal_code == ""
     assert config.acis_precipitation_field == "TOTAL_PRECIPITATION"
 
 
@@ -23,3 +27,40 @@ def test_acis_precipitation_field_is_loaded() -> None:
     )
 
     assert config.acis_precipitation_field == "TOTAL_RAIN"
+
+
+def test_structured_project_address_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Addressed project",
+            "street_address": "1121 Brittain Estates Drive",
+            "city": "Kingsport",
+            "state_or_province": "Tennessee",
+            "postal_code": "37664",
+            "latitude": 36.548921,
+            "longitude": -82.456789,
+        }
+    )
+
+    assert config.street_address == "1121 Brittain Estates Drive"
+    assert config.city == "Kingsport"
+    assert config.state_or_province == "Tennessee"
+    assert config.postal_code == "37664"
+    assert config.latitude == 36.548921
+    assert config.longitude == -82.456789
+
+
+def test_single_field_address_migrates_to_street_address() -> None:
+    config = SQLiteStore._config_from_dict(
+        {"name": "Earlier address project", "address": "1121 Brittain Estates Drive"}
+    )
+
+    assert config.street_address == "1121 Brittain Estates Drive"
+
+
+def test_analysis_input_signature_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {"name": "Analyzed project", "analysis_input_signature": "signature-from-last-run"}
+    )
+
+    assert config.analysis_input_signature == "signature-from-last-run"

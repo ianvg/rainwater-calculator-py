@@ -152,6 +152,12 @@ class SQLiteStore:
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
+            street_address=payload.get("street_address", payload.get("address", "")),
+            city=payload.get("city", ""),
+            state_or_province=payload.get("state_or_province", ""),
+            postal_code=payload.get("postal_code", ""),
+            latitude=_optional_float(payload.get("latitude")),
+            longitude=_optional_float(payload.get("longitude")),
             unit_system=payload.get("unit_system", "Imperial"),
             country_code=payload.get("country_code", "USA"),
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
@@ -163,5 +169,13 @@ class SQLiteStore:
             graph_step_gal=int(payload.get("graph_step_gal", 500)),
             selected_tank_size_gal=float(payload.get("selected_tank_size_gal", 5000.0)),
             rainfall_source_label=payload.get("rainfall_source_label"),
+            analysis_input_signature=payload.get("analysis_input_signature"),
             tank_parameters=tank_params,
         )
+
+
+def _optional_float(value: object) -> float | None:
+    try:
+        return None if value is None or value == "" else float(value)
+    except (TypeError, ValueError):
+        return None
