@@ -98,6 +98,7 @@ def simulate_tank(
     demand_met: list[bool] = []
     reliability_target_met: list[bool] = []
     unmet_demand: list[float] = []
+    overflow: list[float] = []
     reliable_days = 0
 
     for i in range(len(data)):
@@ -106,7 +107,9 @@ def simulate_tank(
         else:
             water = water_level[-1] + collected.iloc[i]
 
-        water = min(max(water, 0.0), tank_size_gallons)
+        water = max(water, 0.0)
+        overflow_today = max(water - tank_size_gallons, 0.0)
+        water = min(water, tank_size_gallons)
         demand_today = max(float(demand.iloc[i]), 0.0)
         reliability_target = demand_today * (1.0 + reserve_fraction)
         met_today = water >= demand_today
@@ -118,6 +121,7 @@ def simulate_tank(
         demand_met.append(bool(met_today))
         reliability_target_met.append(bool(target_met_today))
         unmet_demand.append(float(unmet_today))
+        overflow.append(float(overflow_today))
 
         if target_met_today:
             reliable_days += 1
@@ -133,6 +137,7 @@ def simulate_tank(
             "DemandMet": demand_met,
             "ReliabilityTargetMet": reliability_target_met,
             "UnmetDemandGallons": unmet_demand,
+            "OverflowGallons": overflow,
             "WaterInTankGallons": water_level,
         }
     ).assign(ReliabilityPercent=reliability)

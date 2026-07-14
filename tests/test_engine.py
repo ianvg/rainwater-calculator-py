@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from rainwater_app.acis import _parse_acis_number, default_complete_calendar_range
 from rainwater_app.defaults import default_project_config, default_surface_runoff
@@ -21,7 +22,35 @@ def test_simulate_tank_returns_expected_columns() -> None:
     out = simulate_tank(cfg, rainfall, tank_size_gallons=1000)
 
     assert not out.empty
-    assert {"Date", "CollectedGallons", "DemandGallons", "WaterInTankGallons", "ReliabilityPercent"}.issubset(out.columns)
+    assert {
+        "Date",
+        "CollectedGallons",
+        "OverflowGallons",
+        "DemandGallons",
+        "WaterInTankGallons",
+        "ReliabilityPercent",
+    }.issubset(out.columns)
+
+
+def test_simulate_tank_records_water_above_capacity_as_overflow() -> None:
+    cfg = default_project_config()
+    for surface in cfg.surfaces:
+        surface.area = 0.0
+    cfg.surfaces[0].area = 1000.0
+    cfg.surfaces[0].runoff_coefficient = 0.9
+    cfg.tank_parameters.initial_fill_percent = 0.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+            "Precipitation": [1.0, 0.0],
+        }
+    )
+
+    out = simulate_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert out.loc[0, "OverflowGallons"] == pytest.approx(out.loc[0, "CollectedGallons"] - 100.0)
+    assert out.loc[0, "WaterInTankGallons"] == pytest.approx(100.0)
+    assert out.loc[1, "OverflowGallons"] == 0.0
 
 
 def test_default_acis_range_uses_complete_calendar_years() -> None:

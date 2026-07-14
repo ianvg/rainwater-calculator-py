@@ -50,6 +50,7 @@ def fetch_station_options(state: str, start_date: date, end_date: date) -> list[
                 "longitude": _safe_coordinate(item, 0),
                 "latitude": _safe_coordinate(item, 1),
                 "elevation_ft": item.get("elev"),
+                "provider": "ACIS",
             }
         )
 

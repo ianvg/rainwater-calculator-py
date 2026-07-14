@@ -56,6 +56,10 @@ Zero-Clause BSD (0BSD) license.
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted.
 
+APPLICATION ICON:
+The water-drop icon is adapted from the MIT-licensed Tabler Icons collection.
+Copyright (c) 2020-2026 Paweł Kuna. https://github.com/tabler/tabler-icons
+
 NOTICE:
 This software is provided to assist with rainwater harvesting calculations.
 Users are responsible for verifying inputs, assumptions, local codes, design
@@ -169,6 +173,7 @@ STATE_OPTIONS = [
     ("WY", "Wyoming"),
 ]
 STATE_LABELS = [f"{code} - {name}" for code, name in STATE_OPTIONS]
+STATE_NAME_BY_CODE = dict(STATE_OPTIONS)
 STATE_PLACEHOLDER = "-- Select state --"
 PROVINCE_OPTIONS = [
     ("AB", "Alberta"),
@@ -186,6 +191,7 @@ PROVINCE_OPTIONS = [
     ("YT", "Yukon"),
 ]
 PROVINCE_LABELS = [f"{code} - {name}" for code, name in PROVINCE_OPTIONS]
+PROVINCE_NAME_BY_CODE = dict(PROVINCE_OPTIONS)
 PROVINCE_PLACEHOLDER = "-- Select province / territory --"
 CANADIAN_PRECIPITATION_OPTIONS = {
     "Total precipitation": "TOTAL_PRECIPITATION",
@@ -204,6 +210,11 @@ def _app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def _resource_path(relative_path: str) -> Path:
+    bundled_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return bundled_root / relative_path
 
 
 def _help_index_path() -> Path | None:
@@ -285,6 +296,10 @@ class RainwaterTkApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.title(APP_TITLE)
+        icon_path = _resource_path("assets/app_icon.png")
+        self.app_icon = tk.PhotoImage(file=icon_path) if icon_path.is_file() else None
+        if self.app_icon is not None:
+            self.iconphoto(True, self.app_icon)
         self.active_project_name: str | None = None
         self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
         self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
@@ -746,12 +761,13 @@ class RainwaterTkApp(tk.Tk):
         self.tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
         self.histogram_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
-        columns = ("date", "precip", "collected", "demand", "unmet", "tank")
+        columns = ("date", "precip", "collected", "overflow", "demand", "unmet", "tank")
         self.results_tree = ttk.Treeview(self.results_tab, columns=columns, show="headings", height=12)
         headings = {
             "date": "Date",
             "precip": "Precip.",
             "collected": "Collected",
+            "overflow": "Overflow",
             "demand": "Demand",
             "unmet": "Unmet",
             "tank": "Water in Tank",
@@ -1416,7 +1432,10 @@ class RainwaterTkApp(tk.Tk):
             start_date, end_date = default_complete_calendar_range(years)
             weather_df = fetch_daily_station_data(station["sid"], start_date, end_date, precipitation_field)
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
-            self.rainfall_source_label = f"{station['name']} ({station['sid']}) via ACIS, {basis_label}"
+            station_region = self._station_region_suffix(station)
+            self.rainfall_source_label = (
+                f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
+            )
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self.config_model.country_code = "USA"
             self.config_model.acis_precipitation_field = precipitation_field
@@ -1469,7 +1488,10 @@ class RainwaterTkApp(tk.Tk):
             )
             missing_days = int(weather_df.attrs.get("missing_days", 0))
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
-            self.rainfall_source_label = f"{station['name']} ({station['sid']}) via ECCC, {basis_label}"
+            station_region = self._station_region_suffix(station)
+            self.rainfall_source_label = (
+                f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
+            )
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self.config_model.country_code = "CAN"
             self.config_model.canadian_precipitation_field = precipitation_field
@@ -2095,12 +2117,14 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         cfg = self.config_model
         out = self.results_df.copy()
         out["Precipitation"] = out["Precipitation"].map(lambda v: precip_to_display(float(v), cfg))
-        for col in ["CollectedGallons", "DemandGallons", "UnmetDemandGallons", "WaterInTankGallons"]:
-            out[col] = out[col].map(lambda v: volume_to_display(float(v), cfg))
+        for col in ["CollectedGallons", "OverflowGallons", "DemandGallons", "UnmetDemandGallons", "WaterInTankGallons"]:
+            if col in out:
+                out[col] = out[col].map(lambda v: volume_to_display(float(v), cfg))
         return out.rename(
             columns={
                 "Precipitation": f"Precipitation ({precip_unit(cfg)})",
                 "CollectedGallons": f"Collected ({volume_unit(cfg)})",
+                "OverflowGallons": f"Overflow ({volume_unit(cfg)}/day)",
                 "DemandGallons": f"Demand ({volume_unit(cfg)}/day)",
                 "UnmetDemandGallons": f"Unmet Demand ({volume_unit(cfg)}/day)",
                 "WaterInTankGallons": f"Water in Tank ({volume_unit(cfg)})",
@@ -2113,17 +2137,29 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         location = ""
         if station.get("latitude") is not None and station.get("longitude") is not None:
             location = f" ({station['latitude']:.3f}, {station['longitude']:.3f})"
-        return f"{station['name']} - {station['sid']}{location}"
+        return f"{station['name']} - {station['sid']}{location}{RainwaterTkApp._station_region_suffix(station)}"
+
+    @staticmethod
+    def _station_region_suffix(station: dict) -> str:
+        code = str(station.get("state", "")).strip().upper()
+        provider = str(station.get("provider", "")).strip().upper()
+        names = PROVINCE_NAME_BY_CODE if provider == "ECCC" else STATE_NAME_BY_CODE
+        region_name = names.get(code)
+        return f" in {region_name}" if region_name else ""
 
     def _populate_results(self) -> None:
         self.results_tree.heading("precip", text=f"Precip. ({precip_unit(self.config_model)})")
         self.results_tree.heading("collected", text=f"Collected ({volume_unit(self.config_model)})")
+        self.results_tree.heading("overflow", text=f"Overflow ({volume_unit(self.config_model)})")
         self.results_tree.heading("demand", text=f"Demand ({volume_unit(self.config_model)})")
         self.results_tree.heading("unmet", text=f"Unmet ({volume_unit(self.config_model)})")
         self.results_tree.heading("tank", text=f"Water in Tank ({volume_unit(self.config_model)})")
         self.results_tree.delete(*self.results_tree.get_children())
         display = self._display_results_df().head(500)
+        overflow_column = f"Overflow ({volume_unit(self.config_model)}/day)"
         for _, row in display.iterrows():
+            overflow_value = row.get(overflow_column)
+            overflow_text = "" if pd.isna(overflow_value) else f"{overflow_value:.1f}"
             self.results_tree.insert(
                 "",
                 "end",
@@ -2131,6 +2167,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                     pd.Timestamp(row["Date"]).strftime("%Y-%m-%d"),
                     f"{row[f'Precipitation ({precip_unit(self.config_model)})']:.3f}",
                     f"{row[f'Collected ({volume_unit(self.config_model)})']:.1f}",
+                    overflow_text,
                     f"{row[f'Demand ({volume_unit(self.config_model)}/day)']:.1f}",
                     f"{row[f'Unmet Demand ({volume_unit(self.config_model)}/day)']:.1f}",
                     f"{row[f'Water in Tank ({volume_unit(self.config_model)})']:.1f}",
@@ -2180,6 +2217,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             y,
             f"Reliability vs Tank Size ({volume_unit(self.config_model)})",
             "Reliability %",
+            f"Tank size ({volume_unit(self.config_model)})",
             hover_labels,
         )
 
@@ -2198,6 +2236,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             y,
             f"Tank Water Over Time ({volume_unit(self.config_model)})",
             volume_unit(self.config_model),
+            "Day of record",
             hover_labels,
             show_points=self.show_tank_points_var.get(),
         )
@@ -2222,7 +2261,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 
         width = max(canvas.winfo_width(), 300)
         height = max(canvas.winfo_height(), 220)
-        pad_left, pad_right, pad_top, pad_bottom = 48, 14, 32, 48
+        pad_left, pad_right, pad_top, pad_bottom = 48, 14, 32, 64
         plot_width = width - pad_left - pad_right
         plot_height = height - pad_top - pad_bottom
         max_count = max(counts) or 1
@@ -2248,6 +2287,12 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             canvas.create_text((left + right) / 2, bottom + 15, text=f"{low:.0f}-{high:.0f}", font=("Segoe UI", 7))
             canvas.create_text((left + right) / 2, max(top - 9, pad_top + 7), text=str(count), font=("Segoe UI", 8))
         canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
+        canvas.create_text(
+            pad_left + plot_width / 2,
+            height - 8,
+            text=f"Tank level range ({unit})",
+            font=("Segoe UI", 8),
+        )
 
     def _draw_line_chart(
         self,
@@ -2256,6 +2301,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         y_values: list[float],
         title: str,
         y_label: str,
+        x_label: str,
         hover_labels: list[str] | None = None,
         show_points: bool = True,
     ) -> None:
@@ -2263,7 +2309,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         canvas.hover_points = []
         width = max(canvas.winfo_width(), 300)
         height = max(canvas.winfo_height(), 220)
-        pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, 42
+        pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, 58
         plot_w = width - pad_left - pad_right
         plot_h = height - pad_top - pad_bottom
         canvas.create_text(width / 2, 16, text=title, font=("Segoe UI", 10, "bold"))
@@ -2306,6 +2352,12 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             canvas.create_line(x, height - pad_bottom, x, height - pad_bottom + 5, fill="#555")
             canvas.create_text(x, height - pad_bottom + 17, text=f"{value:.0f}", font=("Segoe UI", 8))
         canvas.create_text(14, height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
+        canvas.create_text(
+            pad_left + plot_w / 2,
+            height - 8,
+            text=x_label,
+            font=("Segoe UI", 8),
+        )
         canvas.bind("<Motion>", self._show_chart_hover)
         canvas.bind("<Leave>", self._hide_chart_hover)
 

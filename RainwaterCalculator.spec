@@ -4,7 +4,7 @@ a = Analysis(
     ["tkinter_app.py"],
     pathex=[],
     binaries=[],
-    datas=[("site", "help")],
+    datas=[("site", "help"), ("assets/app_icon.png", "assets")],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -42,4 +42,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon="assets/app_icon.ico",
 )
