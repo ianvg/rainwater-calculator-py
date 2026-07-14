@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import datetime as dt
+import html
 import json
 import shutil
 import subprocess
@@ -243,6 +244,9 @@ class RainwaterTkApp(tk.Tk):
         self.title(APP_TITLE)
         self.geometry("1200x760")
         self.minsize(1000, 680)
+        self.progress_style = ttk.Style(self)
+        self.progress_style.configure("Analysis.Horizontal.TProgressbar")
+        self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
 
         self.project_file_path = _app_dir() / "rainwater_projects.db"
         self.store = SQLiteStore(str(self.project_file_path))
@@ -326,7 +330,13 @@ class RainwaterTkApp(tk.Tk):
         status_frame.grid(row=2, column=0, sticky="ew")
         status_frame.columnconfigure(0, weight=1)
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="ew")
-        self.analysis_progress = ttk.Progressbar(status_frame, variable=self.analysis_progress_var, maximum=100, length=180)
+        self.analysis_progress = ttk.Progressbar(
+            status_frame,
+            variable=self.analysis_progress_var,
+            maximum=100,
+            length=180,
+            style="Analysis.Horizontal.TProgressbar",
+        )
         self.analysis_progress.grid(row=0, column=1, sticky="e", padx=(12, 0))
 
     def _build_menu(self) -> None:
@@ -335,8 +345,7 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_command(label="Create new project", accelerator="Ctrl+N", command=self.new_project)
         file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
-        file_menu.add_command(label="Load project", accelerator="Ctrl+L", command=self.load_selected_project)
-        file_menu.add_command(label="Open project from...", accelerator="Ctrl+O", command=self.open_project_from)
+        file_menu.add_command(label="Open project...", accelerator="Ctrl+O", command=self.open_project_from)
         self.recent_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
         file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
@@ -347,6 +356,7 @@ class RainwaterTkApp(tk.Tk):
 
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label="PDF report", command=self.generate_pdf_report)
+        view_menu.add_command(label="HTML report", command=self.generate_html_report)
         menubar.add_cascade(label="View", menu=view_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
@@ -359,7 +369,6 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-s>", self._shortcut_save_project)
         self.bind_all("<Control-Shift-S>", self._shortcut_save_project_as)
         self.bind_all("<Control-Shift-s>", self._shortcut_save_project_as)
-        self.bind_all("<Control-l>", self._shortcut_load_project)
         self.bind_all("<Control-o>", self._shortcut_open_project_from)
         self.bind_all("<Control-r>", self._shortcut_run_analysis)
         self.bind_all("<Control-w>", self._shortcut_close_project)
@@ -375,10 +384,6 @@ class RainwaterTkApp(tk.Tk):
 
     def _shortcut_save_project_as(self, _event: tk.Event) -> str:
         self.save_project_as()
-        return "break"
-
-    def _shortcut_load_project(self, _event: tk.Event) -> str:
-        self.load_selected_project()
         return "break"
 
     def _shortcut_open_project_from(self, _event: tk.Event) -> str:
@@ -437,6 +442,12 @@ class RainwaterTkApp(tk.Tk):
             self.recent_menu.add_command(label=label, command=lambda value=path_text: self.open_recent_project(value))
         self.recent_menu.add_separator()
         self.recent_menu.add_command(label="Clear recent projects", command=self.clear_recent_projects)
+
+    def _set_progress(self, value: float, status: str, style: str = "Analysis.Horizontal.TProgressbar") -> None:
+        self.analysis_progress.configure(style=style)
+        self.analysis_progress_var.set(value)
+        self.status_var.set(status)
+        self.update_idletasks()
 
     def _show_about_dialog(self) -> None:
         dialog = tk.Toplevel(self)
@@ -852,7 +863,7 @@ class RainwaterTkApp(tk.Tk):
 
     def open_project_from(self) -> None:
         path = filedialog.askopenfilename(
-            title="Open project from...",
+            title="Open project...",
             initialdir=str(self.project_file_path.parent),
             filetypes=[("Rainwater project files", "*.db"), ("SQLite database files", "*.sqlite *.sqlite3"), ("All files", "*.*")],
         )
@@ -873,7 +884,9 @@ class RainwaterTkApp(tk.Tk):
         previous_path = self.project_file_path
         previous_store = self.store
         try:
+            self._set_progress(5, "Opening project: checking file", "OpenProject.Horizontal.TProgressbar")
             if not selected_path.exists():
+                self.analysis_progress_var.set(0)
                 messagebox.showinfo(APP_TITLE, "That project file no longer exists.")
                 self.recent_project_paths = [
                     existing for existing in self.recent_project_paths if existing.casefold() != str(selected_path).casefold()
@@ -881,23 +894,28 @@ class RainwaterTkApp(tk.Tk):
                 self._save_recent_project_paths()
                 self._refresh_recent_projects_menu()
                 return
+            self._set_progress(25, "Opening project: reading project file", "OpenProject.Horizontal.TProgressbar")
             selected_store = SQLiteStore(str(selected_path))
             projects = selected_store.list_projects()
             if not projects:
+                self.analysis_progress_var.set(0)
                 messagebox.showinfo(APP_TITLE, "No saved projects were found in that file.")
                 return
 
+            self._set_progress(50, "Opening project: loading project data", "OpenProject.Horizontal.TProgressbar")
             self.project_file_path = selected_path
             self.store = selected_store
             self.saved_project_var.set(projects[0])
             self._load_project_list()
             self.load_selected_project()
+            self._set_progress(85, "Opening project: refreshing views", "OpenProject.Horizontal.TProgressbar")
             self._add_recent_project_path(self.project_file_path)
-            self.status_var.set(f"Opened project '{self.config_model.name}' from {self.project_file_path}")
+            self._set_progress(100, f"Opened project '{self.config_model.name}' from {self.project_file_path}", "OpenProject.Horizontal.TProgressbar")
         except Exception as exc:  # noqa: BLE001
             self.project_file_path = previous_path
             self.store = previous_store
             self._load_project_list()
+            self.analysis_progress_var.set(0)
             messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
 
     def save_project(self) -> None:
@@ -1077,6 +1095,7 @@ class RainwaterTkApp(tk.Tk):
         try:
             tank_sizes = list(range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal))
             total_parts = 2
+            self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
             self.analysis_progress_var.set(0)
             self.status_var.set("Analysis running: Part A - reliability curve")
             self.update_idletasks()
@@ -1147,12 +1166,41 @@ class RainwaterTkApp(tk.Tk):
         pdf_path = Path(path)
         tex_path = pdf_path.with_suffix(".tex")
         try:
-            latex = self._build_report_latex(dialog.result)
+            report = self._build_report_content(dialog.result)
+            latex = self._build_report_latex(report)
             tex_path.write_text(latex, encoding="utf-8")
-            self._compile_latex_report(tex_path, pdf_path, dialog.result)
+            self._compile_latex_report(tex_path, pdf_path, report)
             self.status_var.set(f"Generated PDF report: {pdf_path.name}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not generate PDF report:\n{exc}")
+
+    def generate_html_report(self) -> None:
+        self._apply_form_to_model()
+        if self.curve_df.empty:
+            messagebox.showinfo(APP_TITLE, "Run the analysis before generating an HTML report.")
+            return
+
+        dialog = ReportDialog(self, self._default_report_metadata())
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+
+        path = filedialog.asksaveasfilename(
+            title="Save HTML report",
+            initialfile=_safe_project_file_name(self.config_model.name).replace(".db", "_report.html"),
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html;*.htm")],
+        )
+        if not path:
+            return
+
+        html_path = Path(path)
+        try:
+            report = self._build_report_content(dialog.result)
+            html_path.write_text(self._build_report_html(report), encoding="utf-8")
+            self.status_var.set(f"Generated HTML report: {html_path.name}")
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not generate HTML report:\n{exc}")
 
     def _default_report_metadata(self) -> dict[str, str]:
         end_uses = self._default_end_uses_text()
@@ -1179,28 +1227,55 @@ class RainwaterTkApp(tk.Tk):
                 uses.append(label)
         return ", ".join(dict.fromkeys(uses)) or "Not specified"
 
-    def _build_report_latex(self, metadata: dict[str, str]) -> str:
+    def _build_report_content(self, metadata: dict[str, str]) -> dict[str, object]:
         cfg = self.config_model
-        area = area_unit(cfg)
-        volume = volume_unit(cfg)
+        selected_reliability: float | None = None
+        if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
+            selected_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+        return {
+            "metadata": dict(metadata),
+            "area_unit": area_unit(cfg),
+            "volume_unit": volume_unit(cfg),
+            "surfaces": [
+                {
+                    "name": surface.name,
+                    "area": area_to_display(surface.area, cfg),
+                    "runoff_coefficient": surface.runoff_coefficient,
+                }
+                for surface in cfg.surfaces
+            ],
+            "curve": [
+                {
+                    "tank_size": volume_to_display(row.TankSizeGallons, cfg),
+                    "reliability": float(row.ReliabilityPercent),
+                }
+                for row in self.curve_df.itertuples(index=False)
+            ],
+            "selected_reliability": selected_reliability,
+        }
+
+    def _build_report_latex(self, report: dict[str, object]) -> str:
+        metadata = report["metadata"]
+        area = report["area_unit"]
+        volume = report["volume_unit"]
         surface_rows = "\n".join(
             _latex_row(
-                surface.name,
-                f"{area_to_display(surface.area, cfg):,.2f}",
-                f"{surface.runoff_coefficient:.3f}",
+                surface["name"],
+                f"{surface['area']:,.2f}",
+                f"{surface['runoff_coefficient']:.3f}",
             )
-            for surface in cfg.surfaces
+            for surface in report["surfaces"]
         )
         if not surface_rows:
             surface_rows = _latex_row("No collection surfaces", "0.00", "0.000")
 
         coordinates = "\n".join(
-            f"({_latex_number(volume_to_display(row.TankSizeGallons, cfg))},{_latex_number(row.ReliabilityPercent)})"
-            for row in self.curve_df.itertuples(index=False)
+            f"({_latex_number(point['tank_size'])},{_latex_number(point['reliability'])})"
+            for point in report["curve"]
         )
         selected_reliability = "--"
-        if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
-            selected_reliability = f"{float(self.results_df['ReliabilityPercent'].iloc[0]):.2f}\\%"
+        if report["selected_reliability"] is not None:
+            selected_reliability = f"{report['selected_reliability']:.2f}\\%"
 
         return rf"""\documentclass[11pt]{{article}}
 \usepackage[margin=0.75in]{{geometry}}
@@ -1258,10 +1333,99 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
 \end{{document}}
 """
 
-    def _compile_latex_report(self, tex_path: Path, pdf_path: Path, metadata: dict[str, str]) -> None:
+    def _build_report_html(self, report: dict[str, object]) -> str:
+        metadata = report["metadata"]
+        surfaces = report["surfaces"]
+        curve = report["curve"]
+        escape = lambda value: html.escape(str(value), quote=True)
+        surface_rows = "".join(
+            f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
+            f"<td>{surface['runoff_coefficient']:.3f}</td></tr>"
+            for surface in surfaces
+        ) or '<tr><td>No collection surfaces</td><td>0.00</td><td>0.000</td></tr>'
+
+        chart_width, chart_height = 900.0, 420.0
+        left, right, top, bottom = 72.0, 24.0, 28.0, 62.0
+        plot_width = chart_width - left - right
+        plot_height = chart_height - top - bottom
+        x_values = [float(point["tank_size"]) for point in curve]
+        x_min, x_max = min(x_values), max(x_values)
+        if x_min == x_max:
+            x_max = x_min + 1
+
+        def chart_x(value: float) -> float:
+            return left + ((value - x_min) / (x_max - x_min)) * plot_width
+
+        def chart_y(value: float) -> float:
+            return top + (1 - max(0.0, min(value, 100.0)) / 100.0) * plot_height
+
+        polyline = " ".join(
+            f"{chart_x(float(point['tank_size'])):.2f},{chart_y(float(point['reliability'])):.2f}"
+            for point in curve
+        )
+        circles = "".join(
+            f'<circle cx="{chart_x(float(point["tank_size"])):.2f}" cy="{chart_y(float(point["reliability"])):.2f}" r="4">'
+            f'<title>{float(point["tank_size"]):,.0f} {escape(report["volume_unit"])}: '
+            f'{float(point["reliability"]):.2f}% reliability</title></circle>'
+            for point in curve
+        )
+        y_grid = "".join(
+            f'<line x1="{left}" y1="{chart_y(value):.2f}" x2="{left + plot_width}" y2="{chart_y(value):.2f}" />'
+            f'<text x="{left - 14}" y="{chart_y(value) + 4:.2f}" text-anchor="end">{value}</text>'
+            for value in range(0, 101, 20)
+        )
+        x_ticks = "".join(
+            f'<line x1="{chart_x(value):.2f}" y1="{top}" x2="{chart_x(value):.2f}" y2="{top + plot_height}" />'
+            f'<text x="{chart_x(value):.2f}" y="{top + plot_height + 26}" text-anchor="middle">{value:,.0f}</text>'
+            for value in [x_min + (x_max - x_min) * index / 4 for index in range(5)]
+        )
+        selected = report["selected_reliability"]
+        selected_text = "--" if selected is None else f"{selected:.2f}%"
+        info_rows = "".join(
+            f'<div class="fact"><dt>{escape(label)}</dt><dd>{escape(value or "Not specified")}</dd></div>'
+            for label, value in [
+                ("Client name", metadata["client_name"]),
+                ("Date", metadata["date"]),
+                ("Location", metadata["location"]),
+                ("Project name", metadata["project_name"]),
+                ("End-uses of water", metadata["end_uses"]),
+                ("Selected tank reliability", selected_text),
+            ]
+        )
+        return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{escape(metadata['project_name'])} - RWH Calculator Report</title>
+<style>
+:root {{ color-scheme: light; --ink:#17242b; --muted:#64747c; --line:#dce5e8; --green:#18795b; --blue:#176b9c; --paper:#fff; --wash:#f2f6f5; }}
+* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 Arial,Helvetica,sans-serif; }}
+main {{ width:min(1040px,calc(100% - 32px)); margin:32px auto; background:var(--paper); box-shadow:0 12px 36px rgba(23,36,43,.10); }}
+header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
+.eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
+h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
+section {{ padding:34px 52px; border-bottom:1px solid var(--line); }} h2 {{ margin:0 0 20px; font-size:20px; }}
+dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
+.fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
+table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
+.chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
+.curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
+.axis-label {{ fill:var(--muted); font-size:13px; font-weight:700; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
+@media (max-width:700px) {{ main {{ width:100%; margin:0; }} header,section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
+@media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
+</style></head><body><main>
+<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>RWH Calculator Report</p></header>
+<section><h2>Project information</h2><dl>{info_rows}</dl></section>
+<section><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
+<section><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
+<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}
+<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
+<text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
+</svg></div></section><footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
+</main></body></html>"""
+
+    def _compile_latex_report(self, tex_path: Path, pdf_path: Path, report: dict[str, object]) -> None:
         pdflatex = shutil.which("pdflatex")
         if pdflatex is None:
-            self._write_fallback_pdf_report(pdf_path, metadata)
+            self._write_fallback_pdf_report(pdf_path, report)
             return
 
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -1284,22 +1448,22 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
                 raise RuntimeError(f"LaTeX did not create a PDF. Source saved to {tex_path}.")
             shutil.copyfile(compiled_pdf, pdf_path)
 
-    def _write_fallback_pdf_report(self, pdf_path: Path, metadata: dict[str, str]) -> None:
-        cfg = self.config_model
+    def _write_fallback_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
+        metadata = report["metadata"]
         surface_rows = [
             (
-                surface.name,
-                f"{area_to_display(surface.area, cfg):,.2f}",
-                f"{surface.runoff_coefficient:.3f}",
+                surface["name"],
+                f"{surface['area']:,.2f}",
+                f"{surface['runoff_coefficient']:.3f}",
             )
-            for surface in cfg.surfaces
+            for surface in report["surfaces"]
         ]
         if not surface_rows:
             surface_rows = [("No collection surfaces", "0.00", "0.000")]
 
         selected_reliability = "--"
-        if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
-            selected_reliability = f"{float(self.results_df['ReliabilityPercent'].iloc[0]):.2f}%"
+        if report["selected_reliability"] is not None:
+            selected_reliability = f"{report['selected_reliability']:.2f}%"
 
         pages: list[list[str]] = [[]]
         y = 744.0
@@ -1356,7 +1520,7 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
 
         heading("Surface Area Summary")
         text(54, y, "Surface", size=10, bold=True)
-        text(330, y, f"Area ({area_unit(cfg)})", size=10, bold=True)
+        text(330, y, f"Area ({report['area_unit']})", size=10, bold=True)
         text(450, y, "Runoff coeff.", size=10, bold=True)
         y -= 8
         line(54, y, 558, y)
@@ -1370,16 +1534,17 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
             y -= 14
 
         heading("Reliability Curve")
-        self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250)
+        self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250, report)
 
         self._write_pdf_with_pypdf(pdf_path, pages)
 
-    def _draw_pdf_reliability_curve(self, commands: list[str], x: float, y: float, width: float, height: float) -> None:
-        cfg = self.config_model
-        rows = list(self.curve_df.itertuples(index=False))
-        if not rows:
+    def _draw_pdf_reliability_curve(
+        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+    ) -> None:
+        curve = report["curve"]
+        if not curve:
             return
-        values = [(volume_to_display(row.TankSizeGallons, cfg), float(row.ReliabilityPercent)) for row in rows]
+        values = [(float(point["tank_size"]), float(point["reliability"])) for point in curve]
         x_min = min(v[0] for v in values)
         x_max = max(v[0] for v in values)
         if x_min == x_max:
@@ -1408,7 +1573,7 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
             label = _pdf_escape(f"{value:.0f}")
             commands.append(f"BT /F1 8 Tf 1 0 0 1 {tick_x - 12:.2f} {y - 18:.2f} Tm ({label}) Tj ET")
         commands.append(f"BT /F2 10 Tf 1 0 0 1 {x + width / 2 - 56:.2f} {y + height + 18:.2f} Tm (Reliability Curve) Tj ET")
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(volume_unit(cfg))})) Tj ET")
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(report['volume_unit'])})) Tj ET")
         commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 42:.2f} {y + height / 2:.2f} Tm (Reliability %) Tj ET")
         points = [(sx(tank), sy(reliability)) for tank, reliability in values]
         if len(points) >= 2:
