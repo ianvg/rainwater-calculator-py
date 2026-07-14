@@ -119,6 +119,9 @@ The uploaded CSV must include these columns:
 - `Date`
 - `Precipitation`
 
+## License
+RWH Calculator is open-source software released under the Zero-Clause BSD (0BSD) license. See `LICENSE`.
+
 ## Legacy Flask app
 The original Flask app is still present in `main.py` and `templates/`, but the new Streamlit app is the preferred path moving forward.
 

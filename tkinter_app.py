@@ -27,6 +27,51 @@ from rainwater_app.units import (
 )
 
 APP_TITLE = "Rainwater Harvesting Calculator"
+ABOUT_TEXT = """RWH Calculator
+
+Copyright (c) 2026 RWH Calculator contributors
+All rights reserved except as granted by the open-source license below.
+
+OPEN-SOURCE LICENSE:
+RWH Calculator is open-source software released under the
+Zero-Clause BSD (0BSD) license.
+
+Permission to use, copy, modify, and/or distribute this software for any
+purpose with or without fee is hereby granted.
+
+NOTICE:
+This software is provided to assist with rainwater harvesting calculations.
+Users are responsible for verifying inputs, assumptions, local codes, design
+criteria, rainfall data, and results before using them for planning,
+engineering, permitting, construction, or operational decisions.
+
+DISCLAIMER OF WARRANTY AND LIMITATION OF LIABILITY:
+THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND. NEITHER THE
+RWH CALCULATOR CONTRIBUTORS, THEIR LICENSORS, OR ANY PERSON OR ORGANIZATION
+ACTING ON BEHALF OF ANY OF THEM:
+
+A.  MAKE ANY WARRANTY OR REPRESENTATION WHATSOEVER, EXPRESS OR IMPLIED, WITH
+RESPECT TO RWH CALCULATOR OR ANY DERIVATIVE WORKS THEREOF, INCLUDING WITHOUT
+LIMITATION WARRANTIES OF MERCHANTABILITY, WARRANTIES OF FITNESS FOR A
+PARTICULAR PURPOSE, OR WARRANTIES OR REPRESENTATIONS REGARDING THE USE, OR
+THE RESULTS OF THE USE OF RWH CALCULATOR OR DERIVATIVE WORKS THEREOF IN
+TERMS OF CORRECTNESS, ACCURACY, RELIABILITY, CURRENTNESS, OR OTHERWISE. THE
+ENTIRE RISK AS TO THE RESULTS AND PERFORMANCE OF THE SOFTWARE IS ASSUMED BY
+THE USER.
+
+B.  MAKE ANY REPRESENTATION OR WARRANTY THAT RWH CALCULATOR OR DERIVATIVE
+WORKS THEREOF WILL NOT INFRINGE ANY COPYRIGHT OR OTHER PROPRIETARY RIGHT.
+
+C.  ASSUME ANY LIABILITY WHATSOEVER WITH RESPECT TO ANY USE OF RWH
+CALCULATOR, DERIVATIVE WORKS THEREOF, OR ANY PORTION THEREOF OR WITH RESPECT
+TO ANY DAMAGES WHICH MAY RESULT FROM SUCH USE.
+
+DISCLAIMER OF ENDORSEMENT:
+Reference herein to any specific commercial products, processes, services,
+data sources, trade names, trademarks, manufacturers, or otherwise, does not
+necessarily constitute or imply endorsement, recommendation, or favoring by
+the RWH Calculator contributors or any government entity.
+"""
 MONTH_LABELS = {
     "jan": "Jan",
     "feb": "Feb",
@@ -224,6 +269,10 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_separator()
         file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        help_menu = tk.Menu(menubar, tearoff=False)
+        help_menu.add_command(label="About RWH Calculator", command=self._show_about_dialog)
+        menubar.add_cascade(label="Help", menu=help_menu)
         self.config(menu=menubar)
 
         self.bind_all("<Control-n>", self._shortcut_create_new_project)
@@ -252,6 +301,34 @@ class RainwaterTkApp(tk.Tk):
     def _shortcut_exit(self, _event: tk.Event) -> str:
         self.destroy()
         return "break"
+
+    def _show_about_dialog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("About RWH Calculator")
+        dialog.transient(self)
+        dialog.geometry("720x560")
+        dialog.minsize(560, 360)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog, padding=(10, 10, 10, 0))
+        text_frame.grid(row=0, column=0, sticky="nsew")
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+
+        text = tk.Text(text_frame, wrap="word", height=24, width=84)
+        text.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(text_frame, orient="vertical", command=text.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=scrollbar.set)
+        text.insert("1.0", ABOUT_TEXT)
+        text.configure(state="disabled")
+
+        button_frame = ttk.Frame(dialog, padding=10)
+        button_frame.grid(row=1, column=0, sticky="e")
+        ttk.Button(button_frame, text="Close", command=dialog.destroy).grid(row=0, column=0)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.focus_set()
 
     def _build_inputs_tab(self) -> None:
         self.inputs_tab.columnconfigure(0, weight=1)
