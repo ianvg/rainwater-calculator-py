@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from typing import Iterable
+from typing import Callable, Iterable
 
 import numpy as np
 import pandas as pd
@@ -143,11 +143,16 @@ def reliability_curve(
     rainfall_df: pd.DataFrame,
     tank_sizes_gallons: Iterable[float],
     tank_parameters: TankParameters | None = None,
+    progress_callback: Callable[[int, int, float], None] | None = None,
 ) -> pd.DataFrame:
     rows: list[dict[str, float]] = []
-    for tank_size in tank_sizes_gallons:
+    tank_sizes = list(tank_sizes_gallons)
+    total = len(tank_sizes)
+    for index, tank_size in enumerate(tank_sizes, start=1):
         result = simulate_tank(config, rainfall_df, tank_size, tank_parameters=tank_parameters)
         reliability = float(result["ReliabilityPercent"].iloc[0]) if not result.empty else 0.0
         rows.append({"TankSizeGallons": float(tank_size), "ReliabilityPercent": reliability})
+        if progress_callback is not None:
+            progress_callback(index, total, float(tank_size))
 
     return pd.DataFrame(rows)

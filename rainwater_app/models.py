@@ -48,6 +48,7 @@ class ProjectConfig:
     graph_end_gal: int = 20000
     graph_step_gal: int = 500
     selected_tank_size_gal: float = 5000.0
+    rainfall_source_label: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)
 
     def to_dict(self) -> Dict:

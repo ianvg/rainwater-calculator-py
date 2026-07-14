@@ -88,6 +88,26 @@ def test_project_can_be_saved_without_rainfall_data(tmp_path) -> None:
     assert list(rainfall.columns) == ["Date", "Precipitation"]
 
 
+def test_project_persists_rainfall_source_label(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "projects.db"))
+    cfg = default_project_config()
+    cfg.name = "ACIS Project"
+    cfg.rainfall_source_label = "CENTRAL PARK NY (123456)"
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+            "Precipitation": [0.1, 0.0],
+        }
+    )
+
+    store.save_project(cfg, rainfall)
+
+    loaded_cfg, loaded_rainfall = store.load_project("ACIS Project")
+
+    assert loaded_cfg.rainfall_source_label == "CENTRAL PARK NY (123456)"
+    assert len(loaded_rainfall) == 2
+
+
 def test_reliability_curve_does_not_decrease_with_larger_tanks() -> None:
     cfg = default_project_config()
     cfg.surfaces[0].area = 2000

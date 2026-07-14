@@ -4,7 +4,7 @@ import csv
 import sys
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 
 import pandas as pd
 
@@ -154,12 +154,22 @@ class RainwaterTkApp(tk.Tk):
         self.selected_tank_var = tk.StringVar(value=str(self.config_model.selected_tank_size_gal))
         self.initial_fill_var = tk.StringVar(value=str(self.config_model.tank_parameters.initial_fill_percent))
         self.reserve_var = tk.StringVar(value=str(self.config_model.tank_parameters.reliable_fill_percent))
+        self.simple_daily_unit_var = tk.StringVar()
+        self.flush_count_unit_var = tk.StringVar(value="flushes/person")
+        self.flush_volume_unit_var = tk.StringVar()
+        self.tank_size_unit_var = tk.StringVar()
+        self.percent_unit_var = tk.StringVar(value="%")
+        self.reserve_unit_var = tk.StringVar(value="% of daily demand")
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
+        self.analysis_progress_var = tk.DoubleVar(value=0.0)
         self.weather_state_var = tk.StringVar(value="NY - New York")
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
+        self.rainfall_source_label: str | None = None
+        self.station_typeahead = ""
+        self.station_typeahead_after_id: str | None = None
 
         self._build_ui()
         self._load_project_list()
@@ -168,19 +178,17 @@ class RainwaterTkApp(tk.Tk):
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=1)
+        self._build_menu()
 
         toolbar = ttk.Frame(self, padding=(10, 8))
         toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(4, weight=1)
+        toolbar.columnconfigure(2, weight=1)
 
         ttk.Label(toolbar, text="Project").grid(row=0, column=0, sticky="w")
         self.project_combo = ttk.Combobox(toolbar, textvariable=self.saved_project_var, width=24, state="readonly")
         self.project_combo.grid(row=0, column=1, padx=(6, 8), sticky="w")
-        ttk.Button(toolbar, text="New", command=self.new_project).grid(row=0, column=2, padx=2)
-        ttk.Button(toolbar, text="Save", command=self.save_project).grid(row=0, column=3, padx=2)
-        ttk.Button(toolbar, text="Load", command=self.load_selected_project).grid(row=0, column=4, sticky="w", padx=2)
-        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=5, padx=(18, 2))
-        ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=6, padx=2)
+        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=3, padx=(18, 2))
+        ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=4, padx=2)
 
         notebook = ttk.Notebook(self)
         notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
@@ -199,8 +207,44 @@ class RainwaterTkApp(tk.Tk):
         self._build_demand_tab()
         self._build_results_tab()
 
-        status = ttk.Label(self, textvariable=self.status_var, anchor="w", padding=(10, 4))
-        status.grid(row=2, column=0, sticky="ew")
+        status_frame = ttk.Frame(self, padding=(10, 4))
+        status_frame.grid(row=2, column=0, sticky="ew")
+        status_frame.columnconfigure(0, weight=1)
+        ttk.Label(status_frame, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="ew")
+        self.analysis_progress = ttk.Progressbar(status_frame, variable=self.analysis_progress_var, maximum=100, length=180)
+        self.analysis_progress.grid(row=0, column=1, sticky="e", padx=(12, 0))
+
+    def _build_menu(self) -> None:
+        menubar = tk.Menu(self)
+        file_menu = tk.Menu(menubar, tearoff=False)
+        file_menu.add_command(label="Create new project", accelerator="Ctrl+N", command=self.new_project)
+        file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
+        file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
+        file_menu.add_command(label="Load project", accelerator="Ctrl+L", command=self.load_selected_project)
+        menubar.add_cascade(label="File", menu=file_menu)
+        self.config(menu=menubar)
+
+        self.bind_all("<Control-n>", self._shortcut_create_new_project)
+        self.bind_all("<Control-s>", self._shortcut_save_project)
+        self.bind_all("<Control-Shift-S>", self._shortcut_save_project_as)
+        self.bind_all("<Control-Shift-s>", self._shortcut_save_project_as)
+        self.bind_all("<Control-l>", self._shortcut_load_project)
+
+    def _shortcut_create_new_project(self, _event: tk.Event) -> str:
+        self.new_project()
+        return "break"
+
+    def _shortcut_save_project(self, _event: tk.Event) -> str:
+        self.save_project()
+        return "break"
+
+    def _shortcut_save_project_as(self, _event: tk.Event) -> str:
+        self.save_project_as()
+        return "break"
+
+    def _shortcut_load_project(self, _event: tk.Event) -> str:
+        self.load_selected_project()
+        return "break"
 
     def _build_inputs_tab(self) -> None:
         self.inputs_tab.columnconfigure(0, weight=1)
@@ -237,20 +281,19 @@ class RainwaterTkApp(tk.Tk):
 
         settings_frame = ttk.LabelFrame(right_frame, text="Demand and Analysis Settings", padding=10)
         settings_frame.grid(row=0, column=0, sticky="ew")
-        for i in range(2):
-            settings_frame.columnconfigure(i, weight=1)
+        settings_frame.columnconfigure(1, weight=1)
 
-        self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var)
-        self._labeled_entry(settings_frame, 1, "Average flushes/person", self.flushes_var)
-        self._labeled_entry(settings_frame, 2, "Toilet volume/flush", self.toilet_flush_var)
-        self._labeled_entry(settings_frame, 3, "Urinal volume/flush", self.urinal_flush_var)
-        ttk.Separator(settings_frame).grid(row=4, column=0, columnspan=2, sticky="ew", pady=8)
-        self._labeled_entry(settings_frame, 5, "Graph start tank size", self.graph_start_var)
-        self._labeled_entry(settings_frame, 6, "Graph end tank size", self.graph_end_var)
-        self._labeled_entry(settings_frame, 7, "Graph step", self.graph_step_var)
-        self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var)
-        self._labeled_entry(settings_frame, 9, "Initial fill %", self.initial_fill_var)
-        self._labeled_entry(settings_frame, 10, "Reserve threshold %", self.reserve_var)
+        self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
+        self._labeled_entry(settings_frame, 1, "Average flushes", self.flushes_var, self.flush_count_unit_var)
+        self._labeled_entry(settings_frame, 2, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
+        self._labeled_entry(settings_frame, 3, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
+        ttk.Separator(settings_frame).grid(row=4, column=0, columnspan=3, sticky="ew", pady=8)
+        self._labeled_entry(settings_frame, 5, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 6, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 7, "Graph step", self.graph_step_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 8, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 9, "Initial fill", self.initial_fill_var, self.percent_unit_var)
+        self._labeled_entry(settings_frame, 10, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
 
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
@@ -265,13 +308,17 @@ class RainwaterTkApp(tk.Tk):
         weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         weather_frame.columnconfigure(1, weight=1)
         ttk.Label(weather_frame, text="State").grid(row=0, column=0, sticky="w", pady=2)
-        state_combo = ttk.Combobox(weather_frame, textvariable=self.weather_state_var, values=STATE_LABELS, state="readonly")
-        state_combo.grid(row=0, column=1, sticky="ew", pady=2)
+        self.state_combo = ttk.Combobox(weather_frame, textvariable=self.weather_state_var, values=STATE_LABELS, state="readonly")
+        self.state_combo.configure(postcommand=self._bind_state_combo_dropdown)
+        self.state_combo.grid(row=0, column=1, sticky="ew", pady=2)
+        self.state_combo.bind("<KeyPress>", self._select_state_by_first_letter)
         self._labeled_entry(weather_frame, 1, "Historical years", self.weather_years_var)
         self._labeled_entry(weather_frame, 2, "Station filter", self.weather_filter_var)
         ttk.Button(weather_frame, text="Find Stations", command=self.find_acis_stations).grid(row=3, column=0, sticky="w", pady=(8, 2))
         self.station_combo = ttk.Combobox(weather_frame, textvariable=self.station_var, state="readonly")
+        self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
         self.station_combo.grid(row=3, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
+        self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
         ttk.Button(weather_frame, text="Import Selected Station", command=self.import_acis_weather).grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
     def _build_demand_tab(self) -> None:
@@ -316,9 +363,87 @@ class RainwaterTkApp(tk.Tk):
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
         self.results_tree.grid(row=2, column=0, columnspan=2, sticky="nsew")
 
-    def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar) -> None:
+    def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
         ttk.Entry(parent, textvariable=variable, width=18).grid(row=row, column=1, sticky="ew", pady=2)
+        if unit_var is not None:
+            ttk.Label(parent, textvariable=unit_var).grid(row=row, column=2, sticky="w", padx=(8, 0), pady=2)
+
+    def _select_state_by_first_letter(self, event: tk.Event) -> str | None:
+        return self._select_state_by_char(str(event.char))
+
+    def _select_state_by_char(self, char: str, listbox: tk.Listbox | None = None) -> str | None:
+        key = char.upper()
+        if len(key) != 1 or not key.isalpha():
+            return None
+        for index, label in enumerate(STATE_LABELS):
+            if label.startswith(key):
+                self.state_combo.current(index)
+                if listbox is not None:
+                    listbox.selection_clear(0, tk.END)
+                    listbox.selection_set(index)
+                    listbox.activate(index)
+                    listbox.see(index)
+                return "break"
+        return None
+
+    def _bind_state_combo_dropdown(self) -> None:
+        self.after_idle(self._bind_state_combo_listbox)
+
+    def _bind_state_combo_listbox(self) -> None:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.state_combo}")
+            listbox = self.nametowidget(f"{popdown}.f.l")
+        except (KeyError, tk.TclError):
+            return
+        listbox.bind("<KeyPress>", lambda event: self._select_state_by_char(str(event.char), listbox))
+
+    def _select_station_by_typed_prefix(self, event: tk.Event) -> str | None:
+        return self._select_station_by_char(str(event.char))
+
+    def _select_station_by_char(self, char: str, listbox: tk.Listbox | None = None) -> str | None:
+        key = char.casefold()
+        if len(key) != 1 or not key.isalnum():
+            return None
+
+        if self.station_typeahead_after_id is not None:
+            self.after_cancel(self.station_typeahead_after_id)
+
+        self.station_typeahead += key
+        if not self._select_station_by_prefix(self.station_typeahead, listbox):
+            self.station_typeahead = key
+            self._select_station_by_prefix(self.station_typeahead, listbox)
+
+        self.station_typeahead_after_id = self.after(1000, self._reset_station_typeahead)
+        return "break"
+
+    def _select_station_by_prefix(self, prefix: str, listbox: tk.Listbox | None = None) -> bool:
+        labels = list(self.station_combo["values"])
+        for index, label in enumerate(labels):
+            if str(label).casefold().startswith(prefix):
+                self.station_combo.current(index)
+                if listbox is not None:
+                    listbox.selection_clear(0, tk.END)
+                    listbox.selection_set(index)
+                    listbox.activate(index)
+                    listbox.see(index)
+                return True
+        return False
+
+    def _reset_station_typeahead(self) -> None:
+        self.station_typeahead = ""
+        self.station_typeahead_after_id = None
+
+    def _bind_station_combo_dropdown(self) -> None:
+        self.after_idle(self._bind_station_combo_listbox)
+
+    def _bind_station_combo_listbox(self) -> None:
+        try:
+            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.station_combo}")
+            listbox = self.nametowidget(f"{popdown}.f.l")
+        except (KeyError, tk.TclError):
+            return
+        listbox.bind("<KeyPress>", lambda event: self._select_station_by_char(str(event.char), listbox))
 
     def _load_project_list(self) -> None:
         projects = self.store.list_projects()
@@ -340,9 +465,16 @@ class RainwaterTkApp(tk.Tk):
         self.selected_tank_var.set(f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}")
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
         self.reserve_var.set(f"{cfg.tank_parameters.reliable_fill_percent:.0f}")
+        self._update_setting_unit_labels()
         self._populate_surfaces()
         self._populate_demand()
         self._update_rainfall_summary()
+
+    def _update_setting_unit_labels(self) -> None:
+        unit = volume_unit(self.config_model)
+        self.simple_daily_unit_var.set(f"{unit}/day")
+        self.flush_volume_unit_var.set(f"{unit}/flush")
+        self.tank_size_unit_var.set(unit)
 
     def _apply_form_to_model(self) -> bool:
         cfg = self.config_model
@@ -394,7 +526,8 @@ class RainwaterTkApp(tk.Tk):
             return
         start = pd.Timestamp(self.rainfall_df["Date"].min()).strftime("%Y-%m-%d")
         end = pd.Timestamp(self.rainfall_df["Date"].max()).strftime("%Y-%m-%d")
-        self.rainfall_summary_var.set(f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end})")
+        source = f" from {self.rainfall_source_label}" if self.rainfall_source_label else ""
+        self.rainfall_summary_var.set(f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}")
 
     def _change_units(self) -> None:
         self.config_model.unit_system = self.unit_var.get()
@@ -403,6 +536,8 @@ class RainwaterTkApp(tk.Tk):
     def new_project(self) -> None:
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+        self.rainfall_source_label = None
+        self.config_model.rainfall_source_label = None
         self.results_df = pd.DataFrame()
         self.curve_df = pd.DataFrame()
         self.reliability_var.set("Reliability: --")
@@ -417,6 +552,7 @@ class RainwaterTkApp(tk.Tk):
             return
         try:
             self.config_model, self.rainfall_df = self.store.load_project(name)
+            self.rainfall_source_label = self.config_model.rainfall_source_label
             self.results_df = pd.DataFrame()
             self.curve_df = pd.DataFrame()
             self._clear_results()
@@ -427,6 +563,28 @@ class RainwaterTkApp(tk.Tk):
 
     def save_project(self) -> None:
         self._apply_form_to_model()
+        self._save_current_project()
+
+    def save_project_as(self) -> None:
+        self._apply_form_to_model()
+        name = simpledialog.askstring(
+            APP_TITLE,
+            "Project name",
+            initialvalue=self.config_model.name,
+            parent=self,
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Project name cannot be blank.")
+            return
+        self.config_model.name = name
+        self.project_name_var.set(name)
+        self._save_current_project()
+
+    def _save_current_project(self) -> None:
+        self.config_model.rainfall_source_label = self.rainfall_source_label
         try:
             self.store.save_project(self.config_model, self.rainfall_df)
             self._load_project_list()
@@ -448,6 +606,8 @@ class RainwaterTkApp(tk.Tk):
             rainfall = load_rainfall_csv(raw)
             rainfall["Precipitation"] = rainfall["Precipitation"].map(lambda v: precip_to_internal(float(v), self.config_model))
             self.rainfall_df = rainfall
+            self.rainfall_source_label = None
+            self.config_model.rainfall_source_label = None
             self._update_rainfall_summary()
             self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
@@ -470,6 +630,7 @@ class RainwaterTkApp(tk.Tk):
             labels = [self._station_label(station) for station in stations]
             self.station_combo["values"] = labels
             self.station_var.set(labels[0] if labels else "")
+            self._reset_station_typeahead()
             self.status_var.set(f"Found {len(stations)} ACIS station(s)")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not fetch ACIS stations:\n{exc}")
@@ -488,8 +649,10 @@ class RainwaterTkApp(tk.Tk):
             start_date, end_date = default_complete_calendar_range(years)
             weather_df = fetch_daily_station_data(station["sid"], start_date, end_date)
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
+            self.rainfall_source_label = f"{station['name']} ({station['sid']})"
+            self.config_model.rainfall_source_label = self.rainfall_source_label
             self._update_rainfall_summary()
-            self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']}")
+            self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not import ACIS weather:\n{exc}")
 
@@ -527,16 +690,36 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "Graph end tank size must be greater than graph start tank size.")
             return
         try:
-            tank_sizes = range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal)
-            self.curve_df = reliability_curve(cfg, self.rainfall_df, tank_sizes)
+            tank_sizes = list(range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal))
+            total_parts = 2
+            self.analysis_progress_var.set(0)
+            self.status_var.set("Analysis running: Part A - reliability curve")
+            self.update_idletasks()
+
+            def update_curve_progress(index: int, total: int, _tank_size: float) -> None:
+                part_progress = index / total if total else 1.0
+                self.analysis_progress_var.set((part_progress / total_parts) * 100)
+                self.status_var.set(f"Analysis running: Part A - reliability curve ({index}/{total})")
+                self.update_idletasks()
+
+            self.curve_df = reliability_curve(cfg, self.rainfall_df, tank_sizes, progress_callback=update_curve_progress)
+            self.analysis_progress_var.set(50)
+            self.status_var.set("Analysis running: Part B - selected tank simulation")
+            self.update_idletasks()
             self.results_df = simulate_tank(cfg, self.rainfall_df, cfg.selected_tank_size_gal)
+            self.analysis_progress_var.set(75)
+            self.status_var.set("Analysis running: Part B - drawing results")
+            self.update_idletasks()
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
             self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
             self._populate_results()
             self._draw_curve()
             self._draw_tank_chart()
+            self.analysis_progress_var.set(100)
             self.status_var.set("Analysis complete")
         except Exception as exc:  # noqa: BLE001
+            self.analysis_progress_var.set(0)
+            self.status_var.set("Analysis failed")
             messagebox.showerror(APP_TITLE, f"Analysis failed:\n{exc}")
 
     def export_results(self) -> None:

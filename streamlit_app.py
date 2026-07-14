@@ -79,11 +79,15 @@ def _ensure_session_state() -> None:
     _migrate_config(st.session_state.config)
     if "rainfall_df" not in st.session_state:
         st.session_state.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+    if "rainfall_source_label" not in st.session_state:
+        st.session_state.rainfall_source_label = None
 
 
 def _migrate_config(config: ProjectConfig) -> None:
     if not hasattr(config.demand, "simple_daily_demand_gallons"):
         config.demand.simple_daily_demand_gallons = 0.0
+    if not hasattr(config, "rainfall_source_label"):
+        config.rainfall_source_label = None
 
 
 def _surfaces_df(config: ProjectConfig) -> pd.DataFrame:
@@ -171,6 +175,15 @@ def _rainfall_to_internal_df(rainfall_df: pd.DataFrame, config: ProjectConfig) -
     return internal
 
 
+def _rainfall_summary(rainfall_df: pd.DataFrame, source_label: str | None = None) -> str:
+    if rainfall_df.empty:
+        return "No rainfall data loaded."
+    start = pd.Timestamp(rainfall_df["Date"].min()).strftime("%Y-%m-%d")
+    end = pd.Timestamp(rainfall_df["Date"].max()).strftime("%Y-%m-%d")
+    source = f" from {source_label}" if source_label else ""
+    return f"{len(rainfall_df):,} rainfall rows loaded ({start} to {end}){source}"
+
+
 def _station_label(station: dict) -> str:
     location = ""
     if station.get("latitude") is not None and station.get("longitude") is not None:
@@ -217,6 +230,8 @@ def _sidebar() -> None:
     if col_new.button("New"):
         st.session_state.config = default_project_config()
         st.session_state.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+        st.session_state.rainfall_source_label = None
+        st.session_state.config.rainfall_source_label = None
         st.rerun()
 
     if col_load.button("Load") and selected != "(none)":
@@ -224,11 +239,13 @@ def _sidebar() -> None:
         _migrate_config(config)
         st.session_state.config = config
         st.session_state.rainfall_df = rainfall_df
+        st.session_state.rainfall_source_label = config.rainfall_source_label
         st.rerun()
 
     if col_save.button("Save"):
         config = st.session_state.config
         rainfall_df = st.session_state.rainfall_df
+        config.rainfall_source_label = st.session_state.get("rainfall_source_label")
         store.save_project(config, rainfall_df)
         st.sidebar.success("Project saved.")
 
@@ -317,7 +334,10 @@ if station_options:
             st.session_state.weather_source_df = weather_df
             st.session_state.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
             rainfall_df = st.session_state.rainfall_df
-            st.success(f"Imported {len(weather_df)} daily rows from {_station_label(selected_station)}.")
+            source_label = f"{selected_station['name']} ({selected_station['sid']})"
+            st.session_state.rainfall_source_label = source_label
+            st.session_state.config.rainfall_source_label = source_label
+            st.success(_rainfall_summary(rainfall_df, source_label))
         except Exception as exc:  # noqa: BLE001
             st.error(f"Could not import ACIS weather data: {exc}")
 
@@ -341,11 +361,14 @@ if uploaded is not None:
     try:
         st.session_state.rainfall_df = _rainfall_to_internal_df(load_rainfall_csv(uploaded.getvalue()), config)
         rainfall_df = st.session_state.rainfall_df
+        st.session_state.rainfall_source_label = None
+        st.session_state.config.rainfall_source_label = None
         st.success(f"Loaded {len(rainfall_df)} rainfall rows.")
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
 
 if not rainfall_df.empty:
+    st.caption(_rainfall_summary(rainfall_df, st.session_state.get("rainfall_source_label")))
     st.dataframe(_rainfall_to_display_df(rainfall_df.head(20), config), width="stretch")
 
 st.subheader("Analysis Settings")
@@ -397,11 +420,19 @@ if st.button("Run Analysis", width="stretch"):
         st.error("Graph end size must be greater than graph start size.")
     else:
         tank_sizes = list(range(config.graph_start_gal, config.graph_end_gal + 1, config.graph_step_gal))
+        progress = st.progress(0, text="Analysis running: Part A - reliability curve")
 
-        curve = reliability_curve(config, rainfall_df, tank_sizes)
+        def update_curve_progress(index: int, total: int, _tank_size: float) -> None:
+            percent = int((index / total) * 50) if total else 50
+            progress.progress(percent, text=f"Analysis running: Part A - reliability curve ({index}/{total})")
+
+        curve = reliability_curve(config, rainfall_df, tank_sizes, progress_callback=update_curve_progress)
+        progress.progress(50, text="Analysis running: Part B - selected tank simulation")
         single = simulate_tank(config, rainfall_df, config.selected_tank_size_gal)
+        progress.progress(75, text="Analysis running: Part B - preparing charts")
         curve_display = _curve_to_display_df(curve, config)
         single_display = _results_to_display_df(single, config)
+        progress.progress(100, text="Analysis complete")
 
         st.subheader("Reliability vs Tank Size")
         st.line_chart(curve_display, x=f"Tank Size ({_volume_unit(config)})", y="Reliability (%)", width="stretch")

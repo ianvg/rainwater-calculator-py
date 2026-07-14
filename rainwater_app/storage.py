@@ -117,5 +117,6 @@ class SQLiteStore:
             graph_end_gal=int(payload.get("graph_end_gal", 20000)),
             graph_step_gal=int(payload.get("graph_step_gal", 500)),
             selected_tank_size_gal=float(payload.get("selected_tank_size_gal", 5000.0)),
+            rainfall_source_label=payload.get("rainfall_source_label"),
             tank_parameters=tank_params,
         )
