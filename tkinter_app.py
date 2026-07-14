@@ -221,6 +221,8 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_command(label="Load project", accelerator="Ctrl+L", command=self.load_selected_project)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
         self.config(menu=menubar)
 
@@ -229,6 +231,7 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-Shift-S>", self._shortcut_save_project_as)
         self.bind_all("<Control-Shift-s>", self._shortcut_save_project_as)
         self.bind_all("<Control-l>", self._shortcut_load_project)
+        self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _shortcut_create_new_project(self, _event: tk.Event) -> str:
         self.new_project()
@@ -244,6 +247,10 @@ class RainwaterTkApp(tk.Tk):
 
     def _shortcut_load_project(self, _event: tk.Event) -> str:
         self.load_selected_project()
+        return "break"
+
+    def _shortcut_exit(self, _event: tk.Event) -> str:
+        self.destroy()
         return "break"
 
     def _build_inputs_tab(self) -> None:
@@ -273,6 +280,7 @@ class RainwaterTkApp(tk.Tk):
         self.surface_tree.column("area", width=90, anchor="e")
         self.surface_tree.column("runoff", width=90, anchor="e")
         self.surface_tree.grid(row=0, column=0, sticky="nsew")
+        self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
         ttk.Button(surfaces_frame, text="Edit Selected Surface", command=self.edit_surface).grid(row=1, column=0, sticky="w", pady=(8, 0))
 
         right_frame = ttk.Frame(self.inputs_tab)
@@ -669,6 +677,14 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.surfaces[index] = dialog.result
             self._populate_surfaces()
 
+    def _edit_surface_from_event(self, event: tk.Event) -> str:
+        row_id = self.surface_tree.identify_row(event.y)
+        if row_id:
+            self.surface_tree.selection_set(row_id)
+            self.surface_tree.focus(row_id)
+            self.edit_surface()
+        return "break"
+
     def edit_demand_month(self) -> None:
         selected = self.demand_tree.selection()
         if not selected:
@@ -857,8 +873,14 @@ class SurfaceDialog(tk.Toplevel):
         ttk.Entry(body, textvariable=self.area_var, width=18).grid(row=1, column=1, sticky="w", pady=3)
         ttk.Label(body, text="Runoff coefficient").grid(row=2, column=0, sticky="w", pady=3)
         ttk.Entry(body, textvariable=self.runoff_var, width=18).grid(row=2, column=1, sticky="w", pady=3)
+        default_runoff = Surface(name="Default").runoff_coefficient
+        tk.Label(
+            body,
+            text=f"Default runoff coefficient: {default_runoff:.3f}",
+            fg="#777777",
+        ).grid(row=3, column=1, sticky="w", pady=(0, 6))
         buttons = ttk.Frame(body)
-        buttons.grid(row=3, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.transient(parent)
