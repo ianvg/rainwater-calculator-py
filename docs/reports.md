@@ -12,7 +12,7 @@ Report reliability is the percentage of simulated calendar days on which the tan
 
 The reliability graph marks the selected tank size and its simulated reliability with a red circle.
 
-The Yearly Demand Reliability plot appears immediately after the reliability curve. Each 100% stacked bar shows the percentage of days in that calendar year when complete demand was met by rainwater and when it was not; the two segments always total 100%.
+The Yearly Demand Reliability plot appears immediately after the reliability curve. Each 100% stacked bar shows the percentage of days in that calendar year when complete demand was met by rainwater and when it was not; the two segments always total 100%. Yellow markers identify each year's reliability at the segment boundary. A final average-only slot reports the selected tank's overall reliability and identifies the number of analyzed years.
 
 The Tank Level Distribution plot follows the yearly reliability plot. It groups the selected-tank simulation into six tank-level ranges and reports the number of days in each range.
 
@@ -45,7 +45,11 @@ Temporary previews are intended for review. Export a report when a permanent pro
 
 Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
 
-When **Multi-tank comparison** is enabled and comparison analysis is available, the report-information dialog enables **Include multi-tank sizing charts**. Selecting it appends the comparison charts in this order: tank-level distribution, yearly demand reliability, and tank water over time. The option is disabled when multi-tank comparison is not active.
+When **Multi-tank comparison** is enabled and comparison analysis is available, the report-information dialog enables **Include multi-tank sizing charts**. Selecting it appends **Tank level distribution - multitank**, the combined yearly reliability comparison, one stacked yearly demand reliability chart for each comparison tank, and the combined tank-water history. The primary tank's original charts remain in their normal report positions. The option is disabled when multi-tank comparison is not active.
+
+In HTML reports, the combined **Yearly demand reliability - multitank** chart includes a checked legend control for each tank size. Clear a tank's checkbox to hide its line and select it again to restore the line.
+
+The HTML multi-tank **Tank Water Over Time** chart supports **Single year** and **Custom range** views. In single-year mode, use the previous and next controls to cycle through analyzed years. In custom-range mode, use the two range endpoints to choose the first and last displayed month; both endpoints snap to whole months. Checked tank-size controls independently hide or restore each comparison line. Hover near a daily point to see its tank size, date, and stored-water value. PDF and LaTeX reports remain static and show the complete available record.
 
 PDF and HTML use the same report metadata and normalized report content. Differences between the formats are limited to presentation and format-specific rendering.
 
@@ -55,7 +59,7 @@ When `pdflatex` is available, the application saves LaTeX source and compiles it
 
 ## HTML details
 
-The generated file is self-contained and can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. Its reliability chart includes point details on hover.
+The generated file is self-contained and can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. Its reliability chart includes point details on hover. In the Yearly Demand Reliability chart, hover over either stacked-bar segment to see the year's met and unmet day counts and percentages. Hover over a yellow marker to see that year's reliability or the overall reliability across the analyzed years.
 
 ## Report review
 

@@ -590,6 +590,8 @@ class RainwaterTkApp(tk.Tk):
         self.longitude_var = tk.StringVar()
         self.coordinates_var = tk.StringVar(value="Coordinates: not selected")
         self.unit_var = tk.StringVar(value=self.config_model.unit_system)
+        self.system_type_var = tk.StringVar(value=self.config_model.system_type)
+        self.current_system_type_var = tk.StringVar(value=f"Current system type: {self.config_model.system_type}")
         self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
         self.saved_project_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
@@ -620,6 +622,11 @@ class RainwaterTkApp(tk.Tk):
         self.show_tank_points_var = tk.BooleanVar(value=True)
         self.tank_chart_year_var = tk.StringVar(value="--")
         self.tank_chart_year: int | None = None
+        self.tank_chart_range_mode_var = tk.StringVar(value="year")
+        self.tank_chart_range_start_var = tk.DoubleVar(value=0)
+        self.tank_chart_range_end_var = tk.DoubleVar(value=0)
+        self.tank_chart_range_label_var = tk.StringVar(value="")
+        self.tank_chart_range_initialized = False
         self.weather_state_var = tk.StringVar(value=STATE_PLACEHOLDER)
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
@@ -694,12 +701,14 @@ class RainwaterTkApp(tk.Tk):
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(8, 6))
 
         self.inputs_tab = ttk.Frame(self.notebook, padding=10)
+        self.system_parameters_tab = ttk.Frame(self.notebook, padding=10)
         self.import_tab = ttk.Frame(self.notebook, padding=10)
         self.collection_tab = ttk.Frame(self.notebook, padding=10)
         self.demand_tab = ttk.Frame(self.notebook, padding=10)
         self.analysis_tab = ttk.Frame(self.notebook, padding=10)
         self.results_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.inputs_tab, text="Project Inputs")
+        self.notebook.add(self.system_parameters_tab, text="System parameters")
         self.notebook.add(self.import_tab, text="Rainwater Data")
         self.notebook.add(self.collection_tab, text="Collection surfaces")
         self.notebook.add(self.demand_tab, text="Demand parameters")
@@ -708,6 +717,7 @@ class RainwaterTkApp(tk.Tk):
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_inputs_tab()
+        self._build_system_parameters_tab()
         self._build_import_tab()
         self._build_collection_tab()
         self._build_demand_tab()
@@ -1118,6 +1128,94 @@ class RainwaterTkApp(tk.Tk):
         self.inputs_canvas.yview_scroll(direction, "units")
         return "break"
 
+    def _build_system_parameters_tab(self) -> None:
+        self.system_parameters_tab.columnconfigure(0, weight=1)
+        system_type_frame = ttk.LabelFrame(self.system_parameters_tab, text="System type", padding=12)
+        system_type_frame.grid(row=0, column=0, sticky="ew")
+        ttk.Radiobutton(
+            system_type_frame,
+            text="Direct system",
+            variable=self.system_type_var,
+            value="Direct system",
+        ).grid(row=0, column=0, sticky="w", padx=(0, 24))
+        ttk.Radiobutton(
+            system_type_frame,
+            text="Indirect system",
+            variable=self.system_type_var,
+            value="Indirect system",
+        ).grid(row=0, column=1, sticky="w")
+        ttk.Button(system_type_frame, text="Apply", command=self.apply_system_type).grid(
+            row=1, column=0, columnspan=2, sticky="w", pady=(12, 0)
+        )
+        ttk.Label(
+            system_type_frame,
+            textvariable=self.current_system_type_var,
+            foreground="#6f777b",
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.indirect_system_diagram_frame = ttk.LabelFrame(
+            self.system_parameters_tab, text="Indirect system schematic", padding=10
+        )
+        self.indirect_system_diagram_frame.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.indirect_system_canvas = tk.Canvas(
+            self.indirect_system_diagram_frame,
+            width=880,
+            height=250,
+            background="white",
+            highlightthickness=1,
+            highlightbackground="#b7b7b7",
+        )
+        self.indirect_system_canvas.grid(row=0, column=0, sticky="w")
+        self._draw_indirect_system_diagram()
+        self._update_system_type_display()
+
+    def _draw_indirect_system_diagram(self) -> None:
+        canvas = self.indirect_system_canvas
+        canvas.delete("all")
+        canvas.create_rectangle(40, 30, 260, 190, outline="black", width=4)
+        canvas.create_text(150, 63, text="Primary tank", font=("Segoe UI", 13, "bold"))
+        canvas.create_line(*self._regular_wave_points(42, 258, 110, 8, 7), fill="black", width=4, smooth=True)
+        canvas.create_line(260, 150, 330, 150, fill="black", width=4)
+        canvas.create_oval(330, 115, 400, 185, outline="black", width=4)
+        canvas.create_polygon(391, 150, 349, 174, 349, 126, outline="black", fill="", width=4)
+        canvas.create_text(365, 210, text="Filtration pump", font=("Segoe UI", 11, "bold"))
+        canvas.create_line(400, 150, 460, 150, fill="black", width=4)
+        canvas.create_rectangle(460, 120, 600, 180, outline="black", width=4)
+        canvas.create_text(530, 150, text="Filtration", font=("Segoe UI", 11, "bold"))
+        canvas.create_line(600, 150, 680, 150, fill="black", width=4)
+        canvas.create_rectangle(680, 50, 850, 190, outline="black", width=4)
+        canvas.create_text(765, 80, text="Booster tank", font=("Segoe UI", 13, "bold"))
+        canvas.create_line(*self._regular_wave_points(682, 848, 120, 7, 6), fill="black", width=4, smooth=True)
+
+    @staticmethod
+    def _regular_wave_points(start_x: int, end_x: int, center_y: int, half_step: int, amplitude: int) -> list[int]:
+        points = [start_x, center_y]
+        x = start_x + half_step
+        direction = -1
+        while x < end_x:
+            points.extend((x, center_y + direction * amplitude))
+            direction *= -1
+            x += half_step
+        points.extend((end_x, center_y))
+        return points
+
+    def _update_system_type_display(self) -> None:
+        if not hasattr(self, "indirect_system_diagram_frame"):
+            return
+        if self.config_model.system_type == "Indirect system":
+            self.indirect_system_diagram_frame.grid()
+        else:
+            self.indirect_system_diagram_frame.grid_remove()
+
+    def apply_system_type(self) -> None:
+        selected_type = self.system_type_var.get()
+        if selected_type not in {"Direct system", "Indirect system"}:
+            selected_type = "Direct system"
+            self.system_type_var.set(selected_type)
+        self.config_model.system_type = selected_type
+        self.current_system_type_var.set(f"Current system type: {selected_type}")
+        self._update_system_type_display()
+        self.status_var.set(f"Applied system type: {selected_type}")
+
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
         self.import_tab.rowconfigure(2, weight=1)
@@ -1327,9 +1425,9 @@ class RainwaterTkApp(tk.Tk):
         add_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         add_row.columnconfigure(1, weight=1)
         ttk.Label(add_row, text="Tank size").grid(row=0, column=0, sticky="w")
-        ttk.Entry(add_row, textvariable=self.comparison_tank_var, width=16).grid(
-            row=0, column=1, sticky="ew", padx=(8, 8)
-        )
+        self.comparison_tank_entry = ttk.Entry(add_row, textvariable=self.comparison_tank_var, width=16)
+        self.comparison_tank_entry.grid(row=0, column=1, sticky="ew", padx=(8, 8))
+        self.comparison_tank_entry.bind("<Return>", self._add_comparison_tank_from_entry)
         ttk.Label(add_row, textvariable=self.tank_size_unit_var).grid(row=0, column=2, sticky="w")
         ttk.Button(add_row, text="Add", command=self.add_comparison_tank).grid(row=0, column=3, padx=(8, 0))
 
@@ -1346,7 +1444,7 @@ class RainwaterTkApp(tk.Tk):
         self.comparison_tree.column("size", width=150, anchor="e")
         self.comparison_tree.column("reliability", width=130, anchor="e")
         self.comparison_tree.column("status", width=72, minwidth=72, anchor="w", stretch=False)
-        self.comparison_tree.tag_configure("primary", foreground="#777777")
+        self.comparison_tree.tag_configure("primary", foreground="#0563c1", font=("Segoe UI", 9, "bold"))
         self.comparison_tree.grid(row=2, column=0, sticky="nsew")
         comparison_scroll = ttk.Scrollbar(comparison_frame, orient="vertical", command=self.comparison_tree.yview)
         comparison_scroll.grid(row=2, column=1, sticky="ns")
@@ -1402,20 +1500,43 @@ class RainwaterTkApp(tk.Tk):
         self.tank_points_check.place(x=58, rely=1, y=-4, anchor="sw")
         tank_year_controls = ttk.Frame(self.tank_canvas)
         tank_year_controls.place(relx=1, rely=1, x=-8, y=-4, anchor="se")
+        ttk.Radiobutton(
+            tank_year_controls, text="Single year", variable=self.tank_chart_range_mode_var,
+            value="year", command=self._draw_tank_chart,
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Radiobutton(
+            tank_year_controls, text="Custom range", variable=self.tank_chart_range_mode_var,
+            value="range", command=self._draw_tank_chart,
+        ).grid(row=0, column=2, columnspan=2, sticky="w")
         self.previous_tank_year_button = ttk.Button(
             tank_year_controls, text="<", width=3, command=lambda: self._change_tank_chart_year(-1)
         )
-        self.previous_tank_year_button.grid(row=0, column=0)
-        ttk.Label(tank_year_controls, text="Year").grid(row=0, column=1, padx=(4, 2))
+        self.previous_tank_year_button.grid(row=1, column=0)
+        ttk.Label(tank_year_controls, text="Year").grid(row=1, column=1, padx=(4, 2))
         self.tank_chart_year_entry = ttk.Entry(
             tank_year_controls, textvariable=self.tank_chart_year_var, width=6, justify="center"
         )
-        self.tank_chart_year_entry.grid(row=0, column=2, padx=(0, 4))
+        self.tank_chart_year_entry.grid(row=1, column=2, padx=(0, 4))
         self.tank_chart_year_entry.bind("<Return>", self._set_tank_chart_year_from_entry)
         self.next_tank_year_button = ttk.Button(
             tank_year_controls, text=">", width=3, command=lambda: self._change_tank_chart_year(1)
         )
-        self.next_tank_year_button.grid(row=0, column=3)
+        self.next_tank_year_button.grid(row=1, column=3)
+        self.tank_range_controls = ttk.Frame(self.tank_canvas)
+        self.tank_range_controls.place(x=58, rely=1, y=-30, anchor="sw")
+        ttk.Label(self.tank_range_controls, textvariable=self.tank_chart_range_label_var).grid(
+            row=0, column=0, columnspan=2, sticky="w"
+        )
+        self.tank_range_start_scale = ttk.Scale(
+            self.tank_range_controls, from_=0, to=0, variable=self.tank_chart_range_start_var,
+            command=lambda _value: self._tank_range_slider_changed("start"), length=115,
+        )
+        self.tank_range_start_scale.grid(row=1, column=0)
+        self.tank_range_end_scale = ttk.Scale(
+            self.tank_range_controls, from_=0, to=0, variable=self.tank_chart_range_end_var,
+            command=lambda _value: self._tank_range_slider_changed("end"), length=115,
+        )
+        self.tank_range_end_scale.grid(row=1, column=1, padx=(4, 0))
         self.histogram_canvas = tk.Canvas(
             summary,
             height=170,
@@ -1500,6 +1621,10 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.comparison_tank_sizes_gal.sort()
         self.comparison_tank_var.set("")
         self._populate_comparison_tanks()
+
+    def _add_comparison_tank_from_entry(self, _event: tk.Event) -> str:
+        self.add_comparison_tank()
+        return "break"
 
     def remove_comparison_tanks(self) -> None:
         if not self.multitank_comparison_var.get():
@@ -1957,6 +2082,11 @@ class RainwaterTkApp(tk.Tk):
         self.longitude_var.set("" if cfg.longitude is None else f"{cfg.longitude:.8f}")
         self._update_coordinates_label()
         self.unit_var.set(cfg.unit_system)
+        self.system_type_var.set(
+            cfg.system_type if cfg.system_type in {"Direct system", "Indirect system"} else "Direct system"
+        )
+        self.current_system_type_var.set(f"Current system type: {self.system_type_var.get()}")
+        self._update_system_type_display()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
             cfg.canadian_precipitation_field if cfg.country_code == "CAN" else cfg.acis_precipitation_field
@@ -3214,18 +3344,40 @@ class RainwaterTkApp(tk.Tk):
         tank_series: list[dict[str, object]] = []
         distribution_series: list[dict[str, object]] = []
         yearly_series: list[dict[str, object]] = []
+        yearly_stacked_charts: list[dict[str, object]] = []
         for tank_size, results in sorted(self.comparison_results.items()):
             if results.empty:
                 continue
             label = f"{volume_to_display(tank_size, self.config_model):,.0f} {unit}"
             levels = [float(value) for value in results["WaterInTankGallons"]]
             render_indices = self._chart_render_indices(levels, 800)
+            result_dates = pd.to_datetime(results["Date"], errors="coerce")
+            yearly_points: dict[str, list[tuple[float, float]]] = {}
+            for year in sorted(int(value) for value in result_dates.dropna().dt.year.unique()):
+                year_mask = result_dates.dt.year == year
+                year_levels = [
+                    volume_to_display(float(value), self.config_model)
+                    for value in results.loc[year_mask, "WaterInTankGallons"]
+                ]
+                year_indices = self._chart_render_indices(year_levels, 400)
+                yearly_points[str(year)] = [
+                    (float(index + 1), year_levels[index]) for index in year_indices
+                ]
             tank_series.append(
                 {
                     "label": label,
                     "points": [
                         (float(index), volume_to_display(levels[index], self.config_model))
                         for index in render_indices
+                    ],
+                    "yearly_points": yearly_points,
+                    "dated_points": [
+                        (
+                            pd.Timestamp(result_dates.iloc[index]).strftime("%Y-%m-%d"),
+                            volume_to_display(levels[index], self.config_model),
+                        )
+                        for index in render_indices
+                        if not pd.isna(result_dates.iloc[index])
                     ],
                 }
             )
@@ -3243,25 +3395,53 @@ class RainwaterTkApp(tk.Tk):
                     ],
                 }
             )
+            yearly = _yearly_demand_reliability(results)
             yearly_series.append(
                 {
                     "label": label,
                     "points": [
                         (float(row["year"]), float(row["met_percent"]))
-                        for row in _yearly_demand_reliability(results)
+                        for row in yearly
                     ],
                 }
             )
+            yearly_stacked_charts.append(
+                {
+                    "type": "yearly_stacked",
+                    "title": f"Yearly Demand Reliability - {label} tank",
+                    "yearly_reliability": yearly,
+                    "selected_reliability": float(results["ReliabilityPercent"].iloc[0]),
+                }
+            )
         return [
-            {"title": "Tank Level Distribution", "x_label": "Tank level (% of capacity)", "y_label": "Days (%)", "series": distribution_series},
-            {"title": "Yearly Demand Reliability", "x_label": "Year", "y_label": "Demand met (%)", "series": yearly_series},
-            {"title": f"Tank Water Over Time ({unit})", "x_label": "Day of record", "y_label": unit, "series": tank_series},
+            {
+                "title": "Tank level distribution - multitank",
+                "x_label": "Tank level (% of capacity)",
+                "y_label": "Days (%)",
+                "series": distribution_series,
+            },
+            {
+                "title": "Yearly demand reliability - multitank",
+                "x_label": "Year",
+                "y_label": "Demand met (%)",
+                "series": yearly_series,
+                "interactive_series_toggle": True,
+            },
+            *yearly_stacked_charts,
+            {
+                "type": "tank_history",
+                "title": f"Tank Water Over Time ({unit})",
+                "x_label": "Day of year",
+                "y_label": unit,
+                "series": tank_series,
+            },
         ]
 
     def _build_report_latex(self, report: dict[str, object]) -> str:
         metadata = report["metadata"]
         area = report["area_unit"]
         volume = report["volume_unit"]
+        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
         surface_rows = "\n".join(
             _latex_row(
                 surface["name"],
@@ -3302,6 +3482,8 @@ class RainwaterTkApp(tk.Tk):
 \addplot+[only marks, mark=o, red, mark size=7pt, very thick] coordinates {{
 ({_latex_number(report['selected_tank_size'])},{_latex_number(report['selected_reliability'])})
 }};
+\addlegendimage{{only marks, mark=o, red, mark size=5pt, very thick}}
+\addlegendentry{{Primary tank size}}
 """
         yearly_met_coordinates = " ".join(
             f"({_latex_number(row['year'])},{_latex_number(row['met_percent'])})"
@@ -3310,6 +3492,22 @@ class RainwaterTkApp(tk.Tk):
         yearly_unmet_coordinates = " ".join(
             f"({_latex_number(row['year'])},{_latex_number(row['unmet_percent'])})"
             for row in report["yearly_reliability"]
+        )
+        yearly_average_label = "Average"
+        yearly_average_reliability = float(report["selected_reliability"] or 0.0)
+        yearly_marker_coordinates = " ".join(
+            [
+                *(
+                    f"({_latex_number(row['year'])},{_latex_number(row['met_percent'])})"
+                    for row in report["yearly_reliability"]
+                ),
+                f"({yearly_average_label},{_latex_number(yearly_average_reliability)})",
+            ]
+        )
+        yearly_met_coordinates += f" ({yearly_average_label},0)"
+        yearly_unmet_coordinates += f" ({yearly_average_label},0)"
+        yearly_symbolic_coordinates = ",".join(
+            [*(str(int(row["year"])) for row in report["yearly_reliability"]), yearly_average_label]
         )
         distribution_coordinates = " ".join(
             f"({_latex_number(index + 1)},{_latex_number(row['count'])})"
@@ -3322,6 +3520,54 @@ class RainwaterTkApp(tk.Tk):
         multitank_latex = ""
         if report.get("include_multitank_charts"):
             for chart in report.get("multitank_charts", []):
+                if chart.get("type") == "yearly_stacked":
+                    yearly_rows = chart["yearly_reliability"]
+                    symbolic = ",".join(
+                        [*(str(int(row["year"])) for row in yearly_rows), "Average"]
+                    )
+                    met_points = " ".join(
+                        [
+                            *(f"({int(row['year'])},{_latex_number(row['met_percent'])})" for row in yearly_rows),
+                            "(Average,0)",
+                        ]
+                    )
+                    unmet_points = " ".join(
+                        [
+                            *(f"({int(row['year'])},{_latex_number(row['unmet_percent'])})" for row in yearly_rows),
+                            "(Average,0)",
+                        ]
+                    )
+                    marker_points = " ".join(
+                        [
+                            *(f"({int(row['year'])},{_latex_number(row['met_percent'])})" for row in yearly_rows),
+                            f"(Average,{_latex_number(chart['selected_reliability'])})",
+                        ]
+                    )
+                    multitank_latex += rf"""
+\clearpage
+\section{{{_latex_escape(chart['title'])}}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    width=6.6in,height=3.8in,ybar stacked,ymin=0,ymax=100,
+    ylabel={{Days (\%)}},xlabel={{Year}},symbolic x coords={{{symbolic}}},xtick=data,
+    label style={{font=\bfseries\normalsize}},
+    x tick label style={{rotate=45,anchor=east,font=\scriptsize}},
+    legend style={{at={{(0.5,-0.25)}},anchor=north,legend columns=3}},grid=major,
+]
+\addplot+[fill=green!65!black,draw=green!45!black] coordinates {{{met_points}}};
+\addlegendentry{{Demand met}}
+\addplot+[fill=red!65,draw=red!60!black] coordinates {{{unmet_points}}};
+\addlegendentry{{Demand not met}}
+\addplot+[only marks,mark=*,mark size=3pt,fill=yellow!80!orange,draw=yellow!40!black]
+coordinates {{{marker_points}}};
+\addlegendentry{{Tank reliability}}
+\end{{axis}}
+\end{{tikzpicture}}
+\par\small The Average marker reports tank reliability across {len(yearly_rows)} analyzed years.
+\end{{center}}
+"""
+                    continue
                 plots = []
                 legends = []
                 for series in chart["series"]:
@@ -3341,6 +3587,7 @@ class RainwaterTkApp(tk.Tk):
     height=3.8in,
     xlabel={{{_latex_escape(chart['x_label'])}}},
     ylabel={{{_latex_escape(chart['y_label'])}}},
+    label style={{font=\bfseries\normalsize}},
     ymin=0,
     grid=major,
     legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
@@ -3361,7 +3608,7 @@ class RainwaterTkApp(tk.Tk):
 \usepackage[hidelinks]{{hyperref}}
 \pgfplotsset{{compat=1.18}}
 
-\title{{RWH Calculator Report}}
+\title{{{_latex_escape(report_title)}}}
 \date{{}}
 
 \begin{{document}}
@@ -3426,10 +3673,12 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
     height=3.8in,
     xlabel={{Tank size ({_latex_escape(volume)})}},
     ylabel={{Reliability (\%)}},
+    label style={{font=\bfseries\normalsize}},
     ymin=0,
     ymax=100,
     grid=major,
     mark=*,
+    legend style={{at={{(0.5,-0.22)}}, anchor=north}},
 ]
 \addplot+[blue, thick] coordinates {{
 {coordinates}
@@ -3439,7 +3688,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
 \end{{tikzpicture}}
 \end{{center}}
 
-\section{{Yearly Demand Reliability}}
+\section{{Yearly Demand Reliability - {_latex_number(report['selected_tank_size'])} {_latex_escape(volume)} tank}}
 \begin{{center}}
 \begin{{tikzpicture}}
 \begin{{axis}}[
@@ -3450,16 +3699,23 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
     ymax=100,
     ylabel={{Days (\%)}},
     xlabel={{Year}},
+    label style={{font=\bfseries\normalsize}},
+    symbolic x coords={{{yearly_symbolic_coordinates}}},
     xtick=data,
     x tick label style={{rotate=45, anchor=east, font=\scriptsize}},
-    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=2}},
+    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
     grid=major,
 ]
 \addplot+[fill=green!65!black, draw=green!45!black] coordinates {{{yearly_met_coordinates}}};
+\addlegendentry{{Demand met}}
 \addplot+[fill=red!65, draw=red!60!black] coordinates {{{yearly_unmet_coordinates}}};
-\legend{{Demand met,Demand not met}}
+\addlegendentry{{Demand not met}}
+\addplot+[only marks, mark=*, mark size=3pt, fill=yellow!80!orange, draw=yellow!40!black]
+coordinates {{{yearly_marker_coordinates}}};
+\addlegendentry{{Tank reliability}}
 \end{{axis}}
 \end{{tikzpicture}}
+\par\small The Average marker reports tank reliability across {len(report["yearly_reliability"])} analyzed years.
 \end{{center}}
 
 \section{{Tank Level Distribution}}
@@ -3472,6 +3728,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
     ymin=0,
     ylabel={{Days}},
     xlabel={{Tank level range ({_latex_escape(volume)})}},
+    label style={{font=\bfseries\normalsize}},
     xtick={{1,...,6}},
     xticklabels={{{distribution_labels}}},
     x tick label style={{rotate=30, anchor=east, font=\scriptsize}},
@@ -3492,6 +3749,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
         surfaces = report["surfaces"]
         curve = report["curve"]
         escape = lambda value: html.escape(str(value), quote=True)
+        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
         multitank_html = RainwaterTkApp._build_multitank_report_html(report)
         surface_rows = "".join(
             f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
@@ -3578,7 +3836,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
         )
         notes_html = escape(report.get("notes", "").strip() or "No notes provided.")
         yearly = report["yearly_reliability"]
-        yearly_chart_width = max(900.0, 90.0 + len(yearly) * 24.0)
+        yearly_chart_width = max(900.0, 90.0 + (len(yearly) + 1) * 24.0)
         yearly_chart_height = 420.0
         yearly_left, yearly_right, yearly_top, yearly_bottom = 72.0, 24.0, 38.0, 62.0
         yearly_plot_width = yearly_chart_width - yearly_left - yearly_right
@@ -3586,8 +3844,9 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
         yearly_baseline = yearly_top + yearly_plot_height
         yearly_bars = ""
         yearly_labels = ""
+        yearly_markers = ""
         if yearly:
-            yearly_slot = yearly_plot_width / len(yearly)
+            yearly_slot = yearly_plot_width / (len(yearly) + 1)
             yearly_label_step = max((len(yearly) + 9) // 10, 1)
             for index, row in enumerate(yearly):
                 bar_x = yearly_left + index * yearly_slot + max(yearly_slot * 0.15, 1.0)
@@ -3601,15 +3860,36 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
                 )
                 yearly_bars += (
                     f'<rect class="year-met" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
-                    f'width="{bar_width:.2f}" height="{met_height:.2f}"><title>{escape(tooltip)}</title></rect>'
+                    f'width="{bar_width:.2f}" height="{met_height:.2f}" data-tooltip="{escape(tooltip)}">'
+                    "</rect>"
                     f'<rect class="year-unmet" x="{bar_x:.2f}" y="{yearly_top:.2f}" '
-                    f'width="{bar_width:.2f}" height="{unmet_height:.2f}"><title>{escape(tooltip)}</title></rect>'
+                    f'width="{bar_width:.2f}" height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}">'
+                    "</rect>"
+                )
+                marker_x = bar_x + bar_width / 2
+                marker_y = yearly_baseline - met_height
+                yearly_markers += (
+                    f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
+                    f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
                 )
                 if index % yearly_label_step == 0 or index == len(yearly) - 1:
                     yearly_labels += (
                         f'<text x="{bar_x + bar_width / 2:.2f}" y="{yearly_baseline + 22:.2f}" '
                         f'text-anchor="middle">{int(row["year"])}</text>'
                     )
+            average_reliability = float(report["selected_reliability"] or 0.0)
+            average_x = yearly_left + (len(yearly) + 0.5) * yearly_slot
+            average_y = yearly_baseline - yearly_plot_height * average_reliability / 100.0
+            year_count = len(yearly)
+            yearly_markers += (
+                f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
+                f'data-tooltip="Average tank reliability over {year_count} years: {average_reliability:.2f}%"></circle>'
+            )
+            yearly_labels += (
+                f'<text x="{average_x:.2f}" y="{yearly_baseline + 18:.2f}" text-anchor="middle">'
+                f'<tspan x="{average_x:.2f}">Average</tspan>'
+                f'<tspan x="{average_x:.2f}" dy="13">({year_count} years)</tspan></text>'
+            )
         yearly_grid = "".join(
             f'<line x1="{yearly_left}" y1="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" '
             f'x2="{yearly_left + yearly_plot_width}" y2="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" />'
@@ -3650,7 +3930,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
         )
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{escape(metadata['project_name'])} - RWH Calculator Report</title>
+<title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
 <style>
 :root {{ color-scheme: light; --ink:#17242b; --muted:#64747c; --line:#dce5e8; --green:#18795b; --blue:#176b9c; --paper:#fff; --wash:#f2f6f5; }}
 * {{ box-sizing:border-box; }} body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 Arial,Helvetica,sans-serif; }}
@@ -3666,14 +3946,16 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
 .curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
-.selected-tank {{ fill:none; stroke:#d71920; stroke-width:4; }} .selected-tank:hover {{ fill:none; r:11; }}
-.year-met {{ fill:#2e8b57; }} .year-unmet {{ fill:#c94c4c; }} .chart-legend {{ display:flex; gap:20px; margin:8px 0 0 72px; font-size:12px; color:var(--muted); }} .swatch {{ display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px; }} .swatch.year-met {{ background:#2e8b57; }} .swatch.year-unmet {{ background:#c94c4c; }}
+.selected-tank {{ fill:none; stroke:#d71920; stroke-width:4; }} .selected-tank:hover {{ fill:none; r:11; }} .swatch.primary-tank {{ background:transparent; border:2px solid #d71920; border-radius:50%; }}
+.year-met {{ fill:#2e8b57; }} .year-unmet {{ fill:#c94c4c; }} .year-met,.year-unmet,.year-reliability {{ cursor:pointer; transition:opacity .12s ease,stroke-width .12s ease; }} .year-met:hover,.year-unmet:hover {{ opacity:.78; stroke:#17242b; stroke-width:1.5; }} .year-reliability {{ fill:#f2c94c; stroke:#8a6d00; stroke-width:1.5; }} .year-reliability:hover {{ fill:#f2c94c; stroke-width:2.5; r:7; }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:20px; margin:8px 0 0 72px; font-size:12px; color:var(--muted); }} .series-toggle {{ display:inline-flex; align-items:center; gap:5px; font-weight:700; cursor:pointer; }} .series-toggle input {{ accent-color:currentColor; }} .swatch {{ display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px; }} .swatch.year-met {{ background:#2e8b57; }} .swatch.year-unmet {{ background:#c94c4c; }} .swatch.year-reliability {{ background:#f2c94c; border:1px solid #8a6d00; border-radius:50%; }} .chart-tooltip {{ position:fixed; display:none; z-index:1000; max-width:320px; padding:7px 9px; border:1px solid #526168; background:#fffff0; color:#17242b; font-size:12px; line-height:1.35; box-shadow:0 3px 10px rgba(0,0,0,.16); pointer-events:none; }}
+.tank-history-point {{ fill:transparent; stroke:transparent; stroke-width:1; cursor:crosshair; }} .tank-history-point:hover {{ fill:#fff; stroke:currentColor; stroke-width:2; }}
+.history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
-.axis-label {{ fill:var(--muted); font-size:13px; font-weight:700; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
+.axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:700px) {{ main {{ width:100%; margin:0; }} header,section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
 @media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><main>
-<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>RWH Calculator Report</p>{author_html}</header>
+<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
 <nav class="toc" aria-label="Table of contents"><section><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li></ul></section></nav>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
@@ -3684,12 +3966,12 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
 <text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
-</svg></div></section>
-<section id="yearly-demand-reliability"><h2>Yearly demand reliability</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
-<g class="grid">{yearly_grid}{yearly_labels}</g>{yearly_bars}
+</svg></div><div class="chart-legend"><span><i class="swatch primary-tank"></i>Primary tank size</span></div></section>
+<section id="yearly-demand-reliability"><h2>Yearly demand reliability - {float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])} tank</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
+<g class="grid">{yearly_grid}{yearly_labels}</g>{yearly_bars}{yearly_markers}
 <text class="axis-label" x="{yearly_left + yearly_plot_width / 2:.2f}" y="{yearly_chart_height - 10:.2f}" text-anchor="middle">Year</text>
 <text class="axis-label" transform="translate(18 {yearly_top + yearly_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days (%)</text>
-</svg></div><div class="chart-legend"><span><i class="swatch year-met"></i>Demand met</span><span><i class="swatch year-unmet"></i>Demand not met</span></div></section>
+</svg></div><div class="chart-legend"><span><i class="swatch year-met"></i>Demand met</span><span><i class="swatch year-unmet"></i>Demand not met</span><span><i class="swatch year-reliability"></i>Tank reliability</span></div></section>
 <section id="tank-level-distribution"><h2>Tank level distribution</h2><div class="chart"><svg viewBox="0 0 {distribution_width:.0f} {distribution_height:.0f}" role="img" aria-label="Distribution of days by tank level range">
 <g class="grid">{distribution_grid}</g>{distribution_bars}
 <text class="axis-label" x="{distribution_left + distribution_plot_width / 2:.2f}" y="{distribution_height - 10:.2f}" text-anchor="middle">Tank level range ({escape(report['volume_unit'])})</text>
@@ -3697,7 +3979,85 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 </svg></div></section>
 {multitank_html}
 <footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
-</main></body></html>"""
+</main><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
+<script>
+const chartTooltip=document.getElementById('chart-tooltip');
+document.querySelectorAll('[data-tooltip]').forEach((element)=>{{
+  element.addEventListener('mouseenter',()=>{{chartTooltip.textContent=element.dataset.tooltip;chartTooltip.style.display='block';}});
+  element.addEventListener('mousemove',(event)=>{{
+    const left=Math.min(event.clientX+12,window.innerWidth-chartTooltip.offsetWidth-8);
+    const top=Math.min(event.clientY+12,window.innerHeight-chartTooltip.offsetHeight-8);
+    chartTooltip.style.left=Math.max(8,left)+'px';chartTooltip.style.top=Math.max(8,top)+'px';
+  }});
+  element.addEventListener('mouseleave',()=>{{chartTooltip.style.display='none';}});
+}});
+function refreshTankHistory(sectionId){{
+  const section=document.getElementById(sectionId);if(!section)return;
+  const rangeMode=section.dataset.historyMode==='range';
+  section.querySelector('[data-year-controls]').hidden=rangeMode;
+  section.querySelector('[data-range-controls]').hidden=!rangeMode;
+  section.querySelector('[data-year-groups]').style.display=rangeMode?'none':'';
+  section.querySelector('[data-range-groups]').style.display=rangeMode?'':'none';
+  if(rangeMode){{
+    const startControl=section.querySelector('[data-range-start]');
+    const endControl=section.querySelector('[data-range-end]');
+    let startMonth=Number(startControl.value),endMonth=Number(endControl.value);
+    if(startMonth>endMonth){{
+      if(document.activeElement===startControl)endControl.value=String(startMonth);
+      else startControl.value=String(endMonth);
+      startMonth=Number(startControl.value);endMonth=Number(endControl.value);
+    }}
+    const monthDate=(value)=>new Date(Date.UTC(Math.floor(value/12),value%12,1));
+    const startDate=monthDate(startMonth);
+    const endDate=new Date(Date.UTC(Math.floor(endMonth/12),endMonth%12+1,1));
+    const formatMonth=(date)=>date.toLocaleDateString(undefined,{{month:'short',year:'numeric',timeZone:'UTC'}});
+    section.querySelector('[data-range-label]').textContent=formatMonth(startDate)+' to '+formatMonth(monthDate(endMonth));
+    const startMs=startDate.getTime(),endMs=endDate.getTime()-1,span=Math.max(endMs-startMs,1);
+    section.querySelectorAll('[data-history-range-series]').forEach((group)=>{{
+      const toggle=section.querySelector('[data-history-series-toggle="'+group.dataset.historyRangeSeries+'"]');
+      group.style.display=toggle&&toggle.checked?'':'none';
+      const line=group.querySelector('polyline');
+      const visiblePoints=JSON.parse(line.dataset.rangePoints).filter((point)=>point[0]>=startMs&&point[0]<=endMs);
+      line.setAttribute('points',visiblePoints.map((point)=>{{
+        const x=72+(point[0]-startMs)/span*804;
+        const circle=group.querySelector('[data-range-date="'+point[0]+'"]');
+        if(circle)circle.setAttribute('cx',x.toFixed(2));
+        return x.toFixed(2)+','+(circle?circle.getAttribute('cy'):'0');
+      }}).join(' '));
+      group.querySelectorAll('[data-range-date]').forEach((point)=>{{
+        const date=Number(point.dataset.rangeDate);
+        point.style.display=date>=startMs&&date<=endMs?'':'none';
+      }});
+    }});
+    return;
+  }}
+  const years=section.dataset.years.split(',');
+  const index=Math.max(0,Math.min(Number(section.dataset.yearIndex)||0,years.length-1));
+  section.dataset.yearIndex=String(index);
+  section.querySelectorAll('[data-history-year]').forEach((group)=>{{group.style.display='none';}});
+  const active=section.querySelector('[data-history-year="'+years[index]+'"]');
+  if(active){{
+    active.style.display='';
+    active.querySelectorAll('[data-history-series]').forEach((line)=>{{
+      const toggle=section.querySelector('[data-history-series-toggle="'+line.dataset.historySeries+'"]');
+      line.style.display=toggle&&toggle.checked?'':'none';
+    }});
+  }}
+  section.querySelector('[data-history-year-label]').textContent=years[index];
+  section.querySelector('[data-history-previous]').disabled=index===0;
+  section.querySelector('[data-history-next]').disabled=index===years.length-1;
+}}
+function setTankHistoryMode(sectionId,mode){{
+  const section=document.getElementById(sectionId);if(!section)return;
+  section.dataset.historyMode=mode;refreshTankHistory(sectionId);
+}}
+function changeTankHistoryYear(sectionId,delta){{
+  const section=document.getElementById(sectionId);if(!section)return;
+  section.dataset.yearIndex=String((Number(section.dataset.yearIndex)||0)+delta);
+  refreshTankHistory(sectionId);
+}}
+document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory(section.id));
+</script></body></html>"""
 
     @staticmethod
     def _build_multitank_report_html(report: dict[str, object]) -> str:
@@ -3706,6 +4066,12 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f")
         sections = []
         for chart_index, chart in enumerate(report.get("multitank_charts", [])):
+            if chart.get("type") == "yearly_stacked":
+                sections.append(RainwaterTkApp._build_stacked_yearly_report_html(chart, chart_index + 1))
+                continue
+            if chart.get("type") == "tank_history":
+                sections.append(RainwaterTkApp._build_tank_history_report_html(chart, chart_index + 1))
+                continue
             series_list = chart["series"]
             all_points = [point for series in series_list for point in series["points"]]
             if not all_points:
@@ -3737,8 +4103,22 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                 color = colors[series_index % len(colors)]
                 points = " ".join(f"{sx(float(x)):.2f},{sy(float(y)):.2f}" for x, y in series["points"])
                 label = html.escape(str(series["label"]))
-                polylines.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="3"><title>{label}</title></polyline>')
-                legends.append(f'<span style="color:{color};font-weight:700">— {label}</span>')
+                series_id = f"multitank-chart-{chart_index + 1}-series-{series_index + 1}"
+                polylines.append(
+                    f'<polyline id="{series_id}" points="{points}" fill="none" stroke="{color}" '
+                    f'stroke-width="3"><title>{label}</title></polyline>'
+                )
+                if chart.get("interactive_series_toggle"):
+                    legends.append(
+                        f'<label class="series-toggle" style="color:{color}"><input type="checkbox" checked '
+                        f'onchange="document.getElementById(\'{series_id}\').style.display=this.checked?\'\':\'none\'">'
+                        f'<span aria-hidden="true">&mdash;</span> {label}</label>'
+                    )
+                else:
+                    legends.append(
+                        f'<span style="color:{color};font-weight:700"><span aria-hidden="true">&mdash;</span> '
+                        f'{label}</span>'
+                    )
             section_id = f"multitank-chart-{chart_index + 1}"
             sections.append(
                 f'<section id="{section_id}"><h2>{html.escape(str(chart["title"]))}</h2>'
@@ -3749,6 +4129,219 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                 f'</svg></div><div class="chart-legend">{"".join(legends)}</div></section>'
             )
         return "".join(sections)
+
+    @staticmethod
+    def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int) -> str:
+        yearly = chart["yearly_reliability"]
+        if not yearly:
+            return ""
+        escape = lambda value: html.escape(str(value), quote=True)
+        width = max(900.0, 90.0 + (len(yearly) + 1) * 24.0)
+        height = 420.0
+        left, right, top, bottom = 72.0, 24.0, 38.0, 62.0
+        plot_width, plot_height = width - left - right, height - top - bottom
+        baseline = top + plot_height
+        slot_width = plot_width / (len(yearly) + 1)
+        label_step = max((len(yearly) + 9) // 10, 1)
+        bars: list[str] = []
+        labels: list[str] = []
+        markers: list[str] = []
+        for index, row in enumerate(yearly):
+            bar_x = left + index * slot_width + max(slot_width * 0.15, 1.0)
+            bar_width = max(slot_width * 0.7, 1.0)
+            met_height = plot_height * float(row["met_percent"]) / 100.0
+            unmet_height = plot_height - met_height
+            marker_x = bar_x + bar_width / 2
+            marker_y = baseline - met_height
+            tooltip = (
+                f"{int(row['year'])}: demand met {int(row['met_days'])} days "
+                f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
+                f"({float(row['unmet_percent']):.2f}%)"
+            )
+            bars.append(
+                f'<rect class="year-met" x="{bar_x:.2f}" y="{marker_y:.2f}" width="{bar_width:.2f}" '
+                f'height="{met_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
+                f'<rect class="year-unmet" x="{bar_x:.2f}" y="{top:.2f}" width="{bar_width:.2f}" '
+                f'height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
+            )
+            markers.append(
+                f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
+                f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
+            )
+            if index % label_step == 0 or index == len(yearly) - 1:
+                labels.append(
+                    f'<text x="{marker_x:.2f}" y="{baseline + 22:.2f}" text-anchor="middle">'
+                    f'{int(row["year"])}</text>'
+                )
+        average = float(chart["selected_reliability"])
+        year_count_text = f"{len(yearly)} {'year' if len(yearly) == 1 else 'years'}"
+        average_x = left + (len(yearly) + 0.5) * slot_width
+        average_y = baseline - plot_height * average / 100.0
+        markers.append(
+            f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
+            f'data-tooltip="Average tank reliability over {year_count_text}: {average:.2f}%"></circle>'
+        )
+        labels.append(
+            f'<text x="{average_x:.2f}" y="{baseline + 18:.2f}" text-anchor="middle">'
+            f'<tspan x="{average_x:.2f}">Average</tspan><tspan x="{average_x:.2f}" dy="13">'
+            f'({year_count_text})</tspan></text>'
+        )
+        grid = "".join(
+            f'<line x1="{left}" y1="{top + plot_height * (100 - value) / 100:.2f}" '
+            f'x2="{left + plot_width}" y2="{top + plot_height * (100 - value) / 100:.2f}" />'
+            f'<text x="{left - 12}" y="{top + plot_height * (100 - value) / 100 + 4:.2f}" '
+            f'text-anchor="end">{value}%</text>'
+            for value in range(0, 101, 25)
+        )
+        return (
+            f'<section id="multitank-chart-{chart_index}"><h2>{escape(chart["title"])}</h2>'
+            f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
+            f'<g class="grid">{grid}{"".join(labels)}</g>{"".join(bars)}{"".join(markers)}'
+            f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" '
+            f'text-anchor="middle">Year</text><text class="axis-label" '
+            f'transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" '
+            f'text-anchor="middle">Days (%)</text></svg></div><div class="chart-legend">'
+            f'<span><i class="swatch year-met"></i>Demand met</span>'
+            f'<span><i class="swatch year-unmet"></i>Demand not met</span>'
+            f'<span><i class="swatch year-reliability"></i>Tank reliability</span></div></section>'
+        )
+
+    @staticmethod
+    def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) -> str:
+        series_list = chart["series"]
+        years = sorted(
+            {
+                int(year)
+                for series in series_list
+                for year in series.get("yearly_points", {})
+            }
+        )
+        if not years:
+            return ""
+        dated_values = [
+            (pd.Timestamp(date), float(level))
+            for series in series_list
+            for date, level in series.get("dated_points", [])
+        ]
+        if not dated_values:
+            return ""
+        first_month = min(date for date, _level in dated_values).to_period("M")
+        last_month = max(date for date, _level in dated_values).to_period("M")
+        first_month_index = first_month.year * 12 + first_month.month - 1
+        last_month_index = last_month.year * 12 + last_month.month - 1
+        colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f")
+        section_id = f"multitank-chart-{chart_index}"
+        width, height = 900.0, 420.0
+        left, right, top, bottom = 72.0, 24.0, 38.0, 62.0
+        plot_width, plot_height = width - left - right, height - top - bottom
+        all_values = [
+            float(point[1])
+            for series in series_list
+            for points in series.get("yearly_points", {}).values()
+            for point in points
+        ]
+        y_max = max(max(all_values, default=0.0), 1.0)
+
+        def sx(value: float) -> float:
+            return left + (value - 1.0) / 365.0 * plot_width
+
+        def sy(value: float) -> float:
+            return top + (y_max - value) / y_max * plot_height
+
+        grid = "".join(
+            f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" '
+            f'x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
+            f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" '
+            f'text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
+            for tick in range(5)
+        ) + "".join(
+            f'<line x1="{sx(day):.2f}" y1="{top}" x2="{sx(day):.2f}" y2="{top + plot_height}" />'
+            f'<text x="{sx(day):.2f}" y="{top + plot_height + 22:.2f}" text-anchor="middle">{day}</text>'
+            for day in (1, 92, 183, 274, 366)
+        )
+        year_groups: list[str] = []
+        for year_index, year in enumerate(years):
+            lines: list[str] = []
+            for series_index, series in enumerate(series_list):
+                points = series.get("yearly_points", {}).get(str(year), [])
+                if not points:
+                    continue
+                color = colors[series_index % len(colors)]
+                coordinates = " ".join(
+                    f"{sx(float(x_value)):.2f},{sy(float(y_value)):.2f}"
+                    for x_value, y_value in points
+                )
+                lines.append(
+                    f'<polyline data-history-series="{series_index}" points="{coordinates}" fill="none" '
+                    f'stroke="{color}" stroke-width="3"></polyline>'
+                    + "".join(
+                        f'<circle class="tank-history-point" data-history-series="{series_index}" '
+                        f'cx="{sx(float(day)):.2f}" cy="{sy(float(level)):.2f}" r="7" '
+                        f'style="color:{color}" data-tooltip="{html.escape(str(series["label"]))}; '
+                        f'{year}, day {float(day):g}: {float(level):,.2f} '
+                        f'{html.escape(str(chart["y_label"]))}"></circle>'
+                        for day, level in points
+                    )
+                )
+            display = "" if year_index == 0 else "none"
+            year_groups.append(
+                f'<g data-history-year="{year}" style="display:{display}">{"".join(lines)}</g>'
+            )
+        range_series: list[str] = []
+        range_span = max((last_month.end_time - first_month.start_time).total_seconds(), 1.0)
+        for series_index, series in enumerate(series_list):
+            color = colors[series_index % len(colors)]
+            points = [(pd.Timestamp(date), float(level)) for date, level in series.get("dated_points", [])]
+            coordinates = " ".join(
+                f'{left + (date - first_month.start_time).total_seconds() / range_span * plot_width:.2f},'
+                f'{sy(level):.2f}' for date, level in points
+            )
+            encoded_points = html.escape(json.dumps([[int(date.value // 1_000_000), level] for date, level in points]), quote=True)
+            circles = "".join(
+                f'<circle class="tank-history-point" data-history-series="{series_index}" '
+                f'data-range-date="{int(date.value // 1_000_000)}" data-range-level="{level}" '
+                f'cx="{left + (date - first_month.start_time).total_seconds() / range_span * plot_width:.2f}" '
+                f'cy="{sy(level):.2f}" r="7" style="color:{color}" '
+                f'data-tooltip="{html.escape(str(series["label"]))}; {date:%Y-%m-%d}: '
+                f'{level:,.2f} {html.escape(str(chart["y_label"]))}"></circle>'
+                for date, level in points
+            )
+            range_series.append(
+                f'<g data-history-range-series="{series_index}"><polyline data-range-points="{encoded_points}" '
+                f'points="{coordinates}" fill="none" stroke="{color}" stroke-width="3"></polyline>{circles}</g>'
+            )
+        toggles = "".join(
+            f'<label class="series-toggle" style="color:{colors[index % len(colors)]}">'
+            f'<input type="checkbox" checked data-history-series-toggle="{index}" '
+            f'onchange="refreshTankHistory(\'{section_id}\')"><span aria-hidden="true">&mdash;</span> '
+            f'{html.escape(str(series["label"]))}</label>'
+            for index, series in enumerate(series_list)
+        )
+        return (
+            f'<section id="{section_id}" class="tank-history" data-years="{",".join(map(str, years))}" '
+            f'data-year-index="0" data-history-mode="year"><h2>{html.escape(str(chart["title"]))}</h2>'
+            f'<div class="history-mode-controls"><label><input type="radio" name="{section_id}-mode" checked '
+            f'onchange="setTankHistoryMode(\'{section_id}\',\'year\')"> Single year</label>'
+            f'<label><input type="radio" name="{section_id}-mode" '
+            f'onchange="setTankHistoryMode(\'{section_id}\',\'range\')"> Custom range</label></div>'
+            f'<div class="history-controls" data-year-controls><button type="button" data-history-previous '
+            f'onclick="changeTankHistoryYear(\'{section_id}\',-1)" title="Previous year">&#9664;</button>'
+            f'<strong data-history-year-label>{years[0]}</strong><button type="button" data-history-next '
+            f'onclick="changeTankHistoryYear(\'{section_id}\',1)" title="Next year">&#9654;</button></div>'
+            f'<div class="history-range-controls" data-range-controls hidden><strong data-range-label></strong>'
+            f'<input type="range" min="{first_month_index}" max="{last_month_index}" value="{first_month_index}" '
+            f'data-range-start oninput="refreshTankHistory(\'{section_id}\')">'
+            f'<input type="range" min="{first_month_index}" max="{last_month_index}" value="{last_month_index}" '
+            f'data-range-end oninput="refreshTankHistory(\'{section_id}\')"></div>'
+            f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
+            f'<g class="grid">{grid}</g><g data-year-groups>{"".join(year_groups)}</g>'
+            f'<g data-range-groups style="display:none">{"".join(range_series)}</g>'
+            f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" '
+            f'text-anchor="middle">Day of year</text><text class="axis-label" '
+            f'transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" '
+            f'text-anchor="middle">{html.escape(str(chart["y_label"]))}</text></svg></div>'
+            f'<div class="chart-legend">{toggles}</div></section>'
+        )
 
     def _compile_latex_report(self, tex_path: Path, pdf_path: Path, report: dict[str, object]) -> None:
         pdflatex = shutil.which("pdflatex")
@@ -3779,6 +4372,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 
     def _write_fallback_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
         metadata = report["metadata"]
+        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
         surface_rows = [
             (
                 surface["name"],
@@ -3843,7 +4437,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             y -= 18
             line(54, y + 8, 558, y + 8)
 
-        text(54, y, "RWH Calculator Report", size=20, bold=True)
+        text(54, y, report_title, size=20, bold=True)
         y -= 34
         if metadata.get("author_name", "").strip():
             text(54, y, f"Produced by: {metadata['author_name']}", size=10)
@@ -3945,7 +4539,10 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250, report)
 
         add_page()
-        heading("Yearly Demand Reliability")
+        heading(
+            f"Yearly Demand Reliability - {float(report['selected_tank_size']):,.0f} "
+            f"{report['volume_unit']} tank"
+        )
         self._draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, report)
 
         add_page()
@@ -3956,7 +4553,14 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             for chart in report.get("multitank_charts", []):
                 add_page()
                 heading(str(chart["title"]))
-                self._draw_pdf_multiline_chart(page(), 78, 400, 456, 250, chart)
+                if chart.get("type") == "yearly_stacked":
+                    stacked_report = {
+                        "yearly_reliability": chart["yearly_reliability"],
+                        "selected_reliability": chart["selected_reliability"],
+                    }
+                    self._draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, stacked_report)
+                else:
+                    self._draw_pdf_multiline_chart(page(), 78, 400, 456, 250, chart)
 
         self._write_pdf_with_pypdf(pdf_path, pages, section_pages, toc_links)
 
@@ -4009,7 +4613,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
         commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
         commands.append(
-            f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 40:.2f} {y - 30:.2f} Tm ({_pdf_escape(chart['x_label'])}) Tj ET"
+            f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 40:.2f} {y - 30:.2f} Tm ({_pdf_escape(chart['x_label'])}) Tj ET"
+        )
+        commands.append(
+            f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 30:.2f} "
+            f"Tm ({_pdf_escape(chart['y_label'])}) Tj ET"
         )
 
     def _draw_pdf_yearly_demand_reliability(
@@ -4018,6 +4626,22 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         yearly = report["yearly_reliability"]
         if not yearly:
             return
+
+        def yellow_circle(center_x: float, center_y: float, radius: float) -> None:
+            control = radius * 0.55228475
+            commands.append("0.95 0.79 0.30 rg 0.54 0.43 0.00 RG 0.75 w")
+            commands.append(
+                f"{center_x + radius:.2f} {center_y:.2f} m "
+                f"{center_x + radius:.2f} {center_y + control:.2f} "
+                f"{center_x + control:.2f} {center_y + radius:.2f} {center_x:.2f} {center_y + radius:.2f} c "
+                f"{center_x - control:.2f} {center_y + radius:.2f} "
+                f"{center_x - radius:.2f} {center_y + control:.2f} {center_x - radius:.2f} {center_y:.2f} c "
+                f"{center_x - radius:.2f} {center_y - control:.2f} "
+                f"{center_x - control:.2f} {center_y - radius:.2f} {center_x:.2f} {center_y - radius:.2f} c "
+                f"{center_x + control:.2f} {center_y - radius:.2f} "
+                f"{center_x + radius:.2f} {center_y - control:.2f} {center_x + radius:.2f} {center_y:.2f} c B"
+            )
+
         commands.append("0.50 w 0.85 0.85 0.85 RG")
         for index in range(5):
             gy = y + height * index / 4
@@ -4028,7 +4652,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         commands.append("0 0 0 RG 0.75 w")
         commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
         commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
-        slot_width = width / len(yearly)
+        slot_width = width / (len(yearly) + 1)
         label_step = max((len(yearly) + 9) // 10, 1)
         for index, row in enumerate(yearly):
             left = x + index * slot_width + max(slot_width * 0.15, 0.5)
@@ -4038,16 +4662,29 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {met_height:.2f} re f")
             commands.append("0.79 0.30 0.30 rg")
             commands.append(f"{left:.2f} {y + met_height:.2f} {bar_width:.2f} {height - met_height:.2f} re f")
+            yellow_circle(left + bar_width / 2, y + met_height, 3.5)
             if index % label_step == 0 or index == len(yearly) - 1:
                 commands.append(
                     f"BT /F1 7 Tf 1 0 0 1 {left - 2:.2f} {y - 16:.2f} Tm ({int(row['year'])}) Tj ET"
                 )
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 12:.2f} {y - 34:.2f} Tm (Year) Tj ET")
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 46:.2f} {y + height / 2:.2f} Tm (Days %) Tj ET")
+        average_reliability = float(report["selected_reliability"] or 0.0)
+        average_x = x + (len(yearly) + 0.5) * slot_width
+        average_y = y + height * average_reliability / 100.0
+        yellow_circle(average_x, average_y, 4.5)
+        commands.append(
+            f"BT /F1 7 Tf 1 0 0 1 {average_x - 18:.2f} {y - 14:.2f} Tm (Average) Tj ET"
+        )
+        commands.append(
+            f"BT /F1 6 Tf 1 0 0 1 {average_x - 20:.2f} {y - 24:.2f} Tm ({len(yearly)} years) Tj ET"
+        )
+        commands.append(f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 12:.2f} {y - 34:.2f} Tm (Year) Tj ET")
+        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 16:.2f} Tm (Days %) Tj ET")
         commands.append("0.18 0.55 0.34 rg 82 370 10 10 re f")
         commands.append("BT /F1 8 Tf 1 0 0 1 98 372 Tm (Demand met) Tj ET")
         commands.append("0.79 0.30 0.30 rg 176 370 10 10 re f")
         commands.append("BT /F1 8 Tf 1 0 0 1 192 372 Tm (Demand not met) Tj ET")
+        yellow_circle(296, 375, 5)
+        commands.append("BT /F1 8 Tf 1 0 0 1 306 372 Tm (Tank reliability) Tj ET")
         commands.append("0 0 0 rg 0 0 0 RG")
 
     def _draw_pdf_tank_level_distribution(
@@ -4083,10 +4720,10 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                 f"Tm ({int(row['count'])}) Tj ET"
             )
         commands.append(
-            f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 58:.2f} {y - 34:.2f} "
+            f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 58:.2f} {y - 34:.2f} "
             f"Tm (Tank level range ({_pdf_escape(report['volume_unit'])})) Tj ET"
         )
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 42:.2f} {y + height / 2:.2f} Tm (Days) Tj ET")
+        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 12:.2f} Tm (Days) Tj ET")
         commands.append("0 0 0 rg 0 0 0 RG")
 
     def _draw_pdf_reliability_curve(
@@ -4127,8 +4764,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             label = _pdf_escape(f"{value:.0f}")
             commands.append(f"BT /F1 8 Tf 1 0 0 1 {tick_x - 12:.2f} {y - 18:.2f} Tm ({label}) Tj ET")
         commands.append(f"BT /F2 10 Tf 1 0 0 1 {x + width / 2 - 56:.2f} {y + height + 18:.2f} Tm (Reliability Curve) Tj ET")
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(report['volume_unit'])})) Tj ET")
-        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 42:.2f} {y + height / 2:.2f} Tm (Reliability %) Tj ET")
+        commands.append(f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(report['volume_unit'])})) Tj ET")
+        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 28:.2f} Tm (Reliability %) Tj ET")
         points = [(sx(tank), sy(reliability)) for tank, reliability in values]
         if len(points) >= 2:
             path = [f"{points[0][0]:.2f} {points[0][1]:.2f} m"]
@@ -4149,6 +4786,30 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                 f"{px - control:.2f} {py + radius:.2f} {px - radius:.2f} {py + control:.2f} {px - radius:.2f} {py:.2f} c "
                 f"{px - radius:.2f} {py - control:.2f} {px - control:.2f} {py - radius:.2f} {px:.2f} {py - radius:.2f} c "
                 f"{px + control:.2f} {py - radius:.2f} {px + radius:.2f} {py - control:.2f} {px + radius:.2f} {py:.2f} c S"
+            )
+            legend_x = x + width - 128
+            legend_y = y + height - 14
+            legend_radius = 4.0
+            legend_control = legend_radius * 0.55228475
+            commands.append(
+                "0.84 0.05 0.08 RG 1.50 w "
+                f"{legend_x + legend_radius:.2f} {legend_y:.2f} m "
+                f"{legend_x + legend_radius:.2f} {legend_y + legend_control:.2f} "
+                f"{legend_x + legend_control:.2f} {legend_y + legend_radius:.2f} "
+                f"{legend_x:.2f} {legend_y + legend_radius:.2f} c "
+                f"{legend_x - legend_control:.2f} {legend_y + legend_radius:.2f} "
+                f"{legend_x - legend_radius:.2f} {legend_y + legend_control:.2f} "
+                f"{legend_x - legend_radius:.2f} {legend_y:.2f} c "
+                f"{legend_x - legend_radius:.2f} {legend_y - legend_control:.2f} "
+                f"{legend_x - legend_control:.2f} {legend_y - legend_radius:.2f} "
+                f"{legend_x:.2f} {legend_y - legend_radius:.2f} c "
+                f"{legend_x + legend_control:.2f} {legend_y - legend_radius:.2f} "
+                f"{legend_x + legend_radius:.2f} {legend_y - legend_control:.2f} "
+                f"{legend_x + legend_radius:.2f} {legend_y:.2f} c S"
+            )
+            commands.append(
+                f"0 0 0 rg BT /F1 8 Tf 1 0 0 1 {legend_x + 9:.2f} {legend_y - 3:.2f} "
+                "Tm (Primary tank size) Tj ET"
             )
         commands.append("0 0 0 rg 0 0 0 RG")
 
@@ -4271,6 +4932,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self.comparison_results = {}
         self.tank_chart_year = None
         self.tank_chart_year_var.set("--")
+        self.tank_chart_range_initialized = False
         self.average_annual_precipitation_var.set("Average annual precipitation: --")
         self.results_tree.delete(*self.results_tree.get_children())
         self._populate_comparison_tanks()
@@ -4331,6 +4993,19 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         if self.results_df.empty:
             return
         dates = pd.to_datetime(self.results_df["Date"], errors="coerce")
+        valid_dates = dates.dropna()
+        if valid_dates.empty:
+            return
+        months = pd.period_range(valid_dates.min().to_period("M"), valid_dates.max().to_period("M"), freq="M")
+        max_month_index = max(len(months) - 1, 0)
+        self.tank_range_start_scale.configure(to=max_month_index)
+        self.tank_range_end_scale.configure(to=max_month_index)
+        if not self.tank_chart_range_initialized:
+            self.tank_chart_range_start_var.set(0)
+            self.tank_chart_range_end_var.set(max_month_index)
+            self.tank_chart_range_initialized = True
+        elif self.tank_chart_range_end_var.get() > max_month_index:
+            self.tank_chart_range_end_var.set(max_month_index)
         available_years = sorted(int(year) for year in dates.dropna().dt.year.unique())
         if not available_years:
             return
@@ -4342,26 +5017,57 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self.next_tank_year_button.state(
             ["disabled"] if year_index == len(available_years) - 1 else ["!disabled"]
         )
-        year_results = self.results_df.loc[dates.dt.year == self.tank_chart_year]
-        x = list(range(1, len(year_results) + 1))
-        y = [volume_to_display(v, self.config_model) for v in year_results["WaterInTankGallons"]]
+        range_mode = self.tank_chart_range_mode_var.get() == "range"
+        if range_mode:
+            start_index = min(max(int(round(self.tank_chart_range_start_var.get())), 0), max_month_index)
+            end_index = min(max(int(round(self.tank_chart_range_end_var.get())), start_index), max_month_index)
+            self.tank_chart_range_start_var.set(start_index)
+            self.tank_chart_range_end_var.set(end_index)
+            start_date = months[start_index].start_time
+            end_date = months[end_index].end_time
+            chart_results = self.results_df.loc[dates.between(start_date, end_date)]
+            self.tank_chart_range_label_var.set(f"{months[start_index]} to {months[end_index]}")
+            chart_title_period = f"{months[start_index]} to {months[end_index]}"
+        else:
+            chart_results = self.results_df.loc[dates.dt.year == self.tank_chart_year]
+            self.tank_chart_range_label_var.set("Range rounded to whole months")
+            chart_title_period = str(self.tank_chart_year)
+        self.tank_chart_year_entry.state(["disabled"] if range_mode else ["!disabled"])
+        if range_mode:
+            self.previous_tank_year_button.state(["disabled"])
+            self.next_tank_year_button.state(["disabled"])
+        for widget in (self.tank_range_start_scale, self.tank_range_end_scale):
+            widget.state(["!disabled"] if range_mode else ["disabled"])
+        x = list(range(1, len(chart_results) + 1))
+        y = [volume_to_display(v, self.config_model) for v in chart_results["WaterInTankGallons"]]
         hover_labels = [
             f"Date: {pd.Timestamp(date).strftime('%Y-%m-%d')}\nWater in tank: {water:.1f} {volume_unit(self.config_model)}"
-            for date, water in zip(year_results["Date"], y)
+            for date, water in zip(chart_results["Date"], y)
         ]
         self._draw_line_chart(
             self.tank_canvas,
             x,
             y,
-            f"Tank Water Over Time ({self.tank_chart_year}) - "
+            f"Tank Water Over Time ({chart_title_period}) - "
             f"{volume_to_display(self.config_model.selected_tank_size_gal, self.config_model):,.0f} "
             f"{volume_unit(self.config_model)} tank",
             volume_unit(self.config_model),
-            "Day of year",
+            "Day in selected period",
             hover_labels,
             show_points=self.show_tank_points_var.get(),
             bottom_padding=78,
         )
+
+    def _tank_range_slider_changed(self, changed: str) -> None:
+        if self.tank_chart_range_mode_var.get() != "range":
+            return
+        start_index = int(round(self.tank_chart_range_start_var.get()))
+        end_index = int(round(self.tank_chart_range_end_var.get()))
+        if changed == "start" and start_index > end_index:
+            self.tank_chart_range_end_var.set(start_index)
+        elif changed == "end" and end_index < start_index:
+            self.tank_chart_range_start_var.set(end_index)
+        self._draw_tank_chart()
 
     def _change_tank_chart_year(self, direction: int) -> None:
         if self.results_df.empty:

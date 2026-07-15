@@ -151,6 +151,66 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
         ],
         "selected_tank_size": 750.0,
         "selected_reliability": 65.0,
+        "include_multitank_charts": True,
+        "multitank_charts": [
+            {
+                "title": "Yearly demand reliability - multitank",
+                "x_label": "Year",
+                "y_label": "Demand met (%)",
+                "interactive_series_toggle": True,
+                "series": [
+                    {"label": "1,000 gal", "points": [(2024.0, 70.0), (2025.0, 72.0)]},
+                    {"label": "1,500 gal", "points": [(2024.0, 80.0), (2025.0, 82.0)]},
+                ],
+            },
+            {
+                "type": "yearly_stacked",
+                "title": "Yearly Demand Reliability - 1,500 gal tank",
+                "yearly_reliability": [
+                    {
+                        "year": 2024,
+                        "total_days": 366,
+                        "met_days": 320,
+                        "unmet_days": 46,
+                        "met_percent": 87.431694,
+                        "unmet_percent": 12.568306,
+                    }
+                ],
+                "selected_reliability": 87.43,
+            },
+            {
+                "type": "tank_history",
+                "title": "Tank Water Over Time (gal)",
+                "x_label": "Day of year",
+                "y_label": "gal",
+                "series": [
+                    {
+                        "label": "1,000 gal",
+                        "points": [(0.0, 100.0), (1.0, 200.0)],
+                        "yearly_points": {
+                            "2024": [(1.0, 100.0), (2.0, 200.0)],
+                            "2025": [(1.0, 150.0), (2.0, 250.0)],
+                        },
+                        "dated_points": [
+                            ("2024-01-01", 100.0), ("2024-02-01", 200.0),
+                            ("2025-01-01", 150.0), ("2025-02-01", 250.0),
+                        ],
+                    },
+                    {
+                        "label": "1,500 gal",
+                        "points": [(0.0, 200.0), (1.0, 300.0)],
+                        "yearly_points": {
+                            "2024": [(1.0, 200.0), (2.0, 300.0)],
+                            "2025": [(1.0, 250.0), (2.0, 350.0)],
+                        },
+                        "dated_points": [
+                            ("2024-01-01", 200.0), ("2024-02-01", 300.0),
+                            ("2025-01-01", 250.0), ("2025-02-01", 350.0),
+                        ],
+                    },
+                ],
+            },
+        ],
     }
 
     html = RainwaterTkApp._build_report_html(None, report)
@@ -163,7 +223,10 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     RainwaterTkApp._draw_pdf_tank_level_distribution(None, distribution_pdf_commands, 0, 0, 400, 200, report)
 
     assert '<circle class="selected-tank"' in html
+    assert "RWH Calculator Report - multi-tank" in html
+    assert ".axis-label { fill:var(--muted); font-size:15px; font-weight:700; }" in html
     assert "stroke:#d71920" in html
+    assert "Primary tank size" in html
     assert "<h2>Tank summary</h2>" in html
     assert "750 gal" in html
     assert "<h2>Demand summary</h2>" in html
@@ -180,9 +243,37 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "42.38 in" in html
     assert "Rain only" in html
     assert html.index('id="reliability-curve"') < html.index('id="yearly-demand-reliability"')
+    assert "Yearly demand reliability - 750 gal tank" in html
     assert "Demand not met" in html
+    assert "2024: demand met 300 days (81.97%); demand not met 66 days (18.03%)" in html
+    assert "Average tank reliability over 2 years: 65.00%" in html
+    assert "Yearly Demand Reliability - 1,500 gal tank" in html
+    assert "Average tank reliability over 1 year: 87.43%" in html
+    assert 'id="chart-tooltip"' in html
+    assert 'data-tooltip="2024 tank reliability: 87.43%"' in html
+    assert "document.querySelectorAll('[data-tooltip]')" in html
+    assert 'data-tooltip="2024 tank reliability: 87.43%"><title>' not in html
+    assert "Yearly demand reliability - multitank" in html
+    assert html.count('class="series-toggle"') == 4
+    assert "multitank-chart-1-series-1" in html
+    assert "multitank-chart-1-series-2" in html
+    assert 'class="tank-history"' in html
+    assert 'data-years="2024,2025"' in html
+    assert html.count("data-history-series-toggle") >= 2
+    assert "changeTankHistoryYear" in html
+    assert "refreshTankHistory" in html
+    assert "setTankHistoryMode" in html
+    assert "Custom range" in html
+    assert "data-range-start" in html
+    assert "data-range-end" in html
+    assert 'class="tank-history-point"' in html
+    assert 'data-tooltip="1,000 gal; 2024, day 1: 100.00 gal"' in html
+    assert ".tank-history-point:hover" in html
     assert html.index('id="yearly-demand-reliability"') < html.index('id="tank-level-distribution"')
     assert "mark=o, red" in latex
+    assert r"\title{RWH Calculator Report - multi-tank}" in latex
+    assert r"label style={font=\bfseries\normalsize}" in latex
+    assert r"\addlegendentry{Primary tank size}" in latex
     assert r"\usepackage[hidelinks]{hyperref}" in latex
     assert r"\tableofcontents" in latex
     assert r"\section{Tank Summary}" in latex
@@ -195,12 +286,20 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert r"\textbf{Produced by:} Jane Engineer" in latex
     assert "42.375 in" in latex
     assert "Rain only" in latex
-    assert r"\section{Yearly Demand Reliability}" in latex
+    assert r"\section{Yearly Demand Reliability - 750 gal tank}" in latex
+    assert r"\section{Yearly Demand Reliability - 1,500 gal tank}" in latex
     assert "ybar stacked" in latex
-    assert latex.index(r"\section{Reliability Curve}") < latex.index(r"\section{Yearly Demand Reliability}")
+    assert latex.index(r"\section{Reliability Curve}") < latex.index(
+        r"\section{Yearly Demand Reliability - 750 gal tank}"
+    )
     assert r"\section{Tank Level Distribution}" in latex
-    assert latex.index(r"\section{Yearly Demand Reliability}") < latex.index(r"\section{Tank Level Distribution}")
+    assert latex.index(r"\section{Yearly Demand Reliability - 750 gal tank}") < latex.index(
+        r"\section{Tank Level Distribution}"
+    )
     assert any("0.84 0.05 0.08 RG" in command and command.endswith(" c S") for command in pdf_commands)
+    assert any("Primary tank size" in command for command in pdf_commands)
+    assert any("/F2 9 Tf" in command and "Tank size" in command for command in pdf_commands)
+    assert any("/F2 9 Tf 0 1 -1 0" in command and "Reliability %" in command for command in pdf_commands)
     assert any("0.18 0.55 0.34 rg" in command for command in yearly_pdf_commands)
     assert any("0.79 0.30 0.30 rg" in command for command in yearly_pdf_commands)
     assert any("0.18 0.55 0.34 rg" in command for command in distribution_pdf_commands)

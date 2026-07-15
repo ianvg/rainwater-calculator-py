@@ -180,6 +180,11 @@ class SQLiteStore:
             longitude=_optional_float(payload.get("longitude")),
             unit_system=payload.get("unit_system", "Imperial"),
             country_code=payload.get("country_code", "USA"),
+            system_type=(
+                payload.get("system_type")
+                if payload.get("system_type") in {"Direct system", "Indirect system"}
+                else "Direct system"
+            ),
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,

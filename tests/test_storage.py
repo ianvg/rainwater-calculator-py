@@ -5,6 +5,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     config = SQLiteStore._config_from_dict({"name": "Legacy project"})
 
     assert config.country_code == "USA"
+    assert config.system_type == "Direct system"
     assert config.author_name == ""
     assert config.notes == ""
     assert config.street_address == ""
@@ -21,6 +22,12 @@ def test_project_country_code_is_loaded() -> None:
 
     assert config.country_code == "CAN"
     assert config.canadian_precipitation_field == "TOTAL_RAIN"
+
+
+def test_project_system_type_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict({"name": "Indirect project", "system_type": "Indirect system"})
+
+    assert config.system_type == "Indirect system"
 
 
 def test_project_author_name_is_loaded() -> None:

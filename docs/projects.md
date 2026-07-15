@@ -2,6 +2,10 @@
 
 A project groups the rainfall series, inputs, collection surfaces, demand settings, and analysis results for one study.
 
+Use the **System parameters** tab to classify the project as a **Direct system** or **Indirect system**, then select **Apply**. The gray status line identifies the currently applied type. The applied selection is stored with the project; it does not alter simulation calculations until system-specific calculation behavior is defined.
+
+Applying **Indirect system** displays the current system schematic. It shows a primary tank at approximately half water level connected to a right-facing filtration pump, a filtration unit, and a smaller booster tank. Regular wave lines indicate the water level in both tanks. Applying **Direct system** hides the indirect-system schematic.
+
 ## Project settings
 
 Enter the project name, optional produced-by/author name, unit system, and country in **Project Settings**. Enter the street address, city, state/province/region, and postal code in the separate **Project Location** section immediately below it. Address components are stored separately in the project file and are combined as the default report location. They are not transmitted to an online geocoding service.

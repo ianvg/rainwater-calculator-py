@@ -58,6 +58,7 @@ class ProjectConfig:
     longitude: float | None = None
     unit_system: str = "Imperial"
     country_code: str = "USA"
+    system_type: str = "Direct system"
     acis_precipitation_field: str = "TOTAL_PRECIPITATION"
     canadian_precipitation_field: str = "TOTAL_PRECIPITATION"
     surfaces: List[Surface] = field(default_factory=list)
