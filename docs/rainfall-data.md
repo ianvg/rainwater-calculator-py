@@ -1,5 +1,9 @@
 # Rainfall data
 
+## Find stations near project coordinates
+
+When project latitude and longitude are available, select **Find Nearest 10** to search geographically around the project. The calculator expands the search area as needed, ranks stations by great-circle distance, and displays the nearest ten stations that overlap the requested historical period. Distances are shown in kilometres, and the resulting stations can be selected, mapped, and imported through the normal workflow. This search does not require a State or Province/Territory selection.
+
 The analysis uses daily precipitation records. Longer, representative periods generally provide a more meaningful reliability estimate than short records.
 
 ## Import from ACIS

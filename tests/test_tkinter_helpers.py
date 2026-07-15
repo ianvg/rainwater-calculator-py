@@ -152,6 +152,8 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
         "selected_tank_size": 750.0,
         "selected_reliability": 65.0,
         "include_multitank_charts": True,
+        "include_system_visualization": True,
+        "system_type": "Indirect system",
         "multitank_charts": [
             {
                 "title": "Yearly demand reliability - multitank",
@@ -228,6 +230,12 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "stroke:#d71920" in html
     assert "Primary tank size" in html
     assert "<h2>Tank summary</h2>" in html
+    assert 'id="system-visualization"' in html
+    assert "System visualization - Indirect system" in html
+    assert "Filtration pump" in html
+    assert "Booster pump" in html
+    assert "Municipal water backup" in html
+    assert html.index('id="tank-summary"') < html.index('id="system-visualization"') < html.index('id="demand-summary"')
     assert "750 gal" in html
     assert "<h2>Demand summary</h2>" in html
     assert 'aria-label="Table of contents"' in html
@@ -240,6 +248,8 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "<td>101</td><td>3,001</td>" in html
     assert "365,001 gal" in html
     assert "Produced by Jane Engineer" in html
+    assert "Selected tank size" in html
+    assert "750 gal" in html
     assert "42.38 in" in html
     assert "Rain only" in html
     assert html.index('id="reliability-curve"') < html.index('id="yearly-demand-reliability"')
@@ -277,6 +287,8 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert r"\usepackage[hidelinks]{hyperref}" in latex
     assert r"\tableofcontents" in latex
     assert r"\section{Tank Summary}" in latex
+    assert r"\section{System Visualization - Indirect system}" in latex
+    assert r"\textbf{Selected tank size} & 750 gal" in latex
     assert r"\section{Notes}" in latex
     assert latex.index(r"\section{Project Information}") < latex.index(r"\section{Notes}") < latex.index(r"\section{Surface Area Summary}")
     assert r"Coordinate with facilities.\par Confirm irrigation schedule." in latex

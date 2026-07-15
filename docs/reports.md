@@ -45,6 +45,8 @@ Temporary previews are intended for review. Export a report when a permanent pro
 
 Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
 
+Select **Include system-type visualization** in the report-information dialog to place a schematic of the applied direct or indirect system immediately after the Tank summary. The schematic identifies the primary analyzed tank size and the principal flow path to the end uses.
+
 When **Multi-tank comparison** is enabled and comparison analysis is available, the report-information dialog enables **Include multi-tank sizing charts**. Selecting it appends **Tank level distribution - multitank**, the combined yearly reliability comparison, one stacked yearly demand reliability chart for each comparison tank, and the combined tank-water history. The primary tank's original charts remain in their normal report positions. The option is disabled when multi-tank comparison is not active.
 
 In HTML reports, the combined **Yearly demand reliability - multitank** chart includes a checked legend control for each tank size. Clear a tank's checkbox to hide its line and select it again to restore the line.

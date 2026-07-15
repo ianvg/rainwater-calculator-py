@@ -13,6 +13,58 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.state_or_province == ""
     assert config.postal_code == ""
     assert config.acis_precipitation_field == "TOTAL_PRECIPITATION"
+    assert config.graph_auto_step_count == 20
+    assert config.system_parameters.pump_capacity_gallons_per_hour == 0.0
+    assert config.system_parameters.filtration_pump_capacity_gallons_per_hour == 1200.0
+    assert config.system_parameters.filter_recovery_percent == 100.0
+    assert config.system_parameters.booster_refill_level_percent == 50.0
+    assert config.system_parameters.municipal_backup_enabled is True
+
+
+def test_system_component_parameters_are_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Constrained system",
+            "system_parameters": {
+                "pump_capacity_gallons_per_hour": 25.0,
+                "filtration_pump_capacity_gallons_per_hour": 900.0,
+                "filter_recovery_percent": 92.0,
+                "booster_tank_size_gallons": 250.0,
+                "booster_initial_fill_percent": 40.0,
+                "booster_refill_level_percent": 35.0,
+                "municipal_backup_enabled": False,
+            },
+        }
+    )
+
+    assert config.system_parameters.pump_capacity_gallons_per_hour == 25.0
+    assert config.system_parameters.filtration_pump_capacity_gallons_per_hour == 900.0
+    assert config.system_parameters.filter_recovery_percent == 92.0
+    assert config.system_parameters.booster_tank_size_gallons == 250.0
+    assert config.system_parameters.booster_initial_fill_percent == 40.0
+    assert config.system_parameters.booster_refill_level_percent == 35.0
+    assert config.system_parameters.municipal_backup_enabled is False
+
+
+def test_graph_auto_step_count_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict({"name": "Custom steps", "graph_auto_step_count": 32})
+
+    assert config.graph_auto_step_count == 32
+
+
+def test_legacy_hourly_schedule_is_migrated_to_schedule_library() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Legacy hourly",
+            "demand": {
+                "hourly_schedule_enabled": True,
+                "hourly_weekly_fractions": {"mon": [1.0] + [0.0] * 23},
+            },
+        }
+    )
+
+    assert config.demand.active_hourly_schedule_name == "Typical week demand"
+    assert config.demand.hourly_schedule_library["Typical week demand"]["mon"][0] == 1.0
 
 
 def test_project_country_code_is_loaded() -> None:

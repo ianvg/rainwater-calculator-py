@@ -13,7 +13,7 @@ cd C:\Projects\rainwater-calculator-py
 
 ## Main areas
 
-The application is organized into tabs for project inputs, system parameters, rainfall importing, demand, collection surfaces, analysis settings, and results. The exact tabs visible may vary as the application develops.
+The application is organized into tabs for project inputs, schedules, rainfall importing, collection surfaces, demand, system parameters, analysis settings, and results. The exact tabs visible may vary as the application develops.
 
 The status area at the bottom reports actions such as opening a project, importing rainfall, running an analysis, and generating a report. Longer operations display progress at the lower right.
 

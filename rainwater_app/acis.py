@@ -37,6 +37,22 @@ def fetch_station_options(state: str, start_date: date, end_date: date) -> list[
     }
     response = _post_json(ACIS_STATION_META_URL, payload)
 
+    return _station_options_from_meta(response, state)
+
+
+def fetch_station_options_bbox(
+    west: float, south: float, east: float, north: float, start_date: date, end_date: date
+) -> list[dict[str, Any]]:
+    payload = {
+        "bbox": f"{west:.6f},{south:.6f},{east:.6f},{north:.6f}",
+        "sdate": start_date.isoformat(),
+        "edate": end_date.isoformat(),
+        "meta": ["name", "sids", "state", "ll", "elev"],
+    }
+    return _station_options_from_meta(_post_json(ACIS_STATION_META_URL, payload))
+
+
+def _station_options_from_meta(response: dict[str, Any], default_state: str = "") -> list[dict[str, Any]]:
     stations: list[dict[str, Any]] = []
     for item in response.get("meta", []):
         sid = _primary_station_id(item.get("sids", []))
@@ -46,7 +62,7 @@ def fetch_station_options(state: str, start_date: date, end_date: date) -> list[
             {
                 "sid": sid,
                 "name": str(item.get("name", "Unnamed station")),
-                "state": str(item.get("state", state)),
+                "state": str(item.get("state", default_state)),
                 "longitude": _safe_coordinate(item, 0),
                 "latitude": _safe_coordinate(item, 1),
                 "elevation_ft": item.get("elev"),

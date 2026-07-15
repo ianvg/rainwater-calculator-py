@@ -2,6 +2,12 @@
 
 This document records possible future directions for the RWH Calculator. Items are proposals rather than commitments to a particular release.
 
+## Configurable system networks
+
+Develop an OpenStudio-style system editor in which users assemble arbitrary rainwater systems from tanks, pumps, filters, controls, municipal connections, end uses, and discharge components. Each component would expose typed inlet and outlet ports plus capacity, efficiency, storage, and control parameters. A general hourly solver would traverse the connected network and apply conservation of mass at every component and timestep instead of selecting a hard-coded direct or indirect template.
+
+The current direct and indirect templates are the first constrained implementation of this model. Future work should include connection validation, loop detection, deterministic flow priority, controller state, component-level diagnostics, saved reusable templates, and a migration path that preserves existing projects.
+
 ## International rainfall data
 
 Extend rainfall importing beyond the current US ACIS and Canadian ECCC workflows using a layered provider strategy:

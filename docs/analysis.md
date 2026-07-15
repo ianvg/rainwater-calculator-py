@@ -28,11 +28,15 @@ Review the minimum and maximum tank size, graph step, initial storage assumption
 
 The **Daily demand schedule** selects how many days per week recurring daily demand applies. A five-day schedule applies daily and occupancy-based demand Monday through Friday; monthly end-use totals remain distributed across every day of the month. Existing projects default to seven days per week.
 
-Enable automatic graph step sizing to divide the tank-size range into approximately 40 steps. For example, a 20,000-gallon range uses a 500-gallon step.
+Enter the desired **Number of steps** and select **Auto** to divide the tank-size range into that many increments. New projects default to 20 steps. The selected count is stored with the project.
 
 ## Run the analysis
 
 Select **Run analysis > Run single-tank analysis** or press `Ctrl+R` to analyze the primary tank without running the comparison tanks. Select **Run analysis > Run multi-tank analysis** or press `Ctrl+Alt+R` to analyze the primary tank and every enabled comparison size. Multi-tank analysis requires **Multi-tank comparison** to be enabled and at least one comparison size. The status area reports the current analysis part and progress.
+
+While an analysis is running, select **Cancel analysis** beside the bottom progress bar to interrupt it. Cancellation is checked throughout reliability-curve and individual tank simulations. Any previous completed results remain available; partial results from the cancelled run are discarded.
+
+When an hourly schedule is enabled, the primary-tank analysis also produces hourly component results. Open **Results > Hourly results** and select a year to inspect hourly storage, demand, pump and filter flow, municipal makeup, rainwater shortfall, and overflow. The year selector prevents long weather records from overloading the results table while the complete hourly record remains stored in the project.
 
 If analysis cannot start, check that rainfall data has been imported and that required numeric values are valid and positive.
 

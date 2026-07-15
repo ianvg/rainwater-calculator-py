@@ -1,4 +1,4 @@
-from .models import DemandProfile, ProjectConfig, Surface, TankParameters, MONTH_KEYS
+from .models import DemandProfile, ProjectConfig, Surface, SystemComponentParameters, TankParameters, MONTH_KEYS
 
 DEFAULT_SURFACES = [
     Surface("Roof membrane", 0.0, 0.95),
@@ -46,4 +46,5 @@ def default_project_config(name: str = "My Project") -> ProjectConfig:
         surfaces=surfaces,
         demand=demand,
         tank_parameters=TankParameters(),
+        system_parameters=SystemComponentParameters(),
     )

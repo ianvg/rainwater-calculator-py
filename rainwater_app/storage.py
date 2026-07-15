@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from .models import DemandProfile, ProjectConfig, Surface, TankParameters
+from .models import DemandProfile, ProjectConfig, Surface, SystemComponentParameters, TankParameters
 
 
 class SQLiteStore:
@@ -52,6 +52,8 @@ class SQLiteStore:
                 conn.execute("ALTER TABLE projects ADD COLUMN results_json TEXT")
             if "comparison_results_json" not in columns:
                 conn.execute("ALTER TABLE projects ADD COLUMN comparison_results_json TEXT")
+            if "hourly_results_json" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN hourly_results_json TEXT")
             conn.commit()
 
     def list_projects(self) -> list[str]:
@@ -66,17 +68,19 @@ class SQLiteStore:
         curve_df: pd.DataFrame | None = None,
         results_df: pd.DataFrame | None = None,
         comparison_results_df: pd.DataFrame | None = None,
+        hourly_results_df: pd.DataFrame | None = None,
     ) -> None:
         config_json = json.dumps(asdict(config))
         curve_json = self._df_to_json(curve_df)
         results_json = self._df_to_json(results_df)
         comparison_results_json = self._df_to_json(comparison_results_df)
+        hourly_results_json = self._df_to_json(hourly_results_df)
         with self._connect() as conn:
             row = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()
             if row is None:
                 conn.execute(
-                    "INSERT INTO projects (name, config_json, curve_json, results_json, comparison_results_json) VALUES (?, ?, ?, ?, ?)",
-                    (config.name, config_json, curve_json, results_json, comparison_results_json),
+                    "INSERT INTO projects (name, config_json, curve_json, results_json, comparison_results_json, hourly_results_json) VALUES (?, ?, ?, ?, ?, ?)",
+                    (config.name, config_json, curve_json, results_json, comparison_results_json, hourly_results_json),
                 )
                 project_id = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()["id"]
             else:
@@ -84,10 +88,10 @@ class SQLiteStore:
                 conn.execute(
                     """
                     UPDATE projects
-                    SET config_json = ?, curve_json = ?, results_json = ?, comparison_results_json = ?, updated_at = CURRENT_TIMESTAMP
+                    SET config_json = ?, curve_json = ?, results_json = ?, comparison_results_json = ?, hourly_results_json = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (config_json, curve_json, results_json, comparison_results_json, project_id),
+                    (config_json, curve_json, results_json, comparison_results_json, hourly_results_json, project_id),
                 )
                 conn.execute("DELETE FROM rainfall_data WHERE project_id = ?", (project_id,))
 
@@ -142,6 +146,16 @@ class SQLiteStore:
             raise ValueError(f"Project '{name}' not found.")
         return self._df_from_json(row["comparison_results_json"])
 
+    def load_hourly_results(self, name: str) -> pd.DataFrame:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT hourly_results_json FROM projects WHERE name = ?",
+                (name,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Project '{name}' not found.")
+        return self._df_from_json(row["hourly_results_json"])
+
     @staticmethod
     def _df_to_json(df: pd.DataFrame | None) -> str | None:
         if df is None or df.empty:
@@ -166,7 +180,14 @@ class SQLiteStore:
             **payload.get("demand", {}),
         }
         demand = DemandProfile(**demand_payload)
+        if demand.hourly_schedule_enabled and not demand.hourly_schedule_library:
+            demand.hourly_schedule_library[demand.active_hourly_schedule_name] = {
+                day: list(values) for day, values in demand.hourly_weekly_fractions.items()
+            }
+        if demand.hourly_schedule_library and demand.active_hourly_schedule_name not in demand.hourly_schedule_library:
+            demand.active_hourly_schedule_name = next(iter(demand.hourly_schedule_library))
         tank_params = TankParameters(**payload.get("tank_parameters", {}))
+        system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
@@ -192,6 +213,7 @@ class SQLiteStore:
             graph_start_gal=int(payload.get("graph_start_gal", 500)),
             graph_end_gal=int(payload.get("graph_end_gal", 20000)),
             graph_step_gal=int(payload.get("graph_step_gal", 500)),
+            graph_auto_step_count=max(1, int(payload.get("graph_auto_step_count", 20))),
             selected_tank_size_gal=float(payload.get("selected_tank_size_gal", 5000.0)),
             multitank_comparison_enabled=bool(payload.get("multitank_comparison_enabled", False)),
             comparison_tank_sizes_gal=[
@@ -201,6 +223,7 @@ class SQLiteStore:
             analysis_input_signature=payload.get("analysis_input_signature"),
             analysis_unit_system=payload.get("analysis_unit_system"),
             tank_parameters=tank_params,
+            system_parameters=system_params,
         )
 
 

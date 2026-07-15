@@ -27,6 +27,22 @@ def fetch_canadian_station_options(province: str, start_date: date, end_date: da
         ECCC_STATIONS_URL,
         {"f": "json", "limit": 1000, "PROV_STATE_TERR_CODE": province},
     )
+    return _station_options_from_features(features, start_date, end_date, province)
+
+
+def fetch_canadian_station_options_bbox(
+    west: float, south: float, east: float, north: float, start_date: date, end_date: date
+) -> list[dict[str, Any]]:
+    features = _get_feature_pages(
+        ECCC_STATIONS_URL,
+        {"f": "json", "limit": 1000, "bbox": f"{west:.6f},{south:.6f},{east:.6f},{north:.6f}"},
+    )
+    return _station_options_from_features(features, start_date, end_date)
+
+
+def _station_options_from_features(
+    features: list[dict[str, Any]], start_date: date, end_date: date, default_province: str = ""
+) -> list[dict[str, Any]]:
     stations: list[dict[str, Any]] = []
     for feature in features:
         properties = feature.get("properties", {})
@@ -42,7 +58,7 @@ def fetch_canadian_station_options(province: str, start_date: date, end_date: da
             {
                 "sid": station_id,
                 "name": str(properties.get("STATION_NAME") or "Unnamed station").strip(),
-                "state": province,
+                "state": str(properties.get("PROV_STATE_TERR_CODE") or default_province).strip(),
                 "longitude": _coordinate(coordinates, 0),
                 "latitude": _coordinate(coordinates, 1),
                 "first_date": first_date.isoformat(),
