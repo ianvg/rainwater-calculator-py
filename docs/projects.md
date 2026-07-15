@@ -10,9 +10,7 @@ When an author name is provided, reports display a **Produced by** line near the
 
 Use the multiline **Notes** section between Project Settings and Project Location for free-form project notes. Notes are stored with the project and appear as the second section of generated reports.
 
-The entire Project Inputs tab scrolls vertically. Use its visible scrollbar or the mouse wheel while the pointer is over the tab to reach collection-surface and demand-analysis controls on shorter displays.
-
-Select the information icon beside **Collection surfaces** for guidance on surface area. Roof collection area is entered as the gross horizontal plan-view area projected over the ground, not the larger area measured along a sloped roof surface.
+The Project Inputs tab scrolls vertically when its project metadata, notes, and location fields exceed the available window height. Collection areas, demand parameters, and simulation settings have separate tabs.
 
 The country is stored as an ISO 3166-1 alpha-3 code. The other fields represent common concepts from ISO 19160-4 and UPU S42: thoroughfare/delivery information, locality, administrative region, and postcode. This component model supports later country-specific formatting, but the calculator does not currently implement the complete library of S42 national address templates.
 

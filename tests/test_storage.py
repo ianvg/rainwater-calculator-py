@@ -61,6 +61,21 @@ def test_structured_project_address_is_loaded() -> None:
     assert config.longitude == -82.456789
 
 
+def test_comparison_tank_sizes_are_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Comparison project",
+            "multitank_comparison_enabled": True,
+            "comparison_tank_sizes_gal": [2500, 5000.5, 10000],
+            "analysis_unit_system": "Metric",
+        }
+    )
+
+    assert config.multitank_comparison_enabled is True
+    assert config.comparison_tank_sizes_gal == [2500.0, 5000.5, 10000.0]
+    assert config.analysis_unit_system == "Metric"
+
+
 def test_single_field_address_migrates_to_street_address() -> None:
     config = SQLiteStore._config_from_dict(
         {"name": "Earlier address project", "address": "1121 Brittain Estates Drive"}

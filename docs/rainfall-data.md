@@ -6,6 +6,8 @@ The analysis uses daily precipitation records. Longer, representative periods ge
 
 Set the project country to **USA - United States** to use ACIS importing.
 
+The source is the NOAA Regional Climate Centers' [Applied Climate Information System (ACIS)](https://www.rcc-acis.org/). The calculator imports daily station records containing observation dates and precipitation in inches.
+
 Open the rainwater-data import tab and select a state. Begin typing a state name to move to the first matching option.
 
 Select **Total precipitation** to use the ACIS daily precipitation value. ACIS does not provide a native rain-only field, so **Rain only** excludes precipitation on days with reported snowfall. This conservative approximation can undercount rain on mixed rain and snow days; the application displays a warning after such an import.
@@ -21,6 +23,8 @@ ACIS importing requires an internet connection. After a successful import, the r
 ## Import Canadian climate data
 
 Set the project country to **CAN - Canada**. The import tab changes to the Environment and Climate Change Canada (ECCC) workflow.
+
+The source is [ECCC Historical Climate Data](https://climate.weather.gc.ca/). The calculator imports daily station observations containing dates and precipitation in millimetres.
 
 1. Select a province or territory.
 2. Select whether to use **Total precipitation** or **Rain only**.

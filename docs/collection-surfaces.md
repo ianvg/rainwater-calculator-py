@@ -2,6 +2,8 @@
 
 Collection surfaces describe the areas that receive rainfall and direct a portion of it to storage.
 
+Open **Collection surfaces** to add and edit collection areas. Select the information icon beside the tab's surface table for guidance on area measurement. Roof collection area is the gross horizontal plan-view area projected over the ground, not the larger area measured along a sloped roof surface.
+
 ## Add a standard surface
 
 Choose a predefined surface type and enter its collection area. The application supplies the current default runoff coefficient for that surface type.

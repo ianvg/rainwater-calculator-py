@@ -50,6 +50,8 @@ class SQLiteStore:
                 conn.execute("ALTER TABLE projects ADD COLUMN curve_json TEXT")
             if "results_json" not in columns:
                 conn.execute("ALTER TABLE projects ADD COLUMN results_json TEXT")
+            if "comparison_results_json" not in columns:
+                conn.execute("ALTER TABLE projects ADD COLUMN comparison_results_json TEXT")
             conn.commit()
 
     def list_projects(self) -> list[str]:
@@ -63,16 +65,18 @@ class SQLiteStore:
         rainfall_df: pd.DataFrame | None = None,
         curve_df: pd.DataFrame | None = None,
         results_df: pd.DataFrame | None = None,
+        comparison_results_df: pd.DataFrame | None = None,
     ) -> None:
         config_json = json.dumps(asdict(config))
         curve_json = self._df_to_json(curve_df)
         results_json = self._df_to_json(results_df)
+        comparison_results_json = self._df_to_json(comparison_results_df)
         with self._connect() as conn:
             row = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()
             if row is None:
                 conn.execute(
-                    "INSERT INTO projects (name, config_json, curve_json, results_json) VALUES (?, ?, ?, ?)",
-                    (config.name, config_json, curve_json, results_json),
+                    "INSERT INTO projects (name, config_json, curve_json, results_json, comparison_results_json) VALUES (?, ?, ?, ?, ?)",
+                    (config.name, config_json, curve_json, results_json, comparison_results_json),
                 )
                 project_id = conn.execute("SELECT id FROM projects WHERE name = ?", (config.name,)).fetchone()["id"]
             else:
@@ -80,10 +84,10 @@ class SQLiteStore:
                 conn.execute(
                     """
                     UPDATE projects
-                    SET config_json = ?, curve_json = ?, results_json = ?, updated_at = CURRENT_TIMESTAMP
+                    SET config_json = ?, curve_json = ?, results_json = ?, comparison_results_json = ?, updated_at = CURRENT_TIMESTAMP
                     WHERE id = ?
                     """,
-                    (config_json, curve_json, results_json, project_id),
+                    (config_json, curve_json, results_json, comparison_results_json, project_id),
                 )
                 conn.execute("DELETE FROM rainfall_data WHERE project_id = ?", (project_id,))
 
@@ -127,6 +131,16 @@ class SQLiteStore:
         curve_df = self._df_from_json(row["curve_json"])
         results_df = self._df_from_json(row["results_json"])
         return config, rainfall_df, curve_df, results_df
+
+    def load_comparison_results(self, name: str) -> pd.DataFrame:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT comparison_results_json FROM projects WHERE name = ?",
+                (name,),
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"Project '{name}' not found.")
+        return self._df_from_json(row["comparison_results_json"])
 
     @staticmethod
     def _df_to_json(df: pd.DataFrame | None) -> str | None:
@@ -174,8 +188,13 @@ class SQLiteStore:
             graph_end_gal=int(payload.get("graph_end_gal", 20000)),
             graph_step_gal=int(payload.get("graph_step_gal", 500)),
             selected_tank_size_gal=float(payload.get("selected_tank_size_gal", 5000.0)),
+            multitank_comparison_enabled=bool(payload.get("multitank_comparison_enabled", False)),
+            comparison_tank_sizes_gal=[
+                float(value) for value in payload.get("comparison_tank_sizes_gal", []) if float(value) > 0
+            ],
             rainfall_source_label=payload.get("rainfall_source_label"),
             analysis_input_signature=payload.get("analysis_input_signature"),
+            analysis_unit_system=payload.get("analysis_unit_system"),
             tank_parameters=tank_params,
         )
 

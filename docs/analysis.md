@@ -2,6 +2,22 @@
 
 When an analysis has already been run, the calculator records a fingerprint of the rainfall and simulation inputs used for that run. If rainfall, collection surfaces, demand, tank parameters, or reliability-curve settings change, opening the **Results** tab displays a warning that the analysis must be run again. Project metadata such as the name, address, coordinates, and display units does not invalidate an analysis.
 
+## Compare tank sizes
+
+Open **Analysis settings**, immediately to the left of **Results**, to configure the reliability-curve range, primary tank, initial fill, and reserve threshold. Add one or more sizes to **Tank size comparison** and run the analysis. The table reports demand reliability for every comparison size, including sizes that do not fall on the regular graph step. Comparison sizes are saved with the project.
+
+Select **Multi-tank comparison** to enable the tank-size comparison controls. The controls remain disabled when this option is clear. Existing comparison sizes remain saved while disabled but are excluded from multi-tank analysis and output.
+
+The primary tank controls the detailed daily tank-level results, report tank summary, and selected marker on the reliability curve. Double-click a comparison row, or select it and choose **Use as primary**, to make that size the primary tank. Changing comparison sizes invalidates the saved analysis until it is run again.
+
+## Results views
+
+The **Results** tab contains horizontal **Single-tank summary** and **Multitank summary** sub-tabs. Single-tank summary shows the primary tank's reliability curve, daily storage, distribution, yearly reliability, and result rows. Multitank summary overlays every tank entered in **Tank size comparison** on three charts: tank water over time, tank-level distribution, and yearly demand reliability. Tank-level distributions use six percentage-of-capacity bins so different tank sizes can be compared on the same scale.
+
+Comparison simulations are saved with completed project analysis and restored when the project is reopened. Add at least two comparison sizes and run the analysis to compare multiple tanks together.
+
+Changing only the project unit system does not require another analysis. Simulation values are stored in consistent internal units, and Results converts the saved tables and charts for display. When Results is opened after such a change, the application reports that the units were converted. Changes to physical or simulation parameters still require a rerun.
+
 The results table contains every simulated daily record. Use its vertical scrollbar to move from the beginning to the end of the analysis period and its horizontal scrollbar to inspect all result columns.
 
 The analysis simulates storage behavior through the rainfall record for a range of tank sizes.
@@ -16,7 +32,7 @@ Enable automatic graph step sizing to divide the tank-size range into approximat
 
 ## Run the analysis
 
-Select **File > Run analysis** or press `Ctrl+R`. The status area reports the current analysis part and progress.
+Select **Run analysis > Run single-tank analysis** or press `Ctrl+R` to analyze the primary tank without running the comparison tanks. Select **Run analysis > Run multi-tank analysis** or press `Ctrl+Alt+R` to analyze the primary tank and every enabled comparison size. Multi-tank analysis requires **Multi-tank comparison** to be enabled and at least one comparison size. The status area reports the current analysis part and progress.
 
 If analysis cannot start, check that rainfall data has been imported and that required numeric values are valid and positive.
 
@@ -40,7 +56,7 @@ Increasing tank size generally improves reliability until collection or demand b
 
 ## Tank water over time
 
-The tank-water chart shows simulated storage through the rainfall period for the selected tank size. Point markers can be hidden when the record is dense, leaving a clearer line chart.
+The tank-water chart shows one calendar year of simulated storage for the selected tank size. Use the left and right controls to move through the available years, or type an available year in the year field and press `Enter`. Point markers can be hidden when the record is dense, leaving a clearer line chart.
 
 ## Yearly demand reliability
 
@@ -48,4 +64,4 @@ The yearly demand reliability chart is a 100% stacked bar chart. Each bar repres
 
 ## Saved results
 
-Completed results are stored when the project is saved. Reopening the project restores the results and charts without rerunning the analysis. Rerun the analysis after changing relevant rainfall, demand, surface, unit, or tank settings.
+Completed results are stored when the project is saved. Reopening the project restores the results and charts without rerunning the analysis. Rerun the analysis after changing relevant rainfall, demand, surface, or tank settings; display-unit changes are converted without rerunning.

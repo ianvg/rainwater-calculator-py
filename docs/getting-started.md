@@ -31,6 +31,6 @@ Changing the unit system changes how values are displayed. Review all settings a
 4. Add at least one collection surface with a positive area.
 5. Enter the applicable water demand.
 6. Review tank and graph settings.
-7. Select **File > Run analysis**.
+7. Select **Run analysis > Run single-tank analysis**, or choose the multi-tank command when comparison sizes are configured.
 8. Review the results and reliability curve.
 9. Select **File > Save project as...** to choose a project-file location.

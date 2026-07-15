@@ -43,7 +43,9 @@ Temporary previews are intended for review. Export a report when a permanent pro
 
 ## Export a report
 
-Select **File > Export PDF report...** or **File > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
+Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
+
+When **Multi-tank comparison** is enabled and comparison analysis is available, the report-information dialog enables **Include multi-tank sizing charts**. Selecting it appends the comparison charts in this order: tank-level distribution, yearly demand reliability, and tank water over time. The option is disabled when multi-tank comparison is not active.
 
 PDF and HTML use the same report metadata and normalized report content. Differences between the formats are limited to presentation and format-specific rendering.
 

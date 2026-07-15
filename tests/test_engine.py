@@ -4,6 +4,7 @@ import pytest
 from rainwater_app.acis import _parse_acis_number, default_complete_calendar_range
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.engine import demand_series, reliability_curve, simulate_tank
+from rainwater_app.models import Surface
 from rainwater_app.storage import SQLiteStore
 
 
@@ -149,6 +150,11 @@ def test_default_surface_runoff_values_match_named_surfaces() -> None:
     assert default_surface_runoff("Roof Membrane") == 0.95
 
 
+def test_surface_runoff_coefficient_is_rounded_half_up_to_two_decimal_places() -> None:
+    assert Surface("Test surface", runoff_coefficient=0.954).runoff_coefficient == 0.95
+    assert Surface("Test surface", runoff_coefficient=0.955).runoff_coefficient == 0.96
+
+
 def test_project_can_be_saved_without_rainfall_data(tmp_path) -> None:
     store = SQLiteStore(str(tmp_path / "projects.db"))
     cfg = default_project_config()
@@ -212,8 +218,10 @@ def test_project_persists_analysis_outputs(tmp_path) -> None:
         }
     )
     results = simulate_tank(cfg, rainfall, 1000.0)
+    comparison_results = simulate_tank(cfg, rainfall, 500.0)
+    comparison_results["ComparisonTankSizeGallons"] = 500.0
 
-    store.save_project(cfg, rainfall, curve, results)
+    store.save_project(cfg, rainfall, curve, results, comparison_results)
 
     loaded_cfg, loaded_rainfall, loaded_curve, loaded_results = store.load_project_with_analysis("Analyzed Project")
 
@@ -222,6 +230,8 @@ def test_project_persists_analysis_outputs(tmp_path) -> None:
     assert loaded_curve["ReliabilityPercent"].tolist() == [50.0, 75.0]
     assert not loaded_results.empty
     assert "WaterInTankGallons" in loaded_results
+    loaded_comparison_results = store.load_comparison_results("Analyzed Project")
+    assert loaded_comparison_results["ComparisonTankSizeGallons"].tolist() == [500.0, 500.0, 500.0]
 
 
 def test_reliability_curve_does_not_decrease_with_larger_tanks() -> None:

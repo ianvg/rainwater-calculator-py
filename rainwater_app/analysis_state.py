@@ -34,6 +34,8 @@ def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -
         "graph_end_gal": int(config.graph_end_gal),
         "graph_step_gal": int(config.graph_step_gal),
         "selected_tank_size_gal": float(config.selected_tank_size_gal),
+        "multitank_comparison_enabled": bool(config.multitank_comparison_enabled),
+        "comparison_tank_sizes_gal": sorted(float(value) for value in config.comparison_tank_sizes_gal),
         "tank_parameters": asdict(config.tank_parameters),
         "rainfall": rainfall,
     }

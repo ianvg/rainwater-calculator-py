@@ -4,7 +4,7 @@ Water demand describes how stored rainwater is consumed. Enter only end uses sup
 
 ## Demand settings
 
-The application supports simple daily demand and more detailed end-use inputs. Available categories include occupancy-related fixtures, indoor processes, irrigation, vehicle washing, and other uses.
+Open **Demand parameters** to configure simple daily demand and detailed monthly end-use inputs. The general demand controls appear above the monthly table. Available categories include occupancy-related fixtures, indoor processes, irrigation, vehicle washing, and other uses.
 
 Unit labels appear beside input fields and in monthly-demand table headings. Confirm whether the project is using imperial or metric units before entering values.
 

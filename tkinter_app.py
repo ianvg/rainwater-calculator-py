@@ -55,6 +55,8 @@ MINIMUM_WINDOW_WIDTH = 1000
 GRAPH_AUTO_STEP_COUNT = 40
 MAX_RECENT_PROJECTS = 8
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
+ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
+ECCC_SOURCE_URL = "https://climate.weather.gc.ca/"
 OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
 ABOUT_TEXT = """RWH Calculator
 
@@ -559,6 +561,7 @@ class RainwaterTkApp(tk.Tk):
         self.progress_style = ttk.Style(self)
         self.progress_style.configure("Analysis.Horizontal.TProgressbar")
         self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
+        self.progress_style.configure("SaveProject.Horizontal.TProgressbar", background="#2e8b57")
         self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
 
         self.project_file_path = _app_dir() / "rainwater_projects.db"
@@ -569,6 +572,7 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.curve_df = pd.DataFrame()
         self.results_df = pd.DataFrame()
+        self.comparison_results: dict[float, pd.DataFrame] = {}
         self.station_options: list[dict] = []
         self.station_map_markers: list[object] = []
         self.station_map_marker_by_label: dict[str, object] = {}
@@ -598,6 +602,8 @@ class RainwaterTkApp(tk.Tk):
         self.graph_end_var = tk.StringVar(value=str(self.config_model.graph_end_gal))
         self.graph_step_var = tk.StringVar(value=str(self.config_model.graph_step_gal))
         self.selected_tank_var = tk.StringVar(value=str(self.config_model.selected_tank_size_gal))
+        self.comparison_tank_var = tk.StringVar()
+        self.multitank_comparison_var = tk.BooleanVar(value=self.config_model.multitank_comparison_enabled)
         self.selected_tank_warning_var = tk.StringVar()
         self.initial_fill_var = tk.StringVar(value=str(self.config_model.tank_parameters.initial_fill_percent))
         self.reserve_var = tk.StringVar(value=str(self.config_model.tank_parameters.reliable_fill_percent))
@@ -609,13 +615,19 @@ class RainwaterTkApp(tk.Tk):
         self.reserve_unit_var = tk.StringVar(value="% of daily demand")
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
+        self.average_annual_precipitation_var = tk.StringVar(value="Average annual precipitation: --")
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
         self.show_tank_points_var = tk.BooleanVar(value=True)
+        self.tank_chart_year_var = tk.StringVar(value="--")
+        self.tank_chart_year: int | None = None
         self.weather_state_var = tk.StringVar(value=STATE_PLACEHOLDER)
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
         self.canadian_precip_var = tk.StringVar(value="Total precipitation")
+        self.weather_source_note_var = tk.StringVar()
+        self.weather_source_link_var = tk.StringVar()
+        self.weather_source_url = ACIS_SOURCE_URL
         self.rainfall_source_label: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
@@ -628,6 +640,8 @@ class RainwaterTkApp(tk.Tk):
         self.country_popdown_key_command: str | None = None
         self.results_chart_redraw_after_id: str | None = None
         self.last_analysis_warning_key: str | None = None
+        self.last_unit_conversion_notice: str | None = None
+        self.unit_conversion_form_snapshot: tuple[str, ...] | None = None
         self.report_preview_directories: list[tempfile.TemporaryDirectory] = []
         self.report_preview_servers: list[http.server.ThreadingHTTPServer] = []
         self.location_result_queue: queue.Queue = queue.Queue()
@@ -673,39 +687,35 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_ui(self) -> None:
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(0, weight=1)
         self._build_menu()
 
-        toolbar = ttk.Frame(self, padding=(10, 8))
-        toolbar.grid(row=0, column=0, sticky="ew")
-        toolbar.columnconfigure(2, weight=1)
-
-        ttk.Label(toolbar, text="Project").grid(row=0, column=0, sticky="w")
-        self.project_combo = ttk.Combobox(toolbar, textvariable=self.saved_project_var, width=24, state="readonly")
-        self.project_combo.grid(row=0, column=1, padx=(6, 8), sticky="w")
-        ttk.Button(toolbar, text="Run Analysis", command=self.run_analysis).grid(row=0, column=3, padx=(18, 2))
-        ttk.Button(toolbar, text="Export Results", command=self.export_results).grid(row=0, column=4, padx=2)
-
         self.notebook = ttk.Notebook(self)
-        self.notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 6))
+        self.notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(8, 6))
 
         self.inputs_tab = ttk.Frame(self.notebook, padding=10)
         self.import_tab = ttk.Frame(self.notebook, padding=10)
+        self.collection_tab = ttk.Frame(self.notebook, padding=10)
         self.demand_tab = ttk.Frame(self.notebook, padding=10)
+        self.analysis_tab = ttk.Frame(self.notebook, padding=10)
         self.results_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.inputs_tab, text="Project Inputs")
         self.notebook.add(self.import_tab, text="Rainwater Data")
-        self.notebook.add(self.demand_tab, text="Monthly Demand")
+        self.notebook.add(self.collection_tab, text="Collection surfaces")
+        self.notebook.add(self.demand_tab, text="Demand parameters")
+        self.notebook.add(self.analysis_tab, text="Analysis settings")
         self.notebook.add(self.results_tab, text="Results")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
         self._build_inputs_tab()
         self._build_import_tab()
+        self._build_collection_tab()
         self._build_demand_tab()
+        self._build_analysis_tab()
         self._build_results_tab()
 
         status_frame = ttk.Frame(self, padding=(10, 4))
-        status_frame.grid(row=2, column=0, sticky="ew")
+        status_frame.grid(row=1, column=0, sticky="ew")
         status_frame.columnconfigure(0, weight=1)
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="ew")
         self.analysis_progress = ttk.Progressbar(
@@ -721,20 +731,39 @@ class RainwaterTkApp(tk.Tk):
         menubar = tk.Menu(self)
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="Create new project", accelerator="Ctrl+N", command=self.new_project)
-        file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
-        file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_command(label="Open project...", accelerator="Ctrl+O", command=self.open_project_from)
+        file_menu.add_command(
+            label="Open most recent project",
+            accelerator="Ctrl+Alt+O",
+            command=self.open_most_recent_project,
+        )
         self.recent_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
-        file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
-        file_menu.add_separator()
-        file_menu.add_command(label="Export results...", command=self.export_results)
-        file_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
-        file_menu.add_command(label="Export HTML report...", command=self.export_html_report)
+        file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
+        file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_separator()
         file_menu.add_command(label="Close project", accelerator="Ctrl+W", command=self.close_project)
         file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
         menubar.add_cascade(label="File", menu=file_menu)
+
+        analysis_menu = tk.Menu(menubar, tearoff=False)
+        analysis_menu.add_command(
+            label="Run single-tank analysis",
+            accelerator="Ctrl+R",
+            command=self.run_single_tank_analysis,
+        )
+        analysis_menu.add_command(
+            label="Run multi-tank analysis",
+            accelerator="Ctrl+Alt+R",
+            command=self.run_multitank_analysis,
+        )
+        menubar.add_cascade(label="Run analysis", menu=analysis_menu)
+
+        export_menu = tk.Menu(menubar, tearoff=False)
+        export_menu.add_command(label="Export results...", command=self.export_results)
+        export_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
+        export_menu.add_command(label="Export HTML report...", command=self.export_html_report)
+        menubar.add_cascade(label="Export", menu=export_menu)
 
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label="View PDF report", command=self.view_pdf_report)
@@ -755,20 +784,27 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-Shift-S>", self._shortcut_save_project_as)
         self.bind_all("<Control-Shift-s>", self._shortcut_save_project_as)
         self.bind_all("<Control-o>", self._shortcut_open_project_from)
+        self.bind_all("<Control-Alt-o>", self._shortcut_open_most_recent_project)
+        self.bind_all("<Control-Alt-O>", self._shortcut_open_most_recent_project)
         self.bind_all("<Control-r>", self._shortcut_run_analysis)
+        self.bind_all("<Control-Alt-r>", self._shortcut_run_multitank_analysis)
+        self.bind_all("<Control-Alt-R>", self._shortcut_run_multitank_analysis)
         self.bind_all("<Control-w>", self._shortcut_close_project)
         self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _on_notebook_tab_changed(self, _event: tk.Event) -> None:
         if self.notebook.select() != str(self.results_tab):
             self.last_analysis_warning_key = None
+            self.last_unit_conversion_notice = None
             return
         if not self.results_df.empty or not self.curve_df.empty:
             self.after_idle(self._draw_saved_analysis_charts)
         previous_signature = self.config_model.analysis_input_signature
         if not previous_signature:
             return
-        self._apply_form_to_model()
+        current_form_snapshot = self._calculation_form_snapshot()
+        if self.unit_conversion_form_snapshot != current_form_snapshot:
+            self._apply_form_to_model()
         current_signature = analysis_input_signature(self.config_model, self.rainfall_df)
         if current_signature != previous_signature:
             warning_key = f"{previous_signature}:{current_signature}"
@@ -779,6 +815,21 @@ class RainwaterTkApp(tk.Tk):
                 APP_TITLE,
                 "Simulation parameters have changed. The analysis needs to be re-run.",
             )
+            return
+        analysis_units = self.config_model.analysis_unit_system
+        current_units = self.config_model.unit_system
+        if analysis_units and analysis_units != current_units:
+            notice_key = f"{analysis_units}:{current_units}:{previous_signature}"
+            if self.last_unit_conversion_notice != notice_key:
+                self.last_unit_conversion_notice = notice_key
+                messagebox.showinfo(
+                    APP_TITLE,
+                    f"The unit system changed from {analysis_units} to {current_units}. "
+                    "The saved analysis remains valid; charts and result values were converted without rerunning it.",
+                )
+
+    def _on_results_subtab_changed(self, _event: tk.Event) -> None:
+        self.after_idle(self._draw_saved_analysis_charts)
 
     def open_user_guide(self) -> None:
         index_path = _help_index_path()
@@ -810,8 +861,16 @@ class RainwaterTkApp(tk.Tk):
         self.open_project_from()
         return "break"
 
+    def _shortcut_open_most_recent_project(self, _event: tk.Event) -> str:
+        self.open_most_recent_project()
+        return "break"
+
     def _shortcut_run_analysis(self, _event: tk.Event) -> str:
-        self.run_analysis()
+        self.run_single_tank_analysis()
+        return "break"
+
+    def _shortcut_run_multitank_analysis(self, _event: tk.Event) -> str:
+        self.run_multitank_analysis()
         return "break"
 
     def _shortcut_close_project(self, _event: tk.Event) -> str:
@@ -1007,74 +1066,6 @@ class RainwaterTkApp(tk.Tk):
             row=4, column=1, columnspan=5, sticky="w", pady=(6, 0)
         )
 
-        surface_title = ttk.Frame(self.inputs_content)
-        ttk.Label(surface_title, text="Collection surfaces").grid(row=0, column=0, sticky="w")
-        surface_tip_button = ttk.Button(
-            surface_title,
-            text="ⓘ",
-            width=2,
-            command=self._show_collection_surface_tip,
-            takefocus=True,
-        )
-        surface_tip_button.grid(row=0, column=1, padx=(4, 0))
-        surfaces_frame = ttk.LabelFrame(self.inputs_content, labelwidget=surface_title, padding=10)
-        surfaces_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
-        surfaces_frame.rowconfigure(0, weight=1)
-        surfaces_frame.columnconfigure(0, weight=1)
-        self.surface_tree = ttk.Treeview(surfaces_frame, columns=("surface", "area", "runoff"), show="headings", height=12)
-        self.surface_tree.heading("surface", text="Surface")
-        self.surface_tree.heading("area", text="Area")
-        self.surface_tree.heading("runoff", text="Runoff coeff.")
-        self.surface_tree.column("surface", width=220)
-        self.surface_tree.column("area", width=90, anchor="e")
-        self.surface_tree.column("runoff", width=90, anchor="e")
-        self.surface_tree.grid(row=0, column=0, sticky="nsew")
-        surface_scroll_y = ttk.Scrollbar(surfaces_frame, orient="vertical", command=self.surface_tree.yview)
-        surface_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.surface_tree.configure(yscrollcommand=surface_scroll_y.set)
-        self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
-        self.surface_tree.bind("<Return>", self._edit_selected_surface_from_event)
-        surface_buttons = ttk.Frame(surfaces_frame)
-        surface_buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Button(surface_buttons, text="Add collection surface", command=self.add_surface).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(surface_buttons, text="Edit selected surface", command=self.edit_surface).grid(row=0, column=1)
-
-        right_frame = ttk.Frame(self.inputs_content)
-        right_frame.grid(row=3, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
-        right_frame.columnconfigure(0, weight=1)
-
-        settings_frame = ttk.LabelFrame(right_frame, text="Demand and Analysis Settings", padding=10)
-        settings_frame.grid(row=0, column=0, sticky="ew")
-        settings_frame.columnconfigure(1, weight=1)
-
-        self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
-        ttk.Label(settings_frame, text="Daily demand schedule").grid(row=1, column=0, sticky="w", pady=2)
-        self.daily_demand_days_combo = ttk.Combobox(
-            settings_frame,
-            textvariable=self.daily_demand_days_var,
-            values=[str(value) for value in range(8)],
-            width=8,
-            state="readonly",
-        )
-        self.daily_demand_days_combo.grid(row=1, column=1, sticky="ew", pady=2)
-        ttk.Label(settings_frame, text="days/week").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=2)
-        self._labeled_entry(settings_frame, 2, "Average flushes", self.flushes_var, self.flush_count_unit_var)
-        self._labeled_entry(settings_frame, 3, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
-        self._labeled_entry(settings_frame, 4, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
-        ttk.Separator(settings_frame).grid(row=5, column=0, columnspan=3, sticky="ew", pady=8)
-        self._labeled_entry(settings_frame, 6, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
-        self._labeled_entry(settings_frame, 7, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
-        self._labeled_entry(settings_frame, 8, "Graph step", self.graph_step_var, self.tank_size_unit_var)
-        ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(row=8, column=3, sticky="w", padx=(8, 0), pady=2)
-        self._labeled_entry(settings_frame, 9, "Selected tank size", self.selected_tank_var, self.tank_size_unit_var)
-        ttk.Label(
-            settings_frame,
-            textvariable=self.selected_tank_warning_var,
-            style="Invalid.TLabel",
-        ).grid(row=9, column=3, sticky="w", padx=(8, 0), pady=2)
-        self._labeled_entry(settings_frame, 10, "Initial fill", self.initial_fill_var, self.percent_unit_var)
-        self._labeled_entry(settings_frame, 11, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
-
     def _update_inputs_scrollregion(self, _event: tk.Event | None = None) -> None:
         self.inputs_canvas.configure(scrollregion=self.inputs_canvas.bbox("all"))
 
@@ -1085,6 +1076,24 @@ class RainwaterTkApp(tk.Tk):
             "For a sloped roof, use its plan-view footprint rather than the larger sloped surface area.",
             parent=self,
         )
+
+    def _show_weather_source_tip(self) -> None:
+        if self._selected_country_code() == "CAN":
+            detail = (
+                "Canadian imports use Environment and Climate Change Canada (ECCC) daily station observations. "
+                "Records contain a date and precipitation measured in millimetres; the selected precipitation "
+                "basis determines whether total precipitation or rain only is imported."
+            )
+        else:
+            detail = (
+                "United States imports use daily station records from the NOAA Regional Climate Centers' "
+                "Applied Climate Information System (ACIS). Records contain a date and precipitation measured "
+                "in inches. ACIS rain-only imports exclude precipitation on reported snowfall days."
+            )
+        messagebox.showinfo("Rainfall data source", detail, parent=self)
+
+    def _open_weather_source(self, _event: tk.Event | None = None) -> None:
+        webbrowser.open(self.weather_source_url)
 
     def _resize_inputs_content(self, event: tk.Event) -> None:
         self.inputs_canvas.itemconfigure(self.inputs_canvas_window, width=event.width)
@@ -1122,8 +1131,30 @@ class RainwaterTkApp(tk.Tk):
         self.weather_frame = ttk.LabelFrame(self.import_tab, text="ACIS Weather Import", padding=10)
         self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.weather_frame.columnconfigure(1, weight=1)
+        source_row = ttk.Frame(self.weather_frame)
+        source_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
+        source_row.columnconfigure(1, weight=1)
+        ttk.Button(source_row, text="i", width=2, command=self._show_weather_source_tip, takefocus=True).grid(
+            row=0, column=0, sticky="nw", padx=(0, 6)
+        )
+        ttk.Label(
+            source_row,
+            textvariable=self.weather_source_note_var,
+            foreground="#5f6b70",
+            wraplength=680,
+            justify="left",
+        ).grid(row=0, column=1, sticky="ew")
+        self.weather_source_link = ttk.Label(
+            source_row,
+            textvariable=self.weather_source_link_var,
+            foreground="#0563c1",
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        self.weather_source_link.grid(row=1, column=1, sticky="w", pady=(3, 0))
+        self.weather_source_link.bind("<Button-1>", self._open_weather_source)
         self.weather_location_label = ttk.Label(self.weather_frame, text="State")
-        self.weather_location_label.grid(row=0, column=0, sticky="w", pady=2)
+        self.weather_location_label.grid(row=1, column=0, sticky="w", pady=2)
         self.state_combo = ttk.Combobox(
             self.weather_frame,
             textvariable=self.weather_state_var,
@@ -1131,24 +1162,24 @@ class RainwaterTkApp(tk.Tk):
             state="readonly",
         )
         self.state_combo.configure(postcommand=self._bind_state_combo_dropdown)
-        self.state_combo.grid(row=0, column=1, sticky="ew", pady=2)
+        self.state_combo.grid(row=1, column=1, sticky="ew", pady=2)
         self.state_combo.bind("<KeyPress>", self._select_state_by_first_letter)
-        self._labeled_entry(self.weather_frame, 1, "Historical years", self.weather_years_var)
-        self._labeled_entry(self.weather_frame, 2, "Station filter", self.weather_filter_var)
+        self._labeled_entry(self.weather_frame, 2, "Historical years", self.weather_years_var)
+        self._labeled_entry(self.weather_frame, 3, "Station filter", self.weather_filter_var)
         self.canadian_precip_label = ttk.Label(self.weather_frame, text="Precipitation basis")
-        self.canadian_precip_label.grid(row=3, column=0, sticky="w", pady=2)
+        self.canadian_precip_label.grid(row=4, column=0, sticky="w", pady=2)
         self.canadian_precip_combo = ttk.Combobox(
             self.weather_frame,
             textvariable=self.canadian_precip_var,
             values=list(CANADIAN_PRECIPITATION_OPTIONS),
             state="readonly",
         )
-        self.canadian_precip_combo.grid(row=3, column=1, sticky="ew", pady=2)
+        self.canadian_precip_combo.grid(row=4, column=1, sticky="ew", pady=2)
         self.find_stations_button = ttk.Button(self.weather_frame, text="Find Stations", command=self.find_weather_stations)
-        self.find_stations_button.grid(row=4, column=0, sticky="w", pady=(8, 2))
+        self.find_stations_button.grid(row=5, column=0, sticky="w", pady=(8, 2))
         self.station_combo = ttk.Combobox(self.weather_frame, textvariable=self.station_var, state="readonly")
         self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
-        self.station_combo.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
+        self.station_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
         self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
         self.station_combo.bind("<<ComboboxSelected>>", self._station_selection_changed)
         self.import_station_button = ttk.Button(
@@ -1156,7 +1187,7 @@ class RainwaterTkApp(tk.Tk):
             text="Import Selected Station",
             command=self.import_selected_weather,
         )
-        self.import_station_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.import_station_button.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
         station_map_frame = ttk.LabelFrame(self.import_tab, text="Weather stations", padding=6)
         station_map_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
@@ -1175,9 +1206,69 @@ class RainwaterTkApp(tk.Tk):
             foreground="#5f6b70",
         ).grid(row=1, column=0, sticky="e", pady=(4, 0))
 
+    def _build_collection_tab(self) -> None:
+        self.collection_tab.columnconfigure(0, weight=1)
+        self.collection_tab.rowconfigure(0, weight=1)
+        surface_title = ttk.Frame(self.collection_tab)
+        ttk.Label(surface_title, text="Collection surfaces").grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            surface_title,
+            text="ⓘ",
+            width=2,
+            command=self._show_collection_surface_tip,
+            takefocus=True,
+        ).grid(row=0, column=1, padx=(4, 0))
+        surfaces_frame = ttk.LabelFrame(self.collection_tab, labelwidget=surface_title, padding=10)
+        surfaces_frame.grid(row=0, column=0, sticky="nsew")
+        surfaces_frame.rowconfigure(0, weight=1)
+        surfaces_frame.columnconfigure(0, weight=1)
+        self.surface_tree = ttk.Treeview(
+            surfaces_frame,
+            columns=("surface", "area", "runoff"),
+            show="headings",
+            height=18,
+        )
+        self.surface_tree.heading("surface", text="Surface")
+        self.surface_tree.heading("area", text="Area")
+        self.surface_tree.heading("runoff", text="Runoff coeff.")
+        self.surface_tree.column("surface", width=420)
+        self.surface_tree.column("area", width=160, anchor="e")
+        self.surface_tree.column("runoff", width=140, anchor="e")
+        self.surface_tree.grid(row=0, column=0, sticky="nsew")
+        surface_scroll_y = ttk.Scrollbar(surfaces_frame, orient="vertical", command=self.surface_tree.yview)
+        surface_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.surface_tree.configure(yscrollcommand=surface_scroll_y.set)
+        self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
+        self.surface_tree.bind("<Return>", self._edit_selected_surface_from_event)
+        surface_buttons = ttk.Frame(surfaces_frame)
+        surface_buttons.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(surface_buttons, text="Add collection surface", command=self.add_surface).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(surface_buttons, text="Edit selected surface", command=self.edit_surface).grid(row=0, column=1)
+
     def _build_demand_tab(self) -> None:
         self.demand_tab.columnconfigure(0, weight=1)
-        self.demand_tab.rowconfigure(0, weight=1)
+        self.demand_tab.rowconfigure(1, weight=1)
+
+        settings_frame = ttk.LabelFrame(self.demand_tab, text="Demand settings", padding=10)
+        settings_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        settings_frame.columnconfigure(1, weight=1)
+        self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
+        ttk.Label(settings_frame, text="Daily demand schedule").grid(row=1, column=0, sticky="w", pady=2)
+        self.daily_demand_days_combo = ttk.Combobox(
+            settings_frame,
+            textvariable=self.daily_demand_days_var,
+            values=[str(value) for value in range(8)],
+            width=8,
+            state="readonly",
+        )
+        self.daily_demand_days_combo.grid(row=1, column=1, sticky="ew", pady=2)
+        ttk.Label(settings_frame, text="days/week").grid(row=1, column=2, sticky="w", padx=(8, 0), pady=2)
+        self._labeled_entry(settings_frame, 2, "Average flushes", self.flushes_var, self.flush_count_unit_var)
+        self._labeled_entry(settings_frame, 3, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
+        self._labeled_entry(settings_frame, 4, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
+
         columns = ["month"] + [field for field, _label in DEMAND_FIELDS]
         self.demand_tree = ttk.Treeview(
             self.demand_tab,
@@ -1191,24 +1282,116 @@ class RainwaterTkApp(tk.Tk):
         for field, _label in DEMAND_FIELDS:
             self.demand_tree.column(field, width=105, anchor="e")
         self._update_demand_headings()
-        self.demand_tree.grid(row=0, column=0, sticky="nsew")
+        self.demand_tree.grid(row=1, column=0, sticky="nsew")
         self.demand_tree.bind("<Double-1>", self._edit_demand_month_from_event)
         scroll_x = ttk.Scrollbar(self.demand_tab, orient="horizontal", command=self.demand_tree.xview)
-        scroll_x.grid(row=1, column=0, sticky="ew")
+        scroll_x.grid(row=2, column=0, sticky="ew")
         self.demand_tree.configure(xscrollcommand=scroll_x.set)
-        ttk.Button(self.demand_tab, text="Edit Selected Month", command=self.edit_demand_month).grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(self.demand_tab, text="Edit Selected Month", command=self.edit_demand_month).grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+
+    def _build_analysis_tab(self) -> None:
+        self.analysis_tab.columnconfigure(0, weight=1)
+        self.analysis_tab.columnconfigure(1, weight=1)
+        self.analysis_tab.rowconfigure(0, weight=1)
+
+        settings_frame = ttk.LabelFrame(self.analysis_tab, text="Simulation settings", padding=10)
+        settings_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
+        settings_frame.columnconfigure(1, weight=1)
+        self._labeled_entry(settings_frame, 0, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 1, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
+        self._labeled_entry(settings_frame, 2, "Graph step", self.graph_step_var, self.tank_size_unit_var)
+        ttk.Button(settings_frame, text="Auto", command=self.auto_set_graph_step).grid(
+            row=2, column=3, sticky="w", padx=(8, 0), pady=2
+        )
+        self._labeled_entry(settings_frame, 3, "Primary tank size", self.selected_tank_var, self.tank_size_unit_var)
+        ttk.Label(settings_frame, textvariable=self.selected_tank_warning_var, style="Invalid.TLabel").grid(
+            row=3, column=3, sticky="w", padx=(8, 0), pady=2
+        )
+        self._labeled_entry(settings_frame, 4, "Initial fill", self.initial_fill_var, self.percent_unit_var)
+        self._labeled_entry(settings_frame, 5, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
+        comparison_frame = ttk.LabelFrame(self.analysis_tab, text="Tank size comparison", padding=10)
+        comparison_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+        self.comparison_frame = comparison_frame
+        comparison_frame.columnconfigure(0, weight=1)
+        comparison_frame.rowconfigure(2, weight=1)
+        self.multitank_comparison_check = ttk.Checkbutton(
+            comparison_frame,
+            text="Multi-tank comparison",
+            variable=self.multitank_comparison_var,
+            command=self._toggle_multitank_comparison,
+        )
+        self.multitank_comparison_check.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        add_row = ttk.Frame(comparison_frame)
+        add_row.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        add_row.columnconfigure(1, weight=1)
+        ttk.Label(add_row, text="Tank size").grid(row=0, column=0, sticky="w")
+        ttk.Entry(add_row, textvariable=self.comparison_tank_var, width=16).grid(
+            row=0, column=1, sticky="ew", padx=(8, 8)
+        )
+        ttk.Label(add_row, textvariable=self.tank_size_unit_var).grid(row=0, column=2, sticky="w")
+        ttk.Button(add_row, text="Add", command=self.add_comparison_tank).grid(row=0, column=3, padx=(8, 0))
+
+        self.comparison_tree = ttk.Treeview(
+            comparison_frame,
+            columns=("size", "reliability", "status"),
+            show="headings",
+            height=12,
+            selectmode="extended",
+        )
+        self.comparison_tree.heading("size", text="Tank size")
+        self.comparison_tree.heading("reliability", text="Reliability")
+        self.comparison_tree.heading("status", text="")
+        self.comparison_tree.column("size", width=150, anchor="e")
+        self.comparison_tree.column("reliability", width=130, anchor="e")
+        self.comparison_tree.column("status", width=72, minwidth=72, anchor="w", stretch=False)
+        self.comparison_tree.tag_configure("primary", foreground="#777777")
+        self.comparison_tree.grid(row=2, column=0, sticky="nsew")
+        comparison_scroll = ttk.Scrollbar(comparison_frame, orient="vertical", command=self.comparison_tree.yview)
+        comparison_scroll.grid(row=2, column=1, sticky="ns")
+        self.comparison_tree.configure(yscrollcommand=comparison_scroll.set)
+        self.comparison_tree.bind("<Double-1>", self._use_comparison_as_primary_from_event)
+
+        comparison_buttons = ttk.Frame(comparison_frame)
+        comparison_buttons.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(comparison_buttons, text="Remove selected", command=self.remove_comparison_tanks).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(comparison_buttons, text="Use as primary", command=self.use_comparison_as_primary).grid(
+            row=0, column=1
+        )
+        self._update_multitank_comparison_state()
 
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
-        self.results_tab.columnconfigure(1, weight=1)
-        self.results_tab.rowconfigure(1, weight=1)
-        self.results_tab.rowconfigure(2, weight=1)
-        self.results_tab.rowconfigure(3, weight=1)
+        self.results_tab.rowconfigure(0, weight=1)
+        self.results_notebook = ttk.Notebook(self.results_tab)
+        self.results_notebook.grid(row=0, column=0, sticky="nsew")
+        self.summary_results_tab = ttk.Frame(self.results_notebook, padding=8)
+        self.multitank_results_tab = ttk.Frame(self.results_notebook, padding=8)
+        self.results_notebook.add(self.summary_results_tab, text="Single-tank summary")
+        self.results_notebook.add(self.multitank_results_tab, text="Multitank summary")
+        self.results_notebook.bind("<<NotebookTabChanged>>", self._on_results_subtab_changed)
 
-        ttk.Label(self.results_tab, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        self.curve_canvas = tk.Canvas(self.results_tab, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        summary = self.summary_results_tab
+        summary.columnconfigure(0, weight=1)
+        summary.columnconfigure(1, weight=1)
+        summary.rowconfigure(1, weight=1)
+        summary.rowconfigure(2, weight=1)
+        summary.rowconfigure(3, weight=1)
+
+        results_summary = ttk.Frame(summary)
+        results_summary.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Label(results_summary, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(results_summary, textvariable=self.average_annual_precipitation_var).grid(
+            row=1, column=0, sticky="w", pady=(2, 0)
+        )
+        self.curve_canvas = tk.Canvas(summary, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
         self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
-        self.tank_canvas = tk.Canvas(self.results_tab, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.tank_canvas = tk.Canvas(summary, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
         self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=(5, 0))
         self.tank_points_check = ttk.Checkbutton(
             self.tank_canvas,
@@ -1217,8 +1400,24 @@ class RainwaterTkApp(tk.Tk):
             command=self._draw_tank_chart,
         )
         self.tank_points_check.place(x=58, rely=1, y=-4, anchor="sw")
+        tank_year_controls = ttk.Frame(self.tank_canvas)
+        tank_year_controls.place(relx=1, rely=1, x=-8, y=-4, anchor="se")
+        self.previous_tank_year_button = ttk.Button(
+            tank_year_controls, text="<", width=3, command=lambda: self._change_tank_chart_year(-1)
+        )
+        self.previous_tank_year_button.grid(row=0, column=0)
+        ttk.Label(tank_year_controls, text="Year").grid(row=0, column=1, padx=(4, 2))
+        self.tank_chart_year_entry = ttk.Entry(
+            tank_year_controls, textvariable=self.tank_chart_year_var, width=6, justify="center"
+        )
+        self.tank_chart_year_entry.grid(row=0, column=2, padx=(0, 4))
+        self.tank_chart_year_entry.bind("<Return>", self._set_tank_chart_year_from_entry)
+        self.next_tank_year_button = ttk.Button(
+            tank_year_controls, text=">", width=3, command=lambda: self._change_tank_chart_year(1)
+        )
+        self.next_tank_year_button.grid(row=0, column=3)
         self.histogram_canvas = tk.Canvas(
-            self.results_tab,
+            summary,
             height=170,
             bg="white",
             highlightthickness=1,
@@ -1226,7 +1425,7 @@ class RainwaterTkApp(tk.Tk):
         )
         self.histogram_canvas.grid(row=2, column=0, sticky="nsew", pady=(0, 8), padx=(0, 5))
         self.yearly_reliability_canvas = tk.Canvas(
-            self.results_tab,
+            summary,
             height=170,
             bg="white",
             highlightthickness=1,
@@ -1239,7 +1438,7 @@ class RainwaterTkApp(tk.Tk):
         self.yearly_reliability_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
         columns = ("date", "precip", "collected", "overflow", "demand", "unmet", "tank")
-        self.results_tree = ttk.Treeview(self.results_tab, columns=columns, show="headings", height=7)
+        self.results_tree = ttk.Treeview(summary, columns=columns, show="headings", height=7)
         headings = {
             "date": "Date",
             "precip": "Precip.",
@@ -1253,11 +1452,24 @@ class RainwaterTkApp(tk.Tk):
             self.results_tree.heading(col, text=heading)
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
         self.results_tree.grid(row=3, column=0, columnspan=2, sticky="nsew")
-        results_scroll_y = ttk.Scrollbar(self.results_tab, orient="vertical", command=self.results_tree.yview)
+        results_scroll_y = ttk.Scrollbar(summary, orient="vertical", command=self.results_tree.yview)
         results_scroll_y.grid(row=3, column=2, sticky="ns")
-        results_scroll_x = ttk.Scrollbar(self.results_tab, orient="horizontal", command=self.results_tree.xview)
+        results_scroll_x = ttk.Scrollbar(summary, orient="horizontal", command=self.results_tree.xview)
         results_scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.results_tree.configure(yscrollcommand=results_scroll_y.set, xscrollcommand=results_scroll_x.set)
+
+        multitank = self.multitank_results_tab
+        multitank.columnconfigure(0, weight=1)
+        for row in range(3):
+            multitank.rowconfigure(row, weight=1)
+        self.multitank_tank_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.multitank_distribution_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.multitank_yearly_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.multitank_tank_canvas.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
+        self.multitank_distribution_canvas.grid(row=1, column=0, sticky="nsew", pady=5)
+        self.multitank_yearly_canvas.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
+        for canvas in (self.multitank_tank_canvas, self.multitank_distribution_canvas, self.multitank_yearly_canvas):
+            canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
     def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -1272,11 +1484,124 @@ class RainwaterTkApp(tk.Tk):
         except ValueError:
             show_warning = False
         self.selected_tank_warning_var.set("!" if show_warning else "")
+        if hasattr(self, "comparison_tree"):
+            self._populate_comparison_tanks()
+
+    def add_comparison_tank(self) -> None:
+        if not self.multitank_comparison_var.get():
+            return
+        display_value = _float(self.comparison_tank_var.get(), -1.0)
+        tank_size = volume_to_internal(display_value, self.config_model)
+        if tank_size <= 0:
+            messagebox.showwarning(APP_TITLE, "Comparison tank size must be greater than zero.")
+            return
+        if not any(abs(existing - tank_size) < 0.01 for existing in self.config_model.comparison_tank_sizes_gal):
+            self.config_model.comparison_tank_sizes_gal.append(tank_size)
+            self.config_model.comparison_tank_sizes_gal.sort()
+        self.comparison_tank_var.set("")
+        self._populate_comparison_tanks()
+
+    def remove_comparison_tanks(self) -> None:
+        if not self.multitank_comparison_var.get():
+            return
+        selected_sizes = {
+            self.comparison_tree_sizes[item]
+            for item in self.comparison_tree.selection()
+            if item in self.comparison_tree_sizes
+        }
+        if not selected_sizes:
+            return
+        self.config_model.comparison_tank_sizes_gal = [
+            size for size in self.config_model.comparison_tank_sizes_gal if size not in selected_sizes
+        ]
+        self._populate_comparison_tanks()
+
+    def use_comparison_as_primary(self) -> None:
+        if not self.multitank_comparison_var.get():
+            return
+        selected = self.comparison_tree.selection()
+        if len(selected) != 1 or selected[0] not in self.comparison_tree_sizes:
+            messagebox.showinfo(APP_TITLE, "Select one comparison tank first.")
+            return
+        tank_size = self.comparison_tree_sizes[selected[0]]
+        self.selected_tank_var.set(f"{volume_to_display(tank_size, self.config_model):.0f}")
+
+    def _use_comparison_as_primary_from_event(self, event: tk.Event) -> str:
+        row_id = self.comparison_tree.identify_row(event.y)
+        if row_id:
+            self.comparison_tree.selection_set(row_id)
+            self.use_comparison_as_primary()
+        return "break"
+
+    def _populate_comparison_tanks(self) -> None:
+        if not hasattr(self, "comparison_tree"):
+            return
+        self.comparison_tree.delete(*self.comparison_tree.get_children())
+        self.comparison_tree_sizes: dict[str, float] = {}
+        unit = volume_unit(self.config_model)
+        self.comparison_tree.heading("size", text=f"Tank size ({unit})")
+        reliability_by_size = {
+            round(float(row.TankSizeGallons), 6): float(row.ReliabilityPercent)
+            for row in self.curve_df.itertuples(index=False)
+        } if not self.curve_df.empty else {}
+        primary_tank_size = volume_to_internal(
+            _float(
+                self.selected_tank_var.get(),
+                volume_to_display(self.config_model.selected_tank_size_gal, self.config_model),
+            ),
+            self.config_model,
+        )
+        for index, tank_size in enumerate(sorted(set(self.config_model.comparison_tank_sizes_gal))):
+            reliability = reliability_by_size.get(round(float(tank_size), 6))
+            reliability_text = "--" if reliability is None else f"{reliability:.1f}%"
+            is_primary = abs(float(tank_size) - primary_tank_size) < 0.01
+            item = f"comparison-{index}"
+            self.comparison_tree.insert(
+                "",
+                "end",
+                iid=item,
+                values=(
+                    f"{volume_to_display(tank_size, self.config_model):,.0f}",
+                    reliability_text,
+                    "Primary" if is_primary else "",
+                ),
+                tags=("primary",) if is_primary else (),
+            )
+            self.comparison_tree_sizes[item] = tank_size
+
+    def _toggle_multitank_comparison(self) -> None:
+        self.config_model.multitank_comparison_enabled = bool(self.multitank_comparison_var.get())
+        self._update_multitank_comparison_state()
+        self._draw_multitank_summary()
+
+    def _update_multitank_comparison_state(self) -> None:
+        if not hasattr(self, "comparison_frame"):
+            return
+        disabled = not self.multitank_comparison_var.get()
+        for widget in self._widget_descendants(self.comparison_frame):
+            if widget is self.multitank_comparison_check:
+                continue
+            try:
+                widget.state(["disabled"] if disabled else ["!disabled"])
+            except (AttributeError, tk.TclError):
+                pass
+
+    @staticmethod
+    def _widget_descendants(parent: tk.Misc) -> list[tk.Misc]:
+        descendants: list[tk.Misc] = []
+        for child in parent.winfo_children():
+            descendants.append(child)
+            descendants.extend(RainwaterTkApp._widget_descendants(child))
+        return descendants
 
     def _set_selected_tank_reliability(self, reliability: float) -> None:
         tank_size = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
         self.reliability_var.set(
             f"Reliability for {tank_size:,.0f} {volume_unit(self.config_model)} tank: {reliability:.2f}%"
+        )
+        average_precipitation = _report_average_annual_precipitation(self.rainfall_df, self.config_model)
+        self.average_annual_precipitation_var.set(
+            f"Average annual precipitation: {average_precipitation:,.2f} {precip_unit(self.config_model)}"
         )
 
     def _select_state_by_first_letter(self, event: tk.Event) -> str | None:
@@ -1613,7 +1938,6 @@ class RainwaterTkApp(tk.Tk):
 
     def _load_project_list(self) -> None:
         projects = self.store.list_projects()
-        self.project_combo["values"] = projects
         if self.saved_project_var.get() not in projects:
             self.saved_project_var.set("")
         if projects and not self.saved_project_var.get():
@@ -1651,11 +1975,14 @@ class RainwaterTkApp(tk.Tk):
         self.graph_end_var.set(f"{volume_to_display(cfg.graph_end_gal, cfg):.0f}")
         self.graph_step_var.set(f"{volume_to_display(cfg.graph_step_gal, cfg):.0f}")
         self.selected_tank_var.set(f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}")
+        self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
         self.reserve_var.set(f"{cfg.tank_parameters.reliable_fill_percent:.0f}")
         self._update_setting_unit_labels()
         self._populate_surfaces()
         self._populate_demand()
+        self._populate_comparison_tanks()
+        self._update_multitank_comparison_state()
         self._update_rainfall_summary()
 
     def _update_setting_unit_labels(self) -> None:
@@ -1702,6 +2029,7 @@ class RainwaterTkApp(tk.Tk):
         cfg.graph_end_gal = max(2, int(round(volume_to_internal(_float(self.graph_end_var.get(), 20000), cfg))))
         cfg.graph_step_gal = max(1, int(round(volume_to_internal(_float(self.graph_step_var.get(), 500), cfg))))
         cfg.selected_tank_size_gal = max(0.0, volume_to_internal(_float(self.selected_tank_var.get(), 5000), cfg))
+        cfg.multitank_comparison_enabled = bool(self.multitank_comparison_var.get())
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.reliable_fill_percent = min(max(_float(self.reserve_var.get(), 25), 0), 100)
         return True
@@ -1714,7 +2042,7 @@ class RainwaterTkApp(tk.Tk):
                 "",
                 "end",
                 iid=str(i),
-                values=(surface.name, f"{area_to_display(surface.area, self.config_model):.2f}", f"{surface.runoff_coefficient:.3f}"),
+                values=(surface.name, f"{area_to_display(surface.area, self.config_model):.2f}", f"{surface.runoff_coefficient:.2f}"),
             )
 
     def _populate_demand(self) -> None:
@@ -1770,8 +2098,35 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_summary_var.set(f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}")
 
     def _change_units(self) -> None:
-        self.config_model.unit_system = self.unit_var.get()
+        new_unit = self.unit_var.get()
+        old_unit = self.config_model.unit_system
+        self.unit_var.set(old_unit)
+        self._apply_form_to_model()
+        self.unit_var.set(new_unit)
+        self.config_model.unit_system = new_unit
         self._populate_from_model()
+        if not self.results_df.empty:
+            reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+            self._set_selected_tank_reliability(reliability)
+        self.unit_conversion_form_snapshot = self._calculation_form_snapshot()
+
+    def _calculation_form_snapshot(self) -> tuple[str, ...]:
+        return tuple(
+            variable.get()
+            for variable in (
+                self.simple_daily_var,
+                self.daily_demand_days_var,
+                self.flushes_var,
+                self.toilet_flush_var,
+                self.urinal_flush_var,
+                self.graph_start_var,
+                self.graph_end_var,
+                self.graph_step_var,
+                self.selected_tank_var,
+                self.initial_fill_var,
+                self.reserve_var,
+            )
+        )
 
     def _country_changed(self, _event: tk.Event | None = None) -> None:
         self.config_model.country_code = self._selected_country_code()
@@ -1934,6 +2289,12 @@ class RainwaterTkApp(tk.Tk):
         self._reset_weather_selection()
         if country == "USA":
             self.weather_frame.configure(text="ACIS Weather Import")
+            self.weather_source_note_var.set(
+                "Daily station precipitation from the NOAA Regional Climate Centers' ACIS service (inches)."
+            )
+            self.weather_source_link_var.set("View the ACIS data source")
+            self.weather_source_url = ACIS_SOURCE_URL
+            self.weather_source_link.grid()
             self.weather_location_label.configure(text="State")
             self.state_combo.configure(values=[STATE_PLACEHOLDER, *STATE_LABELS], state="readonly")
             self.canadian_precip_label.grid()
@@ -1941,6 +2302,12 @@ class RainwaterTkApp(tk.Tk):
             enabled = True
         elif country == "CAN":
             self.weather_frame.configure(text="ECCC Canadian Climate Import")
+            self.weather_source_note_var.set(
+                "Daily station precipitation from Environment and Climate Change Canada (millimetres)."
+            )
+            self.weather_source_link_var.set("View ECCC Historical Climate Data")
+            self.weather_source_url = ECCC_SOURCE_URL
+            self.weather_source_link.grid()
             self.weather_location_label.configure(text="Province / territory")
             self.state_combo.configure(values=[PROVINCE_PLACEHOLDER, *PROVINCE_LABELS], state="readonly")
             self.canadian_precip_label.grid()
@@ -1948,6 +2315,9 @@ class RainwaterTkApp(tk.Tk):
             enabled = True
         else:
             self.weather_frame.configure(text="Weather Import")
+            self.weather_source_note_var.set("Automatic weather-data import is currently available for the USA and Canada.")
+            self.weather_source_link_var.set("")
+            self.weather_source_link.grid_remove()
             self.weather_location_label.configure(text="Region")
             self.state_combo.configure(values=["-- Weather import unavailable --"], state="disabled")
             self.weather_state_var.set("-- Weather import unavailable --")
@@ -2026,8 +2396,12 @@ class RainwaterTkApp(tk.Tk):
                 self.config_model.analysis_input_signature = analysis_input_signature(
                     self.config_model, self.rainfall_df
                 )
+            if not self.results_df.empty and not self.config_model.analysis_unit_system:
+                self.config_model.analysis_unit_system = self.config_model.unit_system
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
+            comparison_frame = self.store.load_comparison_results(name)
+            self.comparison_results = self._comparison_results_from_frame(comparison_frame)
             self._populate_from_model()
             self._reset_weather_selection()
             self._set_active_project(self.config_model.name)
@@ -2056,6 +2430,25 @@ class RainwaterTkApp(tk.Tk):
 
     def open_recent_project(self, path_text: str) -> None:
         self._open_project_file(Path(path_text))
+
+    def open_most_recent_project(self) -> None:
+        missing_paths: list[str] = []
+        for path_text in self.recent_project_paths:
+            if Path(path_text).is_file():
+                if missing_paths:
+                    self.recent_project_paths = [
+                        path for path in self.recent_project_paths if path not in missing_paths
+                    ]
+                    self._save_recent_project_paths()
+                    self._refresh_recent_projects_menu()
+                self.open_recent_project(path_text)
+                return
+            missing_paths.append(path_text)
+        if missing_paths:
+            self.recent_project_paths = []
+            self._save_recent_project_paths()
+            self._refresh_recent_projects_menu()
+        messagebox.showinfo(APP_TITLE, "No recently opened project is available.")
 
     def clear_recent_projects(self) -> None:
         self.recent_project_paths = []
@@ -2137,14 +2530,49 @@ class RainwaterTkApp(tk.Tk):
     def _save_current_project(self) -> None:
         self.config_model.rainfall_source_label = self.rainfall_source_label
         try:
-            self.store.save_project(self.config_model, self.rainfall_df, self.curve_df, self.results_df)
+            self._set_progress(15, "Saving project: preparing data", "SaveProject.Horizontal.TProgressbar")
+            comparison_results = self._comparison_results_to_frame()
+            self._set_progress(45, "Saving project: writing project file", "SaveProject.Horizontal.TProgressbar")
+            self.store.save_project(
+                self.config_model,
+                self.rainfall_df,
+                self.curve_df,
+                self.results_df,
+                comparison_results,
+            )
+            self._set_progress(85, "Saving project: refreshing project information", "SaveProject.Horizontal.TProgressbar")
             self._load_project_list()
             self.saved_project_var.set(self.config_model.name)
             self._set_active_project(self.config_model.name)
             self._add_recent_project_path(self.project_file_path)
-            self.status_var.set(f"Saved project '{self.config_model.name}' to {self.project_file_path}")
+            self._set_progress(
+                100,
+                f"Saved project '{self.config_model.name}' to {self.project_file_path}",
+                "SaveProject.Horizontal.TProgressbar",
+            )
         except Exception as exc:  # noqa: BLE001
+            self.analysis_progress_var.set(0)
+            self.status_var.set("Project save failed")
             messagebox.showerror(APP_TITLE, f"Could not save project:\n{exc}")
+
+    def _comparison_results_to_frame(self) -> pd.DataFrame:
+        frames = []
+        for tank_size, results in sorted(self.comparison_results.items()):
+            if results.empty:
+                continue
+            frame = results.copy()
+            frame["ComparisonTankSizeGallons"] = float(tank_size)
+            frames.append(frame)
+        return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    @staticmethod
+    def _comparison_results_from_frame(frame: pd.DataFrame) -> dict[float, pd.DataFrame]:
+        if frame.empty or "ComparisonTankSizeGallons" not in frame:
+            return {}
+        return {
+            float(tank_size): rows.drop(columns=["ComparisonTankSizeGallons"]).reset_index(drop=True)
+            for tank_size, rows in frame.groupby("ComparisonTankSizeGallons", sort=True)
+        }
 
     def load_rainfall_csv(self) -> None:
         self._apply_form_to_model()
@@ -2444,7 +2872,13 @@ class RainwaterTkApp(tk.Tk):
             self.edit_demand_month()
         return "break"
 
-    def run_analysis(self) -> None:
+    def run_single_tank_analysis(self) -> None:
+        self.run_analysis(include_comparisons=False)
+
+    def run_multitank_analysis(self) -> None:
+        self.run_analysis(include_comparisons=True)
+
+    def run_analysis(self, *, include_comparisons: bool = False) -> None:
         self._apply_form_to_model()
         cfg = self.config_model
         if self.rainfall_df.empty:
@@ -2459,40 +2893,81 @@ class RainwaterTkApp(tk.Tk):
         if cfg.selected_tank_size_gal > cfg.graph_end_gal:
             messagebox.showwarning(APP_TITLE, "Selected tank size cannot be greater than the graph end tank size.")
             return
+        if include_comparisons and not cfg.multitank_comparison_enabled:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Enable Multi-tank comparison in Analysis settings before running a multi-tank analysis.",
+            )
+            return
+        if include_comparisons and not cfg.comparison_tank_sizes_gal:
+            messagebox.showwarning(APP_TITLE, "Add at least one comparison tank size before running a multi-tank analysis.")
+            return
+        oversized_comparisons = [
+            size for size in cfg.comparison_tank_sizes_gal
+            if include_comparisons and size > cfg.graph_end_gal
+        ]
+        if oversized_comparisons:
+            messagebox.showwarning(APP_TITLE, "Comparison tank sizes cannot be greater than the graph end tank size.")
+            return
+        analysis_label = "Multi-tank analysis" if include_comparisons else "Single-tank analysis"
         try:
-            tank_sizes = list(range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal))
+            tank_sizes = sorted(
+                {
+                    *(float(size) for size in range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal)),
+                    float(cfg.selected_tank_size_gal),
+                    *(float(size) for size in cfg.comparison_tank_sizes_gal if include_comparisons),
+                }
+            )
             total_parts = 2
             self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
             self.analysis_progress_var.set(0)
-            self.status_var.set("Analysis running: Part A - reliability curve")
+            self.status_var.set(f"{analysis_label} running: Part A - reliability curve")
             self.update_idletasks()
 
             def update_curve_progress(index: int, total: int, _tank_size: float) -> None:
                 part_progress = index / total if total else 1.0
                 self.analysis_progress_var.set((part_progress / total_parts) * 100)
-                self.status_var.set(f"Analysis running: Part A - reliability curve ({index}/{total})")
+                self.status_var.set(f"{analysis_label} running: Part A - reliability curve ({index}/{total})")
                 self.update_idletasks()
 
             self.curve_df = reliability_curve(cfg, self.rainfall_df, tank_sizes, progress_callback=update_curve_progress)
+            self._populate_comparison_tanks()
             self.analysis_progress_var.set(50)
-            self.status_var.set("Analysis running: Part B - selected tank simulation")
+            self.status_var.set(f"{analysis_label} running: Part B - selected tank simulation")
             self.update_idletasks()
             self.results_df = simulate_tank(cfg, self.rainfall_df, cfg.selected_tank_size_gal)
+            self.comparison_results = {}
+            comparison_sizes = (
+                sorted(set(float(size) for size in cfg.comparison_tank_sizes_gal))
+                if include_comparisons
+                else []
+            )
+            for index, tank_size in enumerate(comparison_sizes, start=1):
+                self.status_var.set(
+                    f"{analysis_label} running: Part B - comparison tank simulation "
+                    f"({index}/{len(comparison_sizes)})"
+                )
+                self.update_idletasks()
+                if abs(tank_size - cfg.selected_tank_size_gal) < 0.01:
+                    self.comparison_results[tank_size] = self.results_df.copy()
+                else:
+                    self.comparison_results[tank_size] = simulate_tank(cfg, self.rainfall_df, tank_size)
             self.analysis_progress_var.set(75)
-            self.status_var.set("Analysis running: Part B - drawing results")
+            self.status_var.set(f"{analysis_label} running: Part B - drawing results")
             self.update_idletasks()
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
             self._set_selected_tank_reliability(reliability)
             self._populate_results()
             self._draw_saved_analysis_charts()
             cfg.analysis_input_signature = analysis_input_signature(cfg, self.rainfall_df)
+            cfg.analysis_unit_system = cfg.unit_system
             self.last_analysis_warning_key = None
             self.analysis_progress_var.set(100)
-            self.status_var.set("Analysis complete")
+            self.status_var.set(f"{analysis_label} complete")
         except Exception as exc:  # noqa: BLE001
             self.analysis_progress_var.set(0)
-            self.status_var.set("Analysis failed")
-            messagebox.showerror(APP_TITLE, f"Analysis failed:\n{exc}")
+            self.status_var.set(f"{analysis_label} failed")
+            messagebox.showerror(APP_TITLE, f"{analysis_label} failed:\n{exc}")
 
     def export_results(self) -> None:
         if self.results_df.empty:
@@ -2655,7 +3130,7 @@ class RainwaterTkApp(tk.Tk):
             self.station_map.destroy()
         super().destroy()
 
-    def _default_report_metadata(self) -> dict[str, str]:
+    def _default_report_metadata(self) -> dict[str, object]:
         end_uses = self._default_end_uses_text()
         address_parts = [
             self.street_address_var.get().strip(),
@@ -2676,6 +3151,9 @@ class RainwaterTkApp(tk.Tk):
             "project_name": self.project_name_var.get().strip() or self.config_model.name,
             "author_name": self.author_name_var.get().strip(),
             "end_uses": end_uses,
+            "multitank_available": bool(
+                self.config_model.multitank_comparison_enabled and self.comparison_results
+            ),
         }
 
     def _default_end_uses_text(self) -> str:
@@ -2692,7 +3170,7 @@ class RainwaterTkApp(tk.Tk):
                 uses.append(label)
         return ", ".join(dict.fromkeys(uses)) or "Not specified"
 
-    def _build_report_content(self, metadata: dict[str, str]) -> dict[str, object]:
+    def _build_report_content(self, metadata: dict[str, object]) -> dict[str, object]:
         cfg = self.config_model
         monthly_demand, total_annual_demand = _report_demand_summary(self.results_df, cfg)
         precipitation_field = (
@@ -2725,7 +3203,60 @@ class RainwaterTkApp(tk.Tk):
             ],
             "selected_tank_size": volume_to_display(cfg.selected_tank_size_gal, cfg),
             "selected_reliability": selected_reliability,
+            "include_multitank_charts": bool(metadata.get("include_multitank_charts", False)),
+            "multitank_charts": self._multitank_report_chart_data(),
         }
+
+    def _multitank_report_chart_data(self) -> list[dict[str, object]]:
+        if not self.config_model.multitank_comparison_enabled:
+            return []
+        unit = volume_unit(self.config_model)
+        tank_series: list[dict[str, object]] = []
+        distribution_series: list[dict[str, object]] = []
+        yearly_series: list[dict[str, object]] = []
+        for tank_size, results in sorted(self.comparison_results.items()):
+            if results.empty:
+                continue
+            label = f"{volume_to_display(tank_size, self.config_model):,.0f} {unit}"
+            levels = [float(value) for value in results["WaterInTankGallons"]]
+            render_indices = self._chart_render_indices(levels, 800)
+            tank_series.append(
+                {
+                    "label": label,
+                    "points": [
+                        (float(index), volume_to_display(levels[index], self.config_model))
+                        for index in render_indices
+                    ],
+                }
+            )
+            counts = [0] * 6
+            for value in levels:
+                percentage = min(max(value / tank_size * 100.0, 0.0), 100.0)
+                counts[min(int(percentage / (100.0 / 6)), 5)] += 1
+            total = len(levels) or 1
+            distribution_series.append(
+                {
+                    "label": label,
+                    "points": [
+                        ((index + 0.5) * (100.0 / 6), count / total * 100.0)
+                        for index, count in enumerate(counts)
+                    ],
+                }
+            )
+            yearly_series.append(
+                {
+                    "label": label,
+                    "points": [
+                        (float(row["year"]), float(row["met_percent"]))
+                        for row in _yearly_demand_reliability(results)
+                    ],
+                }
+            )
+        return [
+            {"title": "Tank Level Distribution", "x_label": "Tank level (% of capacity)", "y_label": "Days (%)", "series": distribution_series},
+            {"title": "Yearly Demand Reliability", "x_label": "Year", "y_label": "Demand met (%)", "series": yearly_series},
+            {"title": f"Tank Water Over Time ({unit})", "x_label": "Day of record", "y_label": unit, "series": tank_series},
+        ]
 
     def _build_report_latex(self, report: dict[str, object]) -> str:
         metadata = report["metadata"]
@@ -2735,7 +3266,7 @@ class RainwaterTkApp(tk.Tk):
             _latex_row(
                 surface["name"],
                 f"{surface['area']:,.2f}",
-                f"{surface['runoff_coefficient']:.3f}",
+                f"{surface['runoff_coefficient']:.2f}",
             )
             for surface in report["surfaces"]
         )
@@ -2788,6 +3319,38 @@ class RainwaterTkApp(tk.Tk):
             _latex_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
             for row in report["tank_level_distribution"]
         )
+        multitank_latex = ""
+        if report.get("include_multitank_charts"):
+            for chart in report.get("multitank_charts", []):
+                plots = []
+                legends = []
+                for series in chart["series"]:
+                    coordinates_text = " ".join(
+                        f"({_latex_number(x_value)},{_latex_number(y_value)})"
+                        for x_value, y_value in series["points"]
+                    )
+                    plots.append(rf"\addplot+[thick, no marks] coordinates {{{coordinates_text}}};")
+                    legends.append(_latex_escape(series["label"]))
+                multitank_latex += rf"""
+\clearpage
+\section{{{_latex_escape(chart['title'])}}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    width=6.6in,
+    height=3.8in,
+    xlabel={{{_latex_escape(chart['x_label'])}}},
+    ylabel={{{_latex_escape(chart['y_label'])}}},
+    ymin=0,
+    grid=major,
+    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
+]
+{chr(10).join(plots)}
+\legend{{{','.join(legends)}}}
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+"""
 
         return rf"""\documentclass[11pt]{{article}}
 \usepackage[margin=0.75in]{{geometry}}
@@ -2920,6 +3483,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
 \end{{tikzpicture}}
 \end{{center}}
 
+{multitank_latex}
 \end{{document}}
 """
 
@@ -2928,9 +3492,10 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
         surfaces = report["surfaces"]
         curve = report["curve"]
         escape = lambda value: html.escape(str(value), quote=True)
+        multitank_html = RainwaterTkApp._build_multitank_report_html(report)
         surface_rows = "".join(
             f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
-            f"<td>{surface['runoff_coefficient']:.3f}</td></tr>"
+            f"<td>{surface['runoff_coefficient']:.2f}</td></tr>"
             for surface in surfaces
         ) or '<tr><td>No collection surfaces</td><td>0.00</td><td>0.000</td></tr>'
         demand_rows = "".join(
@@ -3130,8 +3695,60 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <text class="axis-label" x="{distribution_left + distribution_plot_width / 2:.2f}" y="{distribution_height - 10:.2f}" text-anchor="middle">Tank level range ({escape(report['volume_unit'])})</text>
 <text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days</text>
 </svg></div></section>
+{multitank_html}
 <footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
 </main></body></html>"""
+
+    @staticmethod
+    def _build_multitank_report_html(report: dict[str, object]) -> str:
+        if not report.get("include_multitank_charts"):
+            return ""
+        colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f")
+        sections = []
+        for chart_index, chart in enumerate(report.get("multitank_charts", [])):
+            series_list = chart["series"]
+            all_points = [point for series in series_list for point in series["points"]]
+            if not all_points:
+                continue
+            width, height = 900.0, 420.0
+            left, right, top, bottom = 72.0, 24.0, 52.0, 62.0
+            plot_width, plot_height = width - left - right, height - top - bottom
+            x_values = [float(point[0]) for point in all_points]
+            y_values = [float(point[1]) for point in all_points]
+            x_min, x_max = min(x_values), max(x_values)
+            y_min, y_max = 0.0, max(max(y_values), 1.0)
+            if x_min == x_max:
+                x_max = x_min + 1.0
+
+            def sx(value: float) -> float:
+                return left + (value - x_min) / (x_max - x_min) * plot_width
+
+            def sy(value: float) -> float:
+                return top + (y_max - value) / y_max * plot_height
+
+            grid = "".join(
+                f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
+                f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
+                for tick in range(5)
+            )
+            polylines = []
+            legends = []
+            for series_index, series in enumerate(series_list):
+                color = colors[series_index % len(colors)]
+                points = " ".join(f"{sx(float(x)):.2f},{sy(float(y)):.2f}" for x, y in series["points"])
+                label = html.escape(str(series["label"]))
+                polylines.append(f'<polyline points="{points}" fill="none" stroke="{color}" stroke-width="3"><title>{label}</title></polyline>')
+                legends.append(f'<span style="color:{color};font-weight:700">— {label}</span>')
+            section_id = f"multitank-chart-{chart_index + 1}"
+            sections.append(
+                f'<section id="{section_id}"><h2>{html.escape(str(chart["title"]))}</h2>'
+                f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
+                f'<g class="grid">{grid}</g>{"".join(polylines)}'
+                f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" text-anchor="middle">{html.escape(str(chart["x_label"]))}</text>'
+                f'<text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">{html.escape(str(chart["y_label"]))}</text>'
+                f'</svg></div><div class="chart-legend">{"".join(legends)}</div></section>'
+            )
+        return "".join(sections)
 
     def _compile_latex_report(self, tex_path: Path, pdf_path: Path, report: dict[str, object]) -> None:
         pdflatex = shutil.which("pdflatex")
@@ -3166,7 +3783,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             (
                 surface["name"],
                 f"{surface['area']:,.2f}",
-                f"{surface['runoff_coefficient']:.3f}",
+                f"{surface['runoff_coefficient']:.2f}",
             )
             for surface in report["surfaces"]
         ]
@@ -3335,7 +3952,65 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         heading("Tank Level Distribution")
         self._draw_pdf_tank_level_distribution(page(), 78, 400, 456, 250, report)
 
+        if report.get("include_multitank_charts"):
+            for chart in report.get("multitank_charts", []):
+                add_page()
+                heading(str(chart["title"]))
+                self._draw_pdf_multiline_chart(page(), 78, 400, 456, 250, chart)
+
         self._write_pdf_with_pypdf(pdf_path, pages, section_pages, toc_links)
+
+    def _draw_pdf_multiline_chart(
+        self,
+        commands: list[str],
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        chart: dict[str, object],
+    ) -> None:
+        series_list = chart["series"]
+        all_points = [point for series in series_list for point in series["points"]]
+        if not all_points:
+            return
+        x_values = [float(point[0]) for point in all_points]
+        y_values = [float(point[1]) for point in all_points]
+        x_min, x_max = min(x_values), max(x_values)
+        y_min, y_max = 0.0, max(max(y_values), 1.0)
+        if x_min == x_max:
+            x_max = x_min + 1.0
+
+        def sx(value: float) -> float:
+            return x + (value - x_min) / (x_max - x_min) * width
+
+        def sy(value: float) -> float:
+            return y + (value - y_min) / (y_max - y_min) * height
+
+        commands.append("0.50 w 0.85 0.85 0.85 RG")
+        for index in range(5):
+            grid_y = y + height * index / 4
+            commands.append(f"{x:.2f} {grid_y:.2f} m {x + width:.2f} {grid_y:.2f} l S")
+        colors = ((0.04, 0.36, 0.67), (0.18, 0.55, 0.34), (0.79, 0.30, 0.30), (0.48, 0.29, 0.71))
+        for series_index, series in enumerate(series_list):
+            points = [(sx(float(px)), sy(float(py))) for px, py in series["points"]]
+            if len(points) < 2:
+                continue
+            red, green, blue = colors[series_index % len(colors)]
+            path = [f"{points[0][0]:.2f} {points[0][1]:.2f} m"]
+            path.extend(f"{px:.2f} {py:.2f} l" for px, py in points[1:])
+            commands.append(f"{red:.2f} {green:.2f} {blue:.2f} RG 1.5 w " + " ".join(path) + " S")
+            legend_x = x + (series_index % 3) * 145
+            legend_y = y + height + 18 - (series_index // 3) * 12
+            commands.append(f"{legend_x:.2f} {legend_y:.2f} m {legend_x + 12:.2f} {legend_y:.2f} l S")
+            commands.append(
+                f"BT /F1 7 Tf 1 0 0 1 {legend_x + 16:.2f} {legend_y - 3:.2f} Tm ({_pdf_escape(series['label'])}) Tj ET"
+            )
+        commands.append("0 0 0 RG 0.75 w")
+        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
+        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
+        commands.append(
+            f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 40:.2f} {y - 30:.2f} Tm ({_pdf_escape(chart['x_label'])}) Tj ET"
+        )
 
     def _draw_pdf_yearly_demand_reliability(
         self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
@@ -3593,11 +4268,20 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             )
 
     def _clear_results(self) -> None:
+        self.comparison_results = {}
+        self.tank_chart_year = None
+        self.tank_chart_year_var.set("--")
+        self.average_annual_precipitation_var.set("Average annual precipitation: --")
         self.results_tree.delete(*self.results_tree.get_children())
+        self._populate_comparison_tanks()
         self.curve_canvas.delete("all")
         self.tank_canvas.delete("all")
         self.histogram_canvas.delete("all")
         self.yearly_reliability_canvas.delete("all")
+        if hasattr(self, "multitank_tank_canvas"):
+            self.multitank_tank_canvas.delete("all")
+            self.multitank_distribution_canvas.delete("all")
+            self.multitank_yearly_canvas.delete("all")
         self.curve_canvas.hover_points = []
         self.tank_canvas.hover_points = []
         self.histogram_canvas.hover_points = []
@@ -3611,6 +4295,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self._draw_tank_chart()
         self._draw_tank_level_histogram()
         self._draw_yearly_demand_reliability()
+        self._draw_multitank_summary()
 
     def _schedule_results_chart_redraw(self, _event: tk.Event | None = None) -> None:
         if self.results_df.empty and self.curve_df.empty:
@@ -3645,23 +4330,71 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
     def _draw_tank_chart(self) -> None:
         if self.results_df.empty:
             return
-        x = list(range(len(self.results_df)))
-        y = [volume_to_display(v, self.config_model) for v in self.results_df["WaterInTankGallons"]]
+        dates = pd.to_datetime(self.results_df["Date"], errors="coerce")
+        available_years = sorted(int(year) for year in dates.dropna().dt.year.unique())
+        if not available_years:
+            return
+        if self.tank_chart_year not in available_years:
+            self.tank_chart_year = available_years[0]
+        year_index = available_years.index(self.tank_chart_year)
+        self.tank_chart_year_var.set(str(self.tank_chart_year))
+        self.previous_tank_year_button.state(["disabled"] if year_index == 0 else ["!disabled"])
+        self.next_tank_year_button.state(
+            ["disabled"] if year_index == len(available_years) - 1 else ["!disabled"]
+        )
+        year_results = self.results_df.loc[dates.dt.year == self.tank_chart_year]
+        x = list(range(1, len(year_results) + 1))
+        y = [volume_to_display(v, self.config_model) for v in year_results["WaterInTankGallons"]]
         hover_labels = [
             f"Date: {pd.Timestamp(date).strftime('%Y-%m-%d')}\nWater in tank: {water:.1f} {volume_unit(self.config_model)}"
-            for date, water in zip(self.results_df["Date"], y)
+            for date, water in zip(year_results["Date"], y)
         ]
         self._draw_line_chart(
             self.tank_canvas,
             x,
             y,
-            f"Tank Water Over Time ({volume_unit(self.config_model)})",
+            f"Tank Water Over Time ({self.tank_chart_year}) - "
+            f"{volume_to_display(self.config_model.selected_tank_size_gal, self.config_model):,.0f} "
+            f"{volume_unit(self.config_model)} tank",
             volume_unit(self.config_model),
-            "Day of record",
+            "Day of year",
             hover_labels,
             show_points=self.show_tank_points_var.get(),
             bottom_padding=78,
         )
+
+    def _change_tank_chart_year(self, direction: int) -> None:
+        if self.results_df.empty:
+            return
+        dates = pd.to_datetime(self.results_df["Date"], errors="coerce")
+        available_years = sorted(int(year) for year in dates.dropna().dt.year.unique())
+        if not available_years:
+            return
+        current_index = available_years.index(self.tank_chart_year) if self.tank_chart_year in available_years else 0
+        new_index = min(max(current_index + direction, 0), len(available_years) - 1)
+        self.tank_chart_year = available_years[new_index]
+        self._draw_tank_chart()
+
+    def _set_tank_chart_year_from_entry(self, _event: tk.Event | None = None) -> str:
+        dates = pd.to_datetime(self.results_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+        available_years = sorted(int(year) for year in dates.dropna().dt.year.unique())
+        try:
+            requested_year = int(self.tank_chart_year_var.get().strip())
+        except ValueError:
+            requested_year = -1
+        if requested_year not in available_years:
+            self.tank_chart_year_var.set(str(self.tank_chart_year) if self.tank_chart_year is not None else "--")
+            if available_years:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"No analyzed tank data is available for {requested_year if requested_year >= 0 else 'that year'}. "
+                    f"Enter a year from {available_years[0]} through {available_years[-1]}.",
+                    parent=self,
+                )
+            return "break"
+        self.tank_chart_year = requested_year
+        self._draw_tank_chart()
+        return "break"
 
     def _draw_tank_level_histogram(self) -> None:
         canvas = self.histogram_canvas
@@ -3687,7 +4420,12 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         plot_width = width - pad_left - pad_right
         plot_height = height - pad_top - pad_bottom
         max_count = max(counts) or 1
-        canvas.create_text(width / 2, 16, text=f"Tank Level Distribution ({unit})", font=("Segoe UI", 10, "bold"))
+        canvas.create_text(
+            width / 2,
+            16,
+            text=f"Tank Level Distribution - {selected_capacity:,.0f} {unit} tank",
+            font=("Segoe UI", 10, "bold"),
+        )
 
         for tick in range(5):
             y = pad_top + plot_height * tick / 4
@@ -3726,11 +4464,20 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         pad_left, pad_right, pad_top, pad_bottom = 50, 14, 46, 44
         plot_width = width - pad_left - pad_right
         plot_height = height - pad_top - pad_bottom
-        canvas.create_text(width / 2, 14, text="Yearly Demand Reliability", font=("Segoe UI", 10, "bold"))
+        selected_capacity = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
+        unit = volume_unit(self.config_model)
+        canvas.create_text(
+            width / 2,
+            14,
+            text=f"Yearly Demand Reliability - {selected_capacity:,.0f} {unit} tank",
+            font=("Segoe UI", 10, "bold"),
+        )
         canvas.create_rectangle(16, 27, 26, 35, fill="#2e8b57", outline="")
         canvas.create_text(31, 31, text="Demand met", anchor="w", font=("Segoe UI", 7))
         canvas.create_rectangle(112, 27, 122, 35, fill="#c94c4c", outline="")
         canvas.create_text(127, 31, text="Demand not met", anchor="w", font=("Segoe UI", 7))
+        canvas.create_oval(224, 27, 232, 35, fill="#f2c94c", outline="#8a6d00")
+        canvas.create_text(237, 31, text="Tank reliability", anchor="w", font=("Segoe UI", 7))
         for tick in range(5):
             value = 100 - tick * 25
             y = pad_top + plot_height * tick / 4
@@ -3742,7 +4489,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             canvas.create_text(width / 2, height / 2, text="No data")
             return
 
-        slot_width = plot_width / len(yearly)
+        slot_width = plot_width / (len(yearly) + 1)
         label_step = max((len(yearly) + 7) // 8, 1)
         baseline = height - pad_bottom
         for index, row in enumerate(yearly):
@@ -3753,6 +4500,15 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             canvas.create_rectangle(left, boundary, right, baseline, fill="#2e8b57", outline="#246b49")
             canvas.create_rectangle(left, pad_top, right, boundary, fill="#c94c4c", outline="#9e3737")
             center_x = (left + right) / 2
+            canvas.create_oval(
+                center_x - 4,
+                boundary - 4,
+                center_x + 4,
+                boundary + 4,
+                fill="#f2c94c",
+                outline="#8a6d00",
+                width=1,
+            )
             label = (
                 f"Year: {int(row['year'])}\n"
                 f"Demand met: {int(row['met_days'])} days ({float(row['met_percent']):.2f}%)\n"
@@ -3765,6 +4521,22 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
                 canvas.hover_points.append((center_x, pad_top + unmet_height / 2, label))
             if index % label_step == 0 or index == len(yearly) - 1:
                 canvas.create_text(center_x, baseline + 13, text=str(int(row["year"])), font=("Segoe UI", 7))
+        average_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+        average_x = pad_left + (len(yearly) + 0.5) * slot_width
+        average_y = baseline - plot_height * average_reliability / 100.0
+        canvas.create_oval(
+            average_x - 5,
+            average_y - 5,
+            average_x + 5,
+            average_y + 5,
+            fill="#f2c94c",
+            outline="#8a6d00",
+            width=1,
+        )
+        canvas.create_text(average_x, baseline + 13, text="Average", font=("Segoe UI", 7))
+        canvas.hover_points.append(
+            (average_x, average_y, f"Overall tank reliability: {average_reliability:.2f}%")
+        )
         canvas.create_text(12, pad_top + plot_height / 2, text="Days (%)", angle=90, font=("Segoe UI", 8))
         canvas.create_text(
             pad_left + plot_width / 2,
@@ -3772,6 +4544,134 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             text="Year",
             font=("Segoe UI", 8),
         )
+        canvas.bind("<Motion>", self._show_chart_hover)
+        canvas.bind("<Leave>", self._hide_chart_hover)
+
+    def _draw_multitank_summary(self) -> None:
+        unit = volume_unit(self.config_model)
+        tank_series: list[tuple[str, list[float], list[float]]] = []
+        distribution_series: list[tuple[str, list[float], list[float]]] = []
+        yearly_series: list[tuple[str, list[float], list[float]]] = []
+        for tank_size, results in sorted(self.comparison_results.items()):
+            if results.empty:
+                continue
+            display_size = volume_to_display(tank_size, self.config_model)
+            label = f"{display_size:,.0f} {unit}"
+            tank_series.append(
+                (
+                    label,
+                    [float(index) for index in range(len(results))],
+                    [volume_to_display(value, self.config_model) for value in results["WaterInTankGallons"]],
+                )
+            )
+
+            percentages = [
+                min(max(float(value) / tank_size * 100.0, 0.0), 100.0)
+                for value in results["WaterInTankGallons"]
+            ]
+            counts = [0] * 6
+            for percentage in percentages:
+                counts[min(int(percentage / (100.0 / 6)), 5)] += 1
+            total = len(percentages) or 1
+            distribution_series.append(
+                (
+                    label,
+                    [(index + 0.5) * (100.0 / 6) for index in range(6)],
+                    [count / total * 100.0 for count in counts],
+                )
+            )
+
+            yearly = _yearly_demand_reliability(results)
+            yearly_series.append(
+                (
+                    label,
+                    [float(row["year"]) for row in yearly],
+                    [float(row["met_percent"]) for row in yearly],
+                )
+            )
+
+        self._draw_multiline_chart(
+            self.multitank_tank_canvas,
+            tank_series,
+            f"Tank Water Over Time ({unit})",
+            unit,
+            "Day of record",
+        )
+        self._draw_multiline_chart(
+            self.multitank_distribution_canvas,
+            distribution_series,
+            "Tank Level Distribution",
+            "Days (%)",
+            "Tank level (% of capacity)",
+            y_bounds=(0.0, 100.0),
+        )
+        self._draw_multiline_chart(
+            self.multitank_yearly_canvas,
+            yearly_series,
+            "Yearly Demand Reliability",
+            "Demand met (%)",
+            "Year",
+            y_bounds=(0.0, 100.0),
+        )
+
+    def _draw_multiline_chart(
+        self,
+        canvas: tk.Canvas,
+        series: list[tuple[str, list[float], list[float]]],
+        title: str,
+        y_label: str,
+        x_label: str,
+        y_bounds: tuple[float, float] | None = None,
+    ) -> None:
+        canvas.delete("all")
+        canvas.hover_points = []
+        width = max(canvas.winfo_width(), 400)
+        height = max(canvas.winfo_height(), 170)
+        pad_left, pad_right, pad_top, pad_bottom = 58, 18, 48, 48
+        plot_width = width - pad_left - pad_right
+        plot_height = height - pad_top - pad_bottom
+        canvas.create_text(width / 2, 14, text=title, font=("Segoe UI", 10, "bold"))
+        if not series:
+            canvas.create_text(width / 2, height / 2, text="Add comparison tank sizes and run the analysis")
+            return
+        all_x = [value for _label, x_values, _y_values in series for value in x_values]
+        all_y = [value for _label, _x_values, y_values in series for value in y_values]
+        if not all_x or not all_y:
+            canvas.create_text(width / 2, height / 2, text="No comparison data")
+            return
+        x_min, x_max = min(all_x), max(all_x)
+        y_min, y_max = y_bounds if y_bounds is not None else (min(all_y), max(all_y))
+        if x_min == x_max:
+            x_max = x_min + 1.0
+        if y_min == y_max:
+            y_max = y_min + 1.0
+        colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f", "#6d4c41")
+        for tick in range(5):
+            y = pad_top + plot_height * tick / 4
+            value = y_max - (y_max - y_min) * tick / 4
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
+            canvas.create_text(pad_left - 7, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 7))
+            x = pad_left + plot_width * tick / 4
+            x_value = x_min + (x_max - x_min) * tick / 4
+            canvas.create_text(x, height - pad_bottom + 14, text=f"{x_value:.0f}", font=("Segoe UI", 7))
+        canvas.create_line(pad_left, pad_top, pad_left, height - pad_bottom, fill="#555")
+        canvas.create_line(pad_left, height - pad_bottom, width - pad_right, height - pad_bottom, fill="#555")
+        for series_index, (label, x_values, y_values) in enumerate(series):
+            color = colors[series_index % len(colors)]
+            render_indices = self._chart_render_indices(y_values, max(int(plot_width * 1.5), 300))
+            points: list[float] = []
+            for index in render_indices:
+                px = pad_left + (x_values[index] - x_min) / (x_max - x_min) * plot_width
+                py = height - pad_bottom - (y_values[index] - y_min) / (y_max - y_min) * plot_height
+                points.extend((px, py))
+                canvas.hover_points.append((px, py, f"Tank: {label}\n{x_label}: {x_values[index]:.0f}\n{y_label}: {y_values[index]:.1f}"))
+            if len(points) >= 4:
+                canvas.create_line(*points, fill=color, width=2)
+            legend_x = pad_left + series_index * max(plot_width / max(len(series), 1), 85)
+            canvas.create_line(legend_x, 31, legend_x + 14, 31, fill=color, width=3)
+            canvas.create_text(legend_x + 18, 31, text=label, anchor="w", font=("Segoe UI", 7))
+        canvas.create_text(13, pad_top + plot_height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
+        canvas.create_text(pad_left + plot_width / 2, height - 8, text=x_label, font=("Segoe UI", 8))
         canvas.bind("<Motion>", self._show_chart_hover)
         canvas.bind("<Leave>", self._hide_chart_hover)
 
@@ -3885,13 +4785,38 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         canvas.delete("hover")
         px, py, label = nearest
         canvas.create_oval(px - 5, py - 5, px + 5, py + 5, outline="#c2410c", width=2, tags="hover")
-        text_x = min(max(px + 12, 72), max(canvas.winfo_width() - 96, 72))
-        text_y = max(py - 30, 24)
-        text_id = canvas.create_text(text_x, text_y, text=label, anchor="nw", font=("Segoe UI", 8), tags="hover")
+        canvas_width = max(canvas.winfo_width(), 1)
+        canvas_height = max(canvas.winfo_height(), 1)
+        margin = 8
+        pad = 5
+        text_width = max(min(canvas_width - 2 * (margin + pad), 240), 80)
+        text_id = canvas.create_text(
+            px + 12,
+            py - 30,
+            text=label,
+            anchor="nw",
+            width=text_width,
+            font=("Segoe UI", 8),
+            tags="hover",
+        )
         bbox = canvas.bbox(text_id)
         if bbox is None:
             return
-        pad = 5
+        shift_x = 0
+        shift_y = 0
+        if bbox[2] + pad > canvas_width - margin:
+            shift_x = canvas_width - margin - pad - bbox[2]
+        if bbox[0] + shift_x - pad < margin:
+            shift_x += margin + pad - (bbox[0] + shift_x)
+        if bbox[3] + pad > canvas_height - margin:
+            shift_y = canvas_height - margin - pad - bbox[3]
+        if bbox[1] + shift_y - pad < margin:
+            shift_y += margin + pad - (bbox[1] + shift_y)
+        if shift_x or shift_y:
+            canvas.move(text_id, shift_x, shift_y)
+            bbox = canvas.bbox(text_id)
+            if bbox is None:
+                return
         rect_id = canvas.create_rectangle(
             bbox[0] - pad,
             bbox[1] - pad,
@@ -3916,7 +4841,7 @@ class SurfaceDialog(tk.Toplevel):
         self.config_model = config
         self.name_var = tk.StringVar(value=surface.name)
         self.area_var = tk.StringVar(value=f"{area_to_display(surface.area, config):.2f}")
-        self.runoff_var = tk.StringVar(value=f"{surface.runoff_coefficient:.3f}")
+        self.runoff_var = tk.StringVar(value=f"{surface.runoff_coefficient:.2f}")
         body = ttk.Frame(self, padding=12)
         body.grid(sticky="nsew")
         ttk.Label(body, text="Surface").grid(row=0, column=0, sticky="w", pady=3)
@@ -3929,7 +4854,7 @@ class SurfaceDialog(tk.Toplevel):
         default_runoff = default_surface_runoff(surface.name)
         tk.Label(
             body,
-            text=f"Default runoff coefficient: {default_runoff:.3f}",
+            text=f"Default runoff coefficient: {default_runoff:.2f}",
             fg="#777777",
         ).grid(row=3, column=1, sticky="w", pady=(0, 6))
         buttons = ttk.Frame(body)
@@ -3978,17 +4903,17 @@ class SurfaceDialog(tk.Toplevel):
 
 
 class ReportDialog(tk.Toplevel):
-    def __init__(self, parent: RainwaterTkApp, defaults: dict[str, str]) -> None:
+    def __init__(self, parent: RainwaterTkApp, defaults: dict[str, object]) -> None:
         super().__init__(parent)
         self.title("PDF Report")
         self.resizable(True, False)
-        self.result: dict[str, str] | None = None
-        self.author_name = defaults.get("author_name", "")
+        self.result: dict[str, object] | None = None
+        self.author_name = str(defaults.get("author_name", ""))
         self.vars = {
-            "client_name": tk.StringVar(value=defaults["client_name"]),
-            "date": tk.StringVar(value=defaults["date"]),
-            "location": tk.StringVar(value=defaults["location"]),
-            "project_name": tk.StringVar(value=defaults["project_name"]),
+            "client_name": tk.StringVar(value=str(defaults["client_name"])),
+            "date": tk.StringVar(value=str(defaults["date"])),
+            "location": tk.StringVar(value=str(defaults["location"])),
+            "project_name": tk.StringVar(value=str(defaults["project_name"])),
         }
 
         body = ttk.Frame(self, padding=12)
@@ -4008,10 +4933,20 @@ class ReportDialog(tk.Toplevel):
         ttk.Label(body, text="End-uses of water").grid(row=4, column=0, sticky="nw", pady=3)
         self.end_uses_text = tk.Text(body, width=52, height=4, wrap="word")
         self.end_uses_text.grid(row=4, column=1, sticky="ew", pady=3)
-        self.end_uses_text.insert("1.0", defaults["end_uses"])
+        self.end_uses_text.insert("1.0", str(defaults["end_uses"]))
+
+        self.include_multitank_var = tk.BooleanVar(value=False)
+        self.multitank_check = ttk.Checkbutton(
+            body,
+            text="Include multi-tank sizing charts",
+            variable=self.include_multitank_var,
+        )
+        self.multitank_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        if not bool(defaults.get("multitank_available", False)):
+            self.multitank_check.state(["disabled"])
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
         ttk.Button(buttons, text="Continue", command=self._save).grid(row=0, column=1)
 
@@ -4022,6 +4957,7 @@ class ReportDialog(tk.Toplevel):
         self.result = {key: var.get().strip() for key, var in self.vars.items()}
         self.result["author_name"] = self.author_name.strip()
         self.result["end_uses"] = self.end_uses_text.get("1.0", "end").strip() or "Not specified"
+        self.result["include_multitank_charts"] = bool(self.include_multitank_var.get())
         self.destroy()
 
 

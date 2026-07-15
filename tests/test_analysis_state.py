@@ -29,6 +29,15 @@ def test_signature_changes_when_rainfall_changes() -> None:
     assert analysis_input_signature(config, rainfall) != before
 
 
+def test_signature_changes_when_comparison_tank_sizes_change() -> None:
+    config = default_project_config()
+    before = analysis_input_signature(config, _rainfall())
+
+    config.comparison_tank_sizes_gal = [2500.0, 7500.0]
+
+    assert analysis_input_signature(config, _rainfall()) != before
+
+
 def test_signature_ignores_project_metadata_and_rainfall_row_order() -> None:
     config = default_project_config()
     rainfall = _rainfall()

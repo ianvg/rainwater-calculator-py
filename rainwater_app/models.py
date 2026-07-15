@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field, asdict
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Dict, List
 
 MONTH_KEYS = [
@@ -12,6 +13,11 @@ class Surface:
     name: str
     area: float = 0.0
     runoff_coefficient: float = 0.9
+
+    def __post_init__(self) -> None:
+        self.runoff_coefficient = float(
+            Decimal(str(self.runoff_coefficient)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        )
 
 
 @dataclass
@@ -60,8 +66,11 @@ class ProjectConfig:
     graph_end_gal: int = 20000
     graph_step_gal: int = 500
     selected_tank_size_gal: float = 5000.0
+    multitank_comparison_enabled: bool = False
+    comparison_tank_sizes_gal: List[float] = field(default_factory=list)
     rainfall_source_label: str | None = None
     analysis_input_signature: str | None = None
+    analysis_unit_system: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)
 
     def to_dict(self) -> Dict:
