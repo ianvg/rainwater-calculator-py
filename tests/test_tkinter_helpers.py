@@ -7,12 +7,45 @@ from rainwater_app.models import Surface
 from tkinter_app import (
     RainwaterTkApp,
     _parse_coordinates,
+    _validated_demand_object_library,
+    _validated_schedule_library,
     _report_average_annual_precipitation,
     _report_demand_summary,
     _report_surface_rows,
     _report_tank_level_distribution,
     _yearly_demand_reliability,
 )
+
+
+def test_custom_demand_object_library_validation() -> None:
+    result = _validated_demand_object_library(
+        {
+            " Irrigation ": {
+                "object_type": "Irrigation system",
+                "instantaneous_demand_gallons_per_minute": 12.5,
+            },
+            "Invalid": {"instantaneous_demand_gallons_per_minute": "bad"},
+        }
+    )
+
+    assert list(result) == ["Irrigation"]
+    assert result["Irrigation"].object_type == "Irrigation system"
+    assert result["Irrigation"].instantaneous_demand_gallons_per_minute == 12.5
+
+
+def test_custom_schedule_library_validation_keeps_complete_weekly_profiles() -> None:
+    valid_schedule = {day: [1.0 / 24.0] * 24 for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")}
+
+    result = _validated_schedule_library(
+        {
+            " Office hours ": valid_schedule,
+            "Incomplete": {"mon": [1.0] * 24},
+            "Invalid": {**valid_schedule, "fri": ["bad"] * 24},
+        }
+    )
+
+    assert list(result) == ["Office hours"]
+    assert len(result["Office hours"]["sun"]) == 24
 
 
 def test_parse_coordinates_accepts_blank_or_valid_pairs() -> None:

@@ -46,6 +46,60 @@ def test_system_component_parameters_are_loaded() -> None:
     assert config.system_parameters.municipal_backup_enabled is False
 
 
+def test_demand_objects_are_loaded_as_model_objects() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Object demand",
+            "demand": {
+                "hourly_schedule_library": {
+                    "Weekdays": {"mon": [1.0] + [0.0] * 23}
+                },
+                "demand_objects": [
+                    {
+                        "name": "Landscape irrigation",
+                        "object_type": "Irrigation system",
+                        "daily_demand_gallons": 250.0,
+                        "schedule_name": "Weekdays",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert config.demand.demand_objects[0].name == "Landscape irrigation"
+    assert config.demand.demand_objects[0].instantaneous_demand_gallons_per_minute == 250.0 / 60.0
+
+
+def test_instantaneous_demand_object_flow_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Object flow",
+            "demand": {
+                "demand_objects": [
+                    {
+                        "name": "Cooling tower",
+                        "object_type": "Cooling tower",
+                        "instantaneous_demand_gallons_per_minute": 12.5,
+                        "schedule_name": "Always on",
+                    }
+                ]
+            },
+        }
+    )
+
+    assert config.demand.demand_objects[0].instantaneous_demand_gallons_per_minute == 12.5
+
+
+def test_system_builder_layout_is_loaded() -> None:
+    layout = [
+        {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80}
+    ]
+
+    config = SQLiteStore._config_from_dict({"name": "Builder", "system_layout": layout})
+
+    assert config.system_layout == layout
+
+
 def test_graph_auto_step_count_is_loaded() -> None:
     config = SQLiteStore._config_from_dict({"name": "Custom steps", "graph_auto_step_count": 32})
 

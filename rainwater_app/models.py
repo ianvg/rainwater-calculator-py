@@ -10,12 +10,12 @@ WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 
 
 def default_hourly_weekly_fractions() -> Dict[str, List[float]]:
-    return {day: [1.0 / 24.0] * 24 for day in WEEKDAY_KEYS}
+    return {day: [1.0] * 24 for day in WEEKDAY_KEYS}
 
 
 def common_hourly_schedule_templates() -> Dict[str, Dict[str, List[float]]]:
     weekday_business_hours = {
-        day: ([0.0] * 8 + [1.0 / 9.0] * 9 + [0.0] * 7) if day in WEEKDAY_KEYS[:5] else [0.0] * 24
+        day: ([0.0] * 8 + [1.0] * 9 + [0.0] * 7) if day in WEEKDAY_KEYS[:5] else [0.0] * 24
         for day in WEEKDAY_KEYS
     }
     return {
@@ -38,6 +38,14 @@ class Surface:
 
 
 @dataclass
+class DemandObject:
+    name: str
+    object_type: str = "Other"
+    instantaneous_demand_gallons_per_minute: float = 0.0
+    schedule_name: str = ""
+
+
+@dataclass
 class DemandProfile:
     avg_flush_per_person: float = 0.0
     gallons_per_flush_toilet: float = 0.0
@@ -48,6 +56,7 @@ class DemandProfile:
     hourly_weekly_fractions: Dict[str, List[float]] = field(default_factory=default_hourly_weekly_fractions)
     hourly_schedule_library: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
     active_hourly_schedule_name: str = "Typical week demand"
+    demand_objects: List[DemandObject] = field(default_factory=list)
     male_occupancy: Dict[str, float] = field(default_factory=dict)
     female_occupancy: Dict[str, float] = field(default_factory=dict)
     ice_making: Dict[str, float] = field(default_factory=dict)
@@ -91,6 +100,7 @@ class ProjectConfig:
     unit_system: str = "Imperial"
     country_code: str = "USA"
     system_type: str = "Direct system"
+    system_layout: List[Dict[str, object]] = field(default_factory=list)
     acis_precipitation_field: str = "TOTAL_PRECIPITATION"
     canadian_precipitation_field: str = "TOTAL_PRECIPITATION"
     surfaces: List[Surface] = field(default_factory=list)

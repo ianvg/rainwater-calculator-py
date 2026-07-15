@@ -10,19 +10,36 @@ from rainwater_app.engine import (
     simulate_hourly_tank,
     simulate_tank,
 )
-from rainwater_app.models import Surface, common_hourly_schedule_templates
+from rainwater_app.models import DemandObject, Surface, common_hourly_schedule_templates
 from rainwater_app.storage import SQLiteStore
 
 
 def test_common_hourly_schedule_templates() -> None:
     templates = common_hourly_schedule_templates()
 
-    assert all(sum(hours) == pytest.approx(1.0) for hours in templates["Always on"].values())
+    assert all(hours == [1.0] * 24 for hours in templates["Always on"].values())
     assert all(sum(hours) == 0.0 for hours in templates["Always off"].values())
     business_hours = templates["8 AM to 5 PM weekdays"]
-    assert business_hours["mon"][8:17] == pytest.approx([1.0 / 9.0] * 9)
-    assert sum(business_hours["mon"]) == pytest.approx(1.0)
+    assert business_hours["mon"][8:17] == [1.0] * 9
+    assert sum(business_hours["mon"]) == pytest.approx(9.0)
     assert sum(business_hours["sat"]) == 0.0
+
+
+def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 30.0
+    cfg.demand.hourly_schedule_enabled = True
+    cfg.demand.hourly_weekly_fractions = {
+        day: [1.0, 0.5] + [0.0] * 22 for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert result["DemandGallons"].iloc[0] == pytest.approx(20.0)
+    assert result["DemandGallons"].iloc[1] == pytest.approx(10.0)
+    assert result["DemandGallons"].iloc[2:].sum() == pytest.approx(0.0)
 
 
 def test_simulate_tank_returns_expected_columns() -> None:
@@ -148,6 +165,39 @@ def test_daily_demand_schedule_applies_recurring_demand_on_selected_weekdays() -
     demand = demand_series(cfg, rainfall)
 
     assert demand.tolist() == [125.0, 125.0, 125.0, 125.0, 125.0, 0.0, 0.0]
+
+
+def test_demand_object_contributes_only_on_days_enabled_by_its_schedule() -> None:
+    cfg = default_project_config()
+    cfg.demand.hourly_schedule_library["Weekdays"] = {
+        day: ([1.0] + [0.0] * 23) if day not in {"sat", "sun"} else [0.0] * 24
+        for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.demand.demand_objects = [DemandObject("Irrigation", "Irrigation system", 80.0, "Weekdays")]
+    rainfall = pd.DataFrame(
+        {"Date": pd.date_range("2025-03-03", periods=7, freq="D"), "Precipitation": [0.0] * 7}
+    )
+
+    assert demand_series(cfg, rainfall).tolist() == [4800.0, 4800.0, 4800.0, 4800.0, 4800.0, 0.0, 0.0]
+
+
+def test_hourly_demand_object_uses_its_own_project_schedule() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 24.0
+    cfg.demand.hourly_schedule_library = {
+        "Morning": {day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions},
+        "Evening": {day: [0.0] * 23 + [1.0] for day in cfg.demand.hourly_weekly_fractions},
+    }
+    cfg.demand.active_hourly_schedule_name = "Morning"
+    cfg.demand.demand_objects = [DemandObject("Cooling", "Cooling tower", 10.0, "Evening")]
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-03-03")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert result["DemandGallons"].iloc[0] == pytest.approx(24.0)
+    assert result["DemandGallons"].iloc[1:23].sum() == pytest.approx(0.0)
+    assert result["DemandGallons"].iloc[23] == pytest.approx(600.0)
 
 
 def test_old_saved_project_payload_defaults_simple_daily_demand() -> None:

@@ -9,7 +9,7 @@ from typing import Any
 
 import pandas as pd
 
-from .models import DemandProfile, ProjectConfig, Surface, SystemComponentParameters, TankParameters
+from .models import DemandObject, DemandProfile, ProjectConfig, Surface, SystemComponentParameters, TankParameters
 
 
 class SQLiteStore:
@@ -179,6 +179,29 @@ class SQLiteStore:
             "daily_demand_days_per_week": 7,
             **payload.get("demand", {}),
         }
+        raw_schedule_library = demand_payload.get("hourly_schedule_library", {})
+        raw_demand_objects = demand_payload.get("demand_objects", [])
+        demand_objects: list[DemandObject] = []
+        for item in raw_demand_objects:
+            if not isinstance(item, dict):
+                continue
+            object_payload = dict(item)
+            legacy_daily = object_payload.pop("daily_demand_gallons", None)
+            if "instantaneous_demand_gallons_per_minute" not in object_payload and legacy_daily is not None:
+                schedule = raw_schedule_library.get(object_payload.get("schedule_name", ""), {})
+                positive_daily_hours = [
+                    sum(min(max(float(value), 0.0), 1.0) for value in values[:24])
+                    for values in schedule.values()
+                    if isinstance(values, list)
+                ]
+                scheduled_hours = max(positive_daily_hours, default=0.0)
+                object_payload["instantaneous_demand_gallons_per_minute"] = (
+                    max(float(legacy_daily), 0.0) / (60.0 * scheduled_hours)
+                    if scheduled_hours > 0.0
+                    else 0.0
+                )
+            demand_objects.append(DemandObject(**object_payload))
+        demand_payload["demand_objects"] = demand_objects
         demand = DemandProfile(**demand_payload)
         if demand.hourly_schedule_enabled and not demand.hourly_schedule_library:
             demand.hourly_schedule_library[demand.active_hourly_schedule_name] = {
@@ -206,6 +229,9 @@ class SQLiteStore:
                 if payload.get("system_type") in {"Direct system", "Indirect system"}
                 else "Direct system"
             ),
+            system_layout=[
+                dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
+            ],
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,

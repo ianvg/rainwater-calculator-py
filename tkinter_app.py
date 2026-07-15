@@ -44,6 +44,7 @@ from rainwater_app.eccc import (
 from rainwater_app.engine import AnalysisCancelledError, reliability_curve, simulate_hourly_tank, simulate_tank
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
+    DemandObject,
     MONTH_KEYS,
     ProjectConfig,
     Surface,
@@ -245,6 +246,60 @@ def _app_dir() -> Path:
     if getattr(sys, "frozen", False):
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent
+
+
+def _validated_schedule_library(payload: object) -> dict[str, dict[str, list[float]]]:
+    if not isinstance(payload, dict):
+        return {}
+    library: dict[str, dict[str, list[float]]] = {}
+    for raw_name, raw_schedule in payload.items():
+        name = str(raw_name).strip()
+        if not name or not isinstance(raw_schedule, dict):
+            continue
+        schedule: dict[str, list[float]] = {}
+        valid = True
+        for day in WEEKDAY_KEYS:
+            raw_values = raw_schedule.get(day)
+            if not isinstance(raw_values, list) or len(raw_values) != 24:
+                valid = False
+                break
+            try:
+                values = [min(max(float(value), 0.0), 1.0) for value in raw_values]
+            except (TypeError, ValueError):
+                valid = False
+                break
+            schedule[day] = values
+        if valid:
+            library[name] = schedule
+    return library
+
+
+def _common_demand_object_templates() -> dict[str, DemandObject]:
+    return {
+        "Toilet": DemandObject("Toilet", "Toilet", 3.0),
+        "Irrigation system": DemandObject("Irrigation system", "Irrigation system", 10.0),
+        "Cooling tower": DemandObject("Cooling tower", "Cooling tower", 5.0),
+    }
+
+
+def _validated_demand_object_library(payload: object) -> dict[str, DemandObject]:
+    if not isinstance(payload, dict):
+        return {}
+    library: dict[str, DemandObject] = {}
+    for raw_name, raw_object in payload.items():
+        name = str(raw_name).strip()
+        if not name or not isinstance(raw_object, dict):
+            continue
+        try:
+            flow = max(float(raw_object.get("instantaneous_demand_gallons_per_minute", 0.0)), 0.0)
+        except (TypeError, ValueError):
+            continue
+        library[name] = DemandObject(
+            name=name,
+            object_type=str(raw_object.get("object_type", "Other")),
+            instantaneous_demand_gallons_per_minute=flow,
+        )
+    return library
 
 
 def _resource_path(relative_path: str) -> Path:
@@ -563,6 +618,90 @@ class _StationMapView(TkinterMapView):
         super().destroy()
 
 
+class ProjectLocationPickerDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: "RainwaterTkApp",
+        latitude: float,
+        longitude: float,
+        zoom: int,
+        show_marker: bool,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Find project location on OpenStreetMap")
+        self.transient(parent)
+        self.result: tuple[float, float] | None = None
+        self.selected_coordinates: tuple[float, float] | None = None
+        self.marker: object | None = None
+        self.geometry("900x620")
+        self.minsize(680, 460)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.map = _StationMapView(self, width=880, height=540, corner_radius=0)
+        self.map.set_tile_server(OSM_TILE_URL, max_zoom=19)
+        self.map.set_position(latitude, longitude)
+        self.map.set_zoom(zoom)
+        self.map.add_left_click_map_command(self._map_clicked)
+        self.map.grid(row=0, column=0, sticky="nsew", padx=10, pady=(10, 0))
+
+        action_row = ttk.Frame(self, padding=10)
+        action_row.grid(row=1, column=0, sticky="ew")
+        action_row.columnconfigure(0, weight=1)
+        self.coordinates_var = tk.StringVar(value="Select a point on the map")
+        ttk.Label(action_row, textvariable=self.coordinates_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            action_row,
+            text="Map data © OpenStreetMap contributors",
+            foreground="#5f6b70",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Button(action_row, text="Cancel", command=self._cancel).grid(row=0, column=1, rowspan=2, padx=(8, 4))
+        self.select_button = ttk.Button(
+            action_row,
+            text="Use selected location",
+            command=self._accept,
+            state="disabled",
+        )
+        self.select_button.grid(row=0, column=2, rowspan=2)
+
+        if show_marker:
+            self._set_selection(latitude, longitude)
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.bind("<Return>", self._accept_from_event)
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max((parent.winfo_width() - self.winfo_width()) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - self.winfo_height()) // 2, 0)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        self.focus_force()
+
+    def _map_clicked(self, coordinates: tuple[float, float]) -> None:
+        self._set_selection(float(coordinates[0]), float(coordinates[1]))
+
+    def _set_selection(self, latitude: float, longitude: float) -> None:
+        self.selected_coordinates = (latitude, longitude)
+        self.coordinates_var.set(f"Selected coordinates: {latitude:.6f}, {longitude:.6f}")
+        if self.marker is None:
+            self.marker = self.map.set_marker(latitude, longitude, text="Project location")
+        else:
+            self.marker.set_position(latitude, longitude)  # type: ignore[attr-defined]
+        self.select_button.state(["!disabled"])
+
+    def _accept(self) -> None:
+        if self.selected_coordinates is None:
+            return
+        self.result = self.selected_coordinates
+        self.destroy()
+
+    def _accept_from_event(self, _event: tk.Event) -> str:
+        self._accept()
+        return "break"
+
+    def _cancel(self) -> None:
+        self.destroy()
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -585,6 +724,10 @@ class RainwaterTkApp(tk.Tk):
         self.store = SQLiteStore(str(self.project_file_path))
         self.recent_projects_path = _app_dir() / "recent_projects.json"
         self.recent_project_paths = self._load_recent_project_paths()
+        self.custom_schedule_library_path = _app_dir() / "schedule_library.json"
+        self.custom_schedule_templates = self._load_custom_schedule_templates()
+        self.custom_demand_object_library_path = _app_dir() / "demand_object_library.json"
+        self.custom_demand_object_templates = self._load_custom_demand_object_templates()
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.curve_df = pd.DataFrame()
@@ -949,6 +1092,36 @@ class RainwaterTkApp(tk.Tk):
         except OSError:
             pass
 
+    def _load_custom_schedule_templates(self) -> dict[str, dict[str, list[float]]]:
+        try:
+            payload = json.loads(self.custom_schedule_library_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return _validated_schedule_library(payload)
+
+    def _save_custom_schedule_templates(self) -> None:
+        self.custom_schedule_library_path.write_text(
+            json.dumps(self.custom_schedule_templates, indent=2),
+            encoding="utf-8",
+        )
+
+    def _load_custom_demand_object_templates(self) -> dict[str, DemandObject]:
+        try:
+            payload = json.loads(self.custom_demand_object_library_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return _validated_demand_object_library(payload)
+
+    def _save_custom_demand_object_templates(self) -> None:
+        payload = {
+            name: {
+                "object_type": demand_object.object_type,
+                "instantaneous_demand_gallons_per_minute": demand_object.instantaneous_demand_gallons_per_minute,
+            }
+            for name, demand_object in self.custom_demand_object_templates.items()
+        }
+        self.custom_demand_object_library_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
     def _add_recent_project_path(self, path: Path) -> None:
         recent_path = str(path.expanduser().resolve(strict=False))
         self.recent_project_paths = [
@@ -1007,33 +1180,8 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_inputs_tab(self) -> None:
         self.inputs_tab.columnconfigure(0, weight=1)
-        self.inputs_tab.rowconfigure(0, weight=1)
-        frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
-        self.inputs_canvas = tk.Canvas(
-            self.inputs_tab,
-            highlightthickness=0,
-            borderwidth=0,
-            background=frame_background,
-        )
-        self.inputs_canvas.grid(row=0, column=0, sticky="nsew")
-        inputs_scroll_y = ttk.Scrollbar(self.inputs_tab, orient="vertical", command=self.inputs_canvas.yview)
-        inputs_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.inputs_canvas.configure(yscrollcommand=inputs_scroll_y.set)
-        self.inputs_content = ttk.Frame(self.inputs_canvas, padding=10)
-        self.inputs_canvas_window = self.inputs_canvas.create_window(
-            (0, 0), window=self.inputs_content, anchor="nw"
-        )
-        self.inputs_content.columnconfigure(0, weight=1)
-        self.inputs_content.columnconfigure(1, weight=1)
-        self.inputs_content.rowconfigure(3, weight=1)
-        self.inputs_content.bind("<Configure>", self._update_inputs_scrollregion)
-        self.inputs_canvas.bind("<Configure>", self._resize_inputs_content)
-        self.bind_all("<MouseWheel>", self._scroll_inputs_mousewheel, add="+")
-        self.bind_all("<Button-4>", self._scroll_inputs_mousewheel, add="+")
-        self.bind_all("<Button-5>", self._scroll_inputs_mousewheel, add="+")
-
-        project_frame = ttk.LabelFrame(self.inputs_content, text="Project Settings", padding=10)
-        project_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
+        project_frame = ttk.LabelFrame(self.inputs_tab, text="Project Settings", padding=10)
+        project_frame.grid(row=0, column=0, sticky="ew")
         project_frame.columnconfigure(1, weight=1)
         ttk.Label(project_frame, text="Project name").grid(row=0, column=0, sticky="w")
         ttk.Entry(project_frame, textvariable=self.project_name_var).grid(row=0, column=1, sticky="ew", padx=(8, 20))
@@ -1058,8 +1206,8 @@ class RainwaterTkApp(tk.Tk):
             row=1, column=1, columnspan=5, sticky="ew", padx=(8, 0), pady=(8, 0)
         )
 
-        notes_frame = ttk.LabelFrame(self.inputs_content, text="Notes", padding=10)
-        notes_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        notes_frame = ttk.LabelFrame(self.inputs_tab, text="Notes", padding=10)
+        notes_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         notes_frame.columnconfigure(0, weight=1)
         self.project_notes_text = tk.Text(notes_frame, height=3, wrap="word", undo=True)
         self.project_notes_text.grid(row=0, column=0, sticky="ew")
@@ -1067,8 +1215,8 @@ class RainwaterTkApp(tk.Tk):
         notes_scroll.grid(row=0, column=1, sticky="ns")
         self.project_notes_text.configure(yscrollcommand=notes_scroll.set)
 
-        location_frame = ttk.LabelFrame(self.inputs_content, text="Project Location", padding=10)
-        location_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        location_frame = ttk.LabelFrame(self.inputs_tab, text="Project Location", padding=10)
+        location_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         location_frame.columnconfigure(1, weight=1)
         location_frame.columnconfigure(3, weight=1)
         location_frame.columnconfigure(5, weight=1)
@@ -1120,9 +1268,6 @@ class RainwaterTkApp(tk.Tk):
             row=4, column=1, columnspan=5, sticky="w", pady=(6, 0)
         )
 
-    def _update_inputs_scrollregion(self, _event: tk.Event | None = None) -> None:
-        self.inputs_canvas.configure(scrollregion=self.inputs_canvas.bbox("all"))
-
     def _show_collection_surface_tip(self) -> None:
         messagebox.showinfo(
             "Collection surfaces",
@@ -1149,18 +1294,29 @@ class RainwaterTkApp(tk.Tk):
     def _open_weather_source(self, _event: tk.Event | None = None) -> None:
         webbrowser.open(self.weather_source_url)
 
-    def _resize_inputs_content(self, event: tk.Event) -> None:
-        self.inputs_canvas.itemconfigure(self.inputs_canvas_window, width=event.width)
+    def _resize_system_parameters_content(self, event: tk.Event) -> None:
+        self.system_parameters_canvas.itemconfigure(self.system_parameters_canvas_window, width=event.width)
 
-    def _scroll_inputs_mousewheel(self, event: tk.Event) -> str | None:
-        if self.notebook.select() != str(self.inputs_tab):
+    def _resize_import_content(self, event: tk.Event) -> None:
+        self.import_canvas.itemconfigure(self.import_canvas_window, width=event.width)
+
+    def _scroll_import_mousewheel(self, event: tk.Event) -> str | None:
+        if self.notebook.select() != str(self.import_tab):
             return None
         pointer_x, pointer_y = self.winfo_pointerxy()
-        canvas_x = self.inputs_canvas.winfo_rootx()
-        canvas_y = self.inputs_canvas.winfo_rooty()
+        if hasattr(self, "station_map") and self.station_map.winfo_exists():
+            map_x = self.station_map.winfo_rootx()
+            map_y = self.station_map.winfo_rooty()
+            if (
+                map_x <= pointer_x < map_x + self.station_map.winfo_width()
+                and map_y <= pointer_y < map_y + self.station_map.winfo_height()
+            ):
+                return None
+        canvas_x = self.import_canvas.winfo_rootx()
+        canvas_y = self.import_canvas.winfo_rooty()
         if not (
-            canvas_x <= pointer_x < canvas_x + self.inputs_canvas.winfo_width()
-            and canvas_y <= pointer_y < canvas_y + self.inputs_canvas.winfo_height()
+            canvas_x <= pointer_x < canvas_x + self.import_canvas.winfo_width()
+            and canvas_y <= pointer_y < canvas_y + self.import_canvas.winfo_height()
         ):
             return None
         if getattr(event, "num", None) == 4:
@@ -1169,11 +1325,8 @@ class RainwaterTkApp(tk.Tk):
             direction = 1
         else:
             direction = -1 if event.delta > 0 else 1
-        self.inputs_canvas.yview_scroll(direction, "units")
+        self.import_canvas.yview_scroll(direction, "units")
         return "break"
-
-    def _resize_system_parameters_content(self, event: tk.Event) -> None:
-        self.system_parameters_canvas.itemconfigure(self.system_parameters_canvas_window, width=event.width)
 
     def _scroll_system_parameters_mousewheel(self, event: tk.Event) -> str | None:
         if self.notebook.select() != str(self.system_parameters_tab):
@@ -1304,20 +1457,170 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(tank_settings, 2, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
 
         self.indirect_system_diagram_frame = ttk.LabelFrame(
-            system_content, text="Indirect system schematic", padding=10
+            system_content, text="System builder", padding=10
         )
-        self.indirect_system_diagram_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        self.indirect_system_canvas = tk.Canvas(
+        self.indirect_system_diagram_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        self.indirect_system_diagram_frame.columnconfigure(0, weight=1)
+        self.system_builder_canvas = tk.Canvas(
             self.indirect_system_diagram_frame,
-            width=1040,
-            height=250,
+            width=760,
+            height=420,
             background="white",
             highlightthickness=1,
             highlightbackground="#b7b7b7",
         )
-        self.indirect_system_canvas.grid(row=0, column=0, sticky="w")
-        self._draw_indirect_system_diagram()
+        self.system_builder_canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.system_builder_canvas.bind("<ButtonPress-1>", self._system_canvas_press)
+        self.system_builder_canvas.bind("<B1-Motion>", self._system_canvas_drag)
+        self.system_builder_canvas.bind("<ButtonRelease-1>", self._system_canvas_release)
+        self.system_builder_canvas.bind("<Delete>", lambda _event: self.delete_selected_system_component())
+        system_library = ttk.LabelFrame(self.indirect_system_diagram_frame, text="System object library", padding=8)
+        system_library.grid(row=0, column=1, sticky="ns")
+        self.system_component_library = ttk.Treeview(system_library, show="tree", height=15, selectmode="browse")
+        self.system_component_library.grid(row=0, column=0, sticky="nsew")
+        for component_type, label in self._system_component_templates().items():
+            self.system_component_library.insert("", "end", iid=component_type, text=label)
+        self.system_component_library.bind("<Double-1>", self._add_system_library_component_from_event)
+        self.system_component_library.bind("<Return>", self._add_system_library_component_from_event)
+        self.system_component_library.bind("<ButtonPress-1>", self._system_library_drag_start)
+        self.system_component_library.bind("<ButtonRelease-1>", self._system_library_drop)
+        ttk.Button(system_library, text="Add selected", command=self.add_selected_system_component).grid(
+            row=1, column=0, sticky="ew", pady=(8, 0)
+        )
+        ttk.Button(system_library, text="Delete selected", command=self.delete_selected_system_component).grid(
+            row=2, column=0, sticky="ew", pady=(6, 0)
+        )
+        ttk.Label(
+            self.indirect_system_diagram_frame,
+            text="The previous indirect-system schematic is preserved in assets/indirect_system.svg.",
+            foreground="#667278",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.system_builder_selected_id: str | None = None
+        self.system_builder_drag_offset = (0.0, 0.0)
+        self.system_library_drag_type: str | None = None
+        self._render_system_builder()
         self._update_system_type_display()
+
+    @staticmethod
+    def _system_component_templates() -> dict[str, str]:
+        return {
+            "rainwater_input": "Rainwater input",
+            "primary_tank": "Primary tank",
+            "filtration_pump": "Filtration pump",
+            "filtration_system": "Filtration system",
+            "booster_tank": "Booster tank",
+            "booster_pump": "Booster pump",
+            "municipal_backup": "Municipal water backup",
+            "end_uses": "End-uses",
+        }
+
+    def _new_system_component_id(self, component_type: str) -> str:
+        existing = {str(item.get("id", "")) for item in self.config_model.system_layout}
+        index = 1
+        while f"{component_type}_{index}" in existing:
+            index += 1
+        return f"{component_type}_{index}"
+
+    def _add_system_component(self, component_type: str, x: float, y: float) -> None:
+        label = self._system_component_templates().get(component_type)
+        if label is None:
+            return
+        component_id = self._new_system_component_id(component_type)
+        self.config_model.system_layout.append(
+            {"id": component_id, "component_type": component_type, "name": label, "x": x, "y": y}
+        )
+        self.system_builder_selected_id = component_id
+        self._render_system_builder()
+
+    def add_selected_system_component(self) -> None:
+        selected = self.system_component_library.selection()
+        if not selected:
+            return
+        count = len(self.config_model.system_layout)
+        self._add_system_component(selected[0], 110 + (count % 4) * 165, 80 + (count // 4) * 110)
+
+    def _add_system_library_component_from_event(self, event: tk.Event) -> str:
+        row_id = self.system_component_library.identify_row(getattr(event, "y", 0))
+        if row_id:
+            self.system_component_library.selection_set(row_id)
+        self.add_selected_system_component()
+        return "break"
+
+    def _system_library_drag_start(self, event: tk.Event) -> None:
+        row_id = self.system_component_library.identify_row(event.y)
+        self.system_library_drag_type = row_id if row_id in self._system_component_templates() else None
+
+    def _system_library_drop(self, _event: tk.Event) -> None:
+        if self.system_library_drag_type is None:
+            return
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        canvas_x = pointer_x - self.system_builder_canvas.winfo_rootx()
+        canvas_y = pointer_y - self.system_builder_canvas.winfo_rooty()
+        if 0 <= canvas_x <= self.system_builder_canvas.winfo_width() and 0 <= canvas_y <= self.system_builder_canvas.winfo_height():
+            self._add_system_component(self.system_library_drag_type, canvas_x, canvas_y)
+        self.system_library_drag_type = None
+
+    def _system_layout_item(self, component_id: str) -> dict[str, object] | None:
+        return next(
+            (item for item in self.config_model.system_layout if str(item.get("id")) == component_id),
+            None,
+        )
+
+    def _system_canvas_press(self, event: tk.Event) -> None:
+        current = self.system_builder_canvas.find_withtag("current")
+        tags = self.system_builder_canvas.gettags(current[0]) if current else ()
+        component_tag = next((tag for tag in tags if tag.startswith("component:")), None)
+        self.system_builder_selected_id = component_tag.split(":", 1)[1] if component_tag else None
+        if self.system_builder_selected_id:
+            item = self._system_layout_item(self.system_builder_selected_id)
+            if item is not None:
+                self.system_builder_drag_offset = (event.x - float(item["x"]), event.y - float(item["y"]))
+        self.system_builder_canvas.focus_set()
+        self._render_system_builder()
+
+    def _system_canvas_drag(self, event: tk.Event) -> None:
+        if self.system_builder_selected_id is None:
+            return
+        item = self._system_layout_item(self.system_builder_selected_id)
+        if item is None:
+            return
+        offset_x, offset_y = self.system_builder_drag_offset
+        item["x"] = min(max(event.x - offset_x, 65.0), max(self.system_builder_canvas.winfo_width() - 65.0, 65.0))
+        item["y"] = min(max(event.y - offset_y, 35.0), max(self.system_builder_canvas.winfo_height() - 35.0, 35.0))
+        self._render_system_builder()
+
+    def _system_canvas_release(self, _event: tk.Event) -> None:
+        self.system_builder_drag_offset = (0.0, 0.0)
+
+    def delete_selected_system_component(self) -> None:
+        if self.system_builder_selected_id is None:
+            return
+        self.config_model.system_layout = [
+            item for item in self.config_model.system_layout
+            if str(item.get("id")) != self.system_builder_selected_id
+        ]
+        self.system_builder_selected_id = None
+        self._render_system_builder()
+
+    def _render_system_builder(self) -> None:
+        if not hasattr(self, "system_builder_canvas"):
+            return
+        canvas = self.system_builder_canvas
+        canvas.delete("all")
+        for item in self.config_model.system_layout:
+            try:
+                component_id = str(item["id"])
+                component_type = str(item["component_type"])
+                x, y = float(item["x"]), float(item["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            label = str(item.get("name") or self._system_component_templates().get(component_type, component_type))
+            selected = component_id == self.system_builder_selected_id
+            outline = "#1565c0" if selected else "#30363a"
+            fill = "#e8f1fb" if selected else "#f7f9fa"
+            tag = f"component:{component_id}"
+            canvas.create_rectangle(x - 62, y - 30, x + 62, y + 30, fill=fill, outline=outline, width=3 if selected else 2, tags=(tag,))
+            canvas.create_text(x, y, text=label, width=112, justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,))
 
     def _draw_indirect_system_diagram(self) -> None:
         canvas = self.indirect_system_canvas
@@ -1370,10 +1673,7 @@ class RainwaterTkApp(tk.Tk):
     def _update_system_type_display(self) -> None:
         if not hasattr(self, "indirect_system_diagram_frame"):
             return
-        if self.config_model.system_type == "Indirect system":
-            self.indirect_system_diagram_frame.grid()
-        else:
-            self.indirect_system_diagram_frame.grid_remove()
+        self.indirect_system_diagram_frame.grid()
 
     def apply_system_type(self) -> None:
         selected_type = self.system_type_var.get()
@@ -1388,15 +1688,39 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
-        self.import_tab.rowconfigure(2, weight=1)
+        self.import_tab.rowconfigure(0, weight=1)
+        frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        self.import_canvas = tk.Canvas(
+            self.import_tab,
+            highlightthickness=0,
+            borderwidth=0,
+            background=frame_background,
+        )
+        self.import_canvas.grid(row=0, column=0, sticky="nsew")
+        import_scroll_y = ttk.Scrollbar(self.import_tab, orient="vertical", command=self.import_canvas.yview)
+        import_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.import_canvas.configure(yscrollcommand=import_scroll_y.set)
+        import_content = ttk.Frame(self.import_canvas, padding=(0, 0, 8, 8))
+        self.import_canvas_window = self.import_canvas.create_window(
+            (0, 0), window=import_content, anchor="nw"
+        )
+        import_content.columnconfigure(0, weight=1)
+        import_content.bind(
+            "<Configure>",
+            lambda _event: self.import_canvas.configure(scrollregion=self.import_canvas.bbox("all")),
+        )
+        self.import_canvas.bind("<Configure>", self._resize_import_content)
+        self.bind_all("<MouseWheel>", self._scroll_import_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._scroll_import_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._scroll_import_mousewheel, add="+")
 
-        csv_frame = ttk.LabelFrame(self.import_tab, text="Rainfall CSV", padding=10)
+        csv_frame = ttk.LabelFrame(import_content, text="Rainfall CSV", padding=10)
         csv_frame.grid(row=0, column=0, sticky="ew")
         csv_frame.columnconfigure(0, weight=1)
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
         ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
-        self.weather_frame = ttk.LabelFrame(self.import_tab, text="ACIS Weather Import", padding=10)
+        self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
         self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.weather_frame.columnconfigure(1, weight=1)
         source_row = ttk.Frame(self.weather_frame)
@@ -1467,11 +1791,10 @@ class RainwaterTkApp(tk.Tk):
         )
         self.import_station_button.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
-        station_map_frame = ttk.LabelFrame(self.import_tab, text="Weather stations", padding=6)
-        station_map_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        station_map_frame = ttk.LabelFrame(import_content, text="Weather stations", padding=6)
+        station_map_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         station_map_frame.columnconfigure(0, weight=1)
-        station_map_frame.rowconfigure(0, weight=1)
-        self.station_map = _StationMapView(station_map_frame, width=800, height=260, corner_radius=0)
+        self.station_map = _StationMapView(station_map_frame, width=800, height=440, corner_radius=0)
         self.station_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
         self.station_map.set_position(39.5, -98.35)
         self.station_map.set_zoom(3)
@@ -1527,6 +1850,7 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_schedules_tab(self) -> None:
         self.schedules_tab.columnconfigure(1, weight=1)
+        self.schedules_tab.columnconfigure(2, weight=1)
         self.schedules_tab.rowconfigure(1, weight=1)
         schedule_toolbar = ttk.Frame(self.schedules_tab)
         schedule_toolbar.grid(row=0, column=0, sticky="w", pady=(0, 6))
@@ -1552,36 +1876,88 @@ class RainwaterTkApp(tk.Tk):
         )
         self.schedule_delete_button.grid(row=0, column=2, padx=(2, 0))
         self.schedule_list = tk.Listbox(self.schedules_tab, width=28, exportselection=False)
-        self.schedule_list.grid(row=1, column=0, sticky="nsw", padx=(0, 10))
+        self.schedule_list.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
         self.schedule_list.bind("<<ListboxSelect>>", self._schedule_selection_changed)
+        self.schedule_list.bind("<F2>", self._focus_schedule_name_from_event)
 
-        library_frame = ttk.LabelFrame(self.schedules_tab, text="Common schedules", padding=8)
-        library_frame.grid(row=2, column=0, sticky="ew", padx=(0, 10), pady=(8, 0))
-        self.common_schedule_templates = common_hourly_schedule_templates()
-        self.common_schedule_var = tk.StringVar(value=next(iter(self.common_schedule_templates)))
-        self.common_schedule_combo = ttk.Combobox(
-            library_frame,
-            textvariable=self.common_schedule_var,
-            values=list(self.common_schedule_templates),
-            state="readonly",
-            width=25,
-        )
-        self.common_schedule_combo.grid(row=0, column=0, sticky="ew")
-        self.common_schedule_combo.bind("<Return>", self._add_common_schedule_from_event)
-        ttk.Button(library_frame, text="Add to project", command=self.add_common_hourly_schedule).grid(
-            row=1, column=0, sticky="ew", pady=(6, 0)
-        )
-        library_frame.columnconfigure(0, weight=1)
+        built_in_templates = common_hourly_schedule_templates()
+        built_in_names = {name.casefold() for name in built_in_templates}
+        self.custom_schedule_templates = {
+            name: schedule
+            for name, schedule in self.custom_schedule_templates.items()
+            if name.casefold() not in built_in_names
+        }
+        self.common_schedule_templates = {**built_in_templates, **self.custom_schedule_templates}
 
         hourly_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule properties", padding=12)
-        hourly_frame.grid(row=0, column=1, rowspan=3, sticky="nsew")
+        hourly_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, 10))
+        hourly_frame.columnconfigure(1, weight=1)
+        self.schedule_name_var = tk.StringVar()
+        ttk.Label(hourly_frame, text="Schedule name").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.schedule_name_entry = ttk.Entry(hourly_frame, textvariable=self.schedule_name_var)
+        self.schedule_name_entry.grid(row=0, column=1, sticky="ew")
+        self.schedule_name_entry.bind("<Return>", self._rename_schedule_from_event)
+        self.rename_schedule_button = ttk.Button(
+            hourly_frame, text="Rename", command=self.rename_hourly_demand_schedule
+        )
+        self.rename_schedule_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
         self.edit_schedule_button = ttk.Button(
             hourly_frame, text="Edit typical week...", command=self.edit_hourly_demand_schedule
         )
-        self.edit_schedule_button.grid(row=0, column=0, sticky="w")
-        ttk.Label(hourly_frame, textvariable=self.hourly_schedule_summary_var, foreground="#667278").grid(
-            row=1, column=0, sticky="w", pady=(6, 0)
+        self.edit_schedule_button.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.save_schedule_to_library_button = ttk.Button(
+            hourly_frame,
+            text="Save selected to library",
+            command=self.save_selected_schedule_to_library,
         )
+        self.save_schedule_to_library_button.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Label(hourly_frame, textvariable=self.hourly_schedule_summary_var, foreground="#667278").grid(
+            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
+        )
+
+        library_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule library", padding=10)
+        library_frame.grid(row=0, column=2, rowspan=2, sticky="nsew")
+        library_frame.columnconfigure(0, weight=1)
+        library_frame.rowconfigure(1, weight=1)
+        library_toolbar = ttk.Frame(library_frame)
+        library_toolbar.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.library_add_button = ttk.Button(
+            library_toolbar,
+            image=self.schedule_add_icon,
+            command=self.create_custom_library_schedule,
+            takefocus=True,
+        )
+        self.library_add_button.grid(row=0, column=0)
+        self.library_duplicate_button = ttk.Button(
+            library_toolbar,
+            image=self.schedule_duplicate_icon,
+            command=self.duplicate_library_schedule,
+            takefocus=True,
+        )
+        self.library_duplicate_button.grid(row=0, column=1, padx=(2, 0))
+        self.library_delete_button = ttk.Button(
+            library_toolbar,
+            image=self.schedule_delete_icon,
+            command=self.delete_custom_library_schedule,
+            takefocus=True,
+        )
+        self.library_delete_button.grid(row=0, column=2, padx=(2, 0))
+        self.library_tree = ttk.Treeview(library_frame, show="tree", selectmode="browse", height=16)
+        self.library_tree.grid(row=1, column=0, sticky="nsew")
+        library_scroll = ttk.Scrollbar(library_frame, orient="vertical", command=self.library_tree.yview)
+        library_scroll.grid(row=1, column=1, sticky="ns")
+        self.library_tree.configure(yscrollcommand=library_scroll.set)
+        self.library_tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
+        self.library_tree.bind("<<TreeviewSelect>>", self._library_selection_changed)
+        self.library_tree.bind("<Double-1>", self._add_library_schedule_from_event)
+        self.library_tree.bind("<Return>", self._add_library_schedule_from_event)
+        self.add_library_schedule_to_project_button = ttk.Button(
+            library_frame,
+            text="Add selected to project",
+            command=self.add_common_hourly_schedule,
+        )
+        self.add_library_schedule_to_project_button.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self._refresh_schedule_library()
         self._refresh_schedule_management()
 
     def _create_schedule_action_icon(self, color: str, symbol: str, size: int = 26) -> tk.PhotoImage:
@@ -1620,11 +1996,12 @@ class RainwaterTkApp(tk.Tk):
         return image
 
     def _build_demand_tab(self) -> None:
-        self.demand_tab.columnconfigure(0, weight=1)
-        self.demand_tab.rowconfigure(2, weight=1)
+        self.demand_tab.columnconfigure(0, weight=2)
+        self.demand_tab.columnconfigure(1, weight=1)
+        self.demand_tab.rowconfigure(3, weight=1)
 
         settings_frame = ttk.LabelFrame(self.demand_tab, text="Simple demand settings", padding=10)
-        settings_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        settings_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
         settings_frame.columnconfigure(1, weight=1)
         self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
         ttk.Label(settings_frame, text="Daily demand schedule").grid(row=1, column=0, sticky="w", pady=2)
@@ -1641,8 +2018,82 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 3, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
         self._labeled_entry(settings_frame, 4, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
 
+        demand_objects_frame = ttk.LabelFrame(self.demand_tab, text="Demand objects", padding=8)
+        demand_objects_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(0, 10))
+        demand_objects_frame.columnconfigure(0, weight=1)
+        self.demand_objects_tree = ttk.Treeview(
+            demand_objects_frame,
+            columns=("name", "type", "instantaneous_demand", "schedule"),
+            show="headings",
+            height=4,
+            selectmode="browse",
+        )
+        self.demand_objects_tree.heading("name", text="Name")
+        self.demand_objects_tree.heading("type", text="Type")
+        self.demand_objects_tree.heading("instantaneous_demand", text="Instantaneous demand")
+        self.demand_objects_tree.heading("schedule", text="Schedule")
+        self.demand_objects_tree.column("name", width=190)
+        self.demand_objects_tree.column("type", width=140)
+        self.demand_objects_tree.column("instantaneous_demand", width=165, anchor="e")
+        self.demand_objects_tree.column("schedule", width=190)
+        self.demand_objects_tree.grid(row=0, column=0, sticky="ew")
+        demand_object_scroll = ttk.Scrollbar(
+            demand_objects_frame, orient="vertical", command=self.demand_objects_tree.yview
+        )
+        demand_object_scroll.grid(row=0, column=1, sticky="ns")
+        self.demand_objects_tree.configure(yscrollcommand=demand_object_scroll.set)
+        self.demand_objects_tree.bind("<Double-1>", self._edit_demand_object_from_event)
+        self.demand_objects_tree.bind("<Return>", self._edit_selected_demand_object_from_event)
+        object_buttons = ttk.Frame(demand_objects_frame)
+        object_buttons.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Button(object_buttons, text="Add demand object", command=self.add_demand_object).grid(row=0, column=0)
+        ttk.Button(object_buttons, text="Edit selected", command=self.edit_demand_object).grid(
+            row=0, column=1, padx=(6, 0)
+        )
+        ttk.Button(object_buttons, text="Delete selected", command=self.delete_demand_object).grid(
+            row=0, column=2, padx=(6, 0)
+        )
+        ttk.Button(object_buttons, text="Save selected to library", command=self.save_selected_demand_object_to_library).grid(
+            row=0, column=3, padx=(6, 0)
+        )
+
+        demand_library_frame = ttk.LabelFrame(self.demand_tab, text="Demand object library", padding=8)
+        demand_library_frame.grid(row=1, column=1, sticky="nsew", pady=(0, 10))
+        demand_library_frame.columnconfigure(0, weight=1)
+        demand_library_frame.rowconfigure(1, weight=1)
+        demand_library_toolbar = ttk.Frame(demand_library_frame)
+        demand_library_toolbar.grid(row=0, column=0, sticky="w", pady=(0, 6))
+        self.demand_library_add_button = ttk.Button(
+            demand_library_toolbar, image=self.schedule_add_icon, command=self.create_custom_demand_object_template
+        )
+        self.demand_library_add_button.grid(row=0, column=0)
+        self.demand_library_duplicate_button = ttk.Button(
+            demand_library_toolbar, image=self.schedule_duplicate_icon, command=self.duplicate_demand_object_template
+        )
+        self.demand_library_duplicate_button.grid(row=0, column=1, padx=(2, 0))
+        self.demand_library_delete_button = ttk.Button(
+            demand_library_toolbar, image=self.schedule_delete_icon, command=self.delete_custom_demand_object_template
+        )
+        self.demand_library_delete_button.grid(row=0, column=2, padx=(2, 0))
+        self.demand_library_tree = ttk.Treeview(demand_library_frame, show="tree", selectmode="browse", height=5)
+        self.demand_library_tree.grid(row=1, column=0, sticky="nsew")
+        demand_library_scroll = ttk.Scrollbar(
+            demand_library_frame, orient="vertical", command=self.demand_library_tree.yview
+        )
+        demand_library_scroll.grid(row=1, column=1, sticky="ns")
+        self.demand_library_tree.configure(yscrollcommand=demand_library_scroll.set)
+        self.demand_library_tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
+        self.demand_library_tree.bind("<<TreeviewSelect>>", self._demand_library_selection_changed)
+        self.demand_library_tree.bind("<Double-1>", self._add_demand_library_object_from_event)
+        self.demand_library_tree.bind("<Return>", self._add_demand_library_object_from_event)
+        self.add_demand_library_to_project_button = ttk.Button(
+            demand_library_frame, text="Add selected to project", command=self.add_demand_object_from_library
+        )
+        self.add_demand_library_to_project_button.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self._refresh_demand_object_library()
+
         ttk.Label(self.demand_tab, text="Monthly demand", font=("Segoe UI", 10, "bold")).grid(
-            row=1, column=0, sticky="w", pady=(0, 6)
+            row=2, column=0, columnspan=2, sticky="w", pady=(0, 6)
         )
 
         columns = ["month"] + [field for field, _label in DEMAND_FIELDS]
@@ -1650,7 +2101,7 @@ class RainwaterTkApp(tk.Tk):
             self.demand_tab,
             columns=columns,
             show="headings",
-            height=14,
+            height=9,
             style="MonthlyDemand.Treeview",
         )
         self.demand_tree.heading("month", text="Month")
@@ -1658,13 +2109,13 @@ class RainwaterTkApp(tk.Tk):
         for field, _label in DEMAND_FIELDS:
             self.demand_tree.column(field, width=105, anchor="e")
         self._update_demand_headings()
-        self.demand_tree.grid(row=2, column=0, sticky="nsew")
+        self.demand_tree.grid(row=3, column=0, columnspan=2, sticky="nsew")
         self.demand_tree.bind("<Double-1>", self._edit_demand_month_from_event)
         scroll_x = ttk.Scrollbar(self.demand_tab, orient="horizontal", command=self.demand_tree.xview)
-        scroll_x.grid(row=3, column=0, sticky="ew")
+        scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.demand_tree.configure(xscrollcommand=scroll_x.set)
         ttk.Button(self.demand_tab, text="Edit Selected Month", command=self.edit_demand_month).grid(
-            row=4, column=0, sticky="w", pady=(8, 0)
+            row=5, column=0, sticky="w", pady=(8, 0)
         )
 
     def _build_analysis_tab(self) -> None:
@@ -2413,6 +2864,7 @@ class RainwaterTkApp(tk.Tk):
         self.booster_refill_level_var.set(f"{cfg.system_parameters.booster_refill_level_percent:.2f}")
         self.municipal_backup_enabled_var.set(cfg.system_parameters.municipal_backup_enabled)
         self._update_system_type_display()
+        self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
             cfg.canadian_precipitation_field if cfg.country_code == "CAN" else cfg.acis_precipitation_field
@@ -2531,6 +2983,7 @@ class RainwaterTkApp(tk.Tk):
 
     def _populate_demand(self) -> None:
         self._update_demand_headings()
+        self._populate_demand_objects()
         self.demand_tree.delete(*self.demand_tree.get_children())
         monthly_volume_fields = {field for field, _label in DEMAND_FIELDS if field not in {"male_occupancy", "female_occupancy"}}
         for month in MONTH_KEYS:
@@ -2541,6 +2994,31 @@ class RainwaterTkApp(tk.Tk):
                     value = volume_to_display(value, self.config_model)
                 row.append(f"{value:.2f}")
             self.demand_tree.insert("", "end", iid=month, values=row)
+
+    def _populate_demand_objects(self, select_index: int | None = None) -> None:
+        if not hasattr(self, "demand_objects_tree"):
+            return
+        self.demand_objects_tree.heading(
+            "instantaneous_demand", text=f"Instantaneous demand ({volume_unit(self.config_model)}/min)"
+        )
+        self.demand_objects_tree.delete(*self.demand_objects_tree.get_children())
+        for index, demand_object in enumerate(self.config_model.demand.demand_objects):
+            self.demand_objects_tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(
+                    demand_object.name,
+                    demand_object.object_type,
+                    f"{volume_to_display(demand_object.instantaneous_demand_gallons_per_minute, self.config_model):.2f}",
+                    demand_object.schedule_name,
+                ),
+            )
+        if select_index is not None and 0 <= select_index < len(self.config_model.demand.demand_objects):
+            iid = str(select_index)
+            self.demand_objects_tree.selection_set(iid)
+            self.demand_objects_tree.focus(iid)
+            self.demand_objects_tree.see(iid)
 
     def _update_demand_headings(self) -> None:
         unit = volume_unit(self.config_model)
@@ -2671,26 +3149,35 @@ class RainwaterTkApp(tk.Tk):
                 latitude, longitude, initial_zoom = 20.0, 0.0, 2
         else:
             initial_zoom = 16
-        page_html = _build_osm_picker_html(
+        dialog = ProjectLocationPickerDialog(
+            self,
             float(latitude),
             float(longitude),
             initial_zoom,
             has_location,
         )
-        handler = partial(
-            _MapSelectionHandler,
-            page_html=page_html,
-            selection_queue=self.location_result_queue,
-        )
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        thread = threading.Thread(target=server.serve_forever, name="rwh-map-picker", daemon=True)
-        thread.start()
-        self.report_preview_servers.append(server)
-        port = server.server_address[1]
-        webbrowser.open(f"http://127.0.0.1:{port}/")
         self.status_var.set("OpenStreetMap location picker opened")
+        self.wait_window(dialog)
+        if dialog.result is None:
+            self.status_var.set("OpenStreetMap location selection cancelled")
+            self._focus_main_window()
+            return
+        selected_latitude, selected_longitude = dialog.result
+        self.config_model.latitude = selected_latitude
+        self.config_model.longitude = selected_longitude
+        self.latitude_var.set(f"{selected_latitude:.8f}")
+        self.longitude_var.set(f"{selected_longitude:.8f}")
+        self._update_coordinates_label()
+        self.status_var.set("Finding the nearest OpenStreetMap address...")
+        threading.Thread(
+            target=self._reverse_geocode_project_location,
+            args=(selected_latitude, selected_longitude),
+            name="rwh-reverse-geocode",
+            daemon=True,
+        ).start()
         if self.location_poll_after_id is None:
             self.location_poll_after_id = self.after(100, self._poll_location_results)
+        self._focus_main_window()
 
     def find_address_for_coordinates(self) -> None:
         coordinates = self._coordinates_from_form(require_coordinates=True)
@@ -3499,6 +3986,197 @@ class RainwaterTkApp(tk.Tk):
         if dialog.saved:
             self._populate_demand()
 
+    def add_demand_object(self) -> None:
+        if not self.config_model.demand.hourly_schedule_library:
+            messagebox.showinfo(APP_TITLE, "Add a schedule to the project before creating a demand object.", parent=self)
+            return
+        demand_object = DemandObject(
+            name="New demand object",
+            schedule_name=next(iter(self.config_model.demand.hourly_schedule_library)),
+        )
+        dialog = DemandObjectDialog(self, self.config_model, demand_object)
+        self.wait_window(dialog)
+        if dialog.result is not None:
+            self.config_model.demand.demand_objects.append(dialog.result)
+            self._populate_demand_objects(select_index=len(self.config_model.demand.demand_objects) - 1)
+
+    def _all_demand_object_templates(self) -> dict[str, DemandObject]:
+        return {**_common_demand_object_templates(), **self.custom_demand_object_templates}
+
+    def _selected_demand_library_object(self) -> tuple[str, str] | None:
+        selected = self.demand_library_tree.selection()
+        if not selected:
+            return None
+        return self.demand_library_item_map.get(selected[0])
+
+    def _refresh_demand_object_library(self, select_name: str | None = None) -> None:
+        self.demand_library_tree.delete(*self.demand_library_tree.get_children())
+        self.demand_library_item_map: dict[str, tuple[str, str]] = {}
+        template_group = self.demand_library_tree.insert(
+            "", "end", iid="demand_library_templates", text="Templates", open=True, tags=("group",)
+        )
+        custom_group = self.demand_library_tree.insert(
+            "", "end", iid="demand_library_custom", text="Custom", open=True, tags=("group",)
+        )
+        selected_iid: str | None = None
+        for kind, parent, templates in (
+            ("template", template_group, _common_demand_object_templates()),
+            ("custom", custom_group, self.custom_demand_object_templates),
+        ):
+            for index, name in enumerate(templates):
+                iid = f"demand_library_{kind}_{index}"
+                self.demand_library_tree.insert(parent, "end", iid=iid, text=name)
+                self.demand_library_item_map[iid] = (kind, name)
+                if name == select_name:
+                    selected_iid = iid
+        if selected_iid is not None:
+            self.demand_library_tree.selection_set(selected_iid)
+            self.demand_library_tree.focus(selected_iid)
+            self.demand_library_tree.see(selected_iid)
+        self._update_demand_library_state()
+
+    def _demand_library_selection_changed(self, _event: tk.Event | None = None) -> None:
+        self._update_demand_library_state()
+
+    def _update_demand_library_state(self) -> None:
+        selected = self._selected_demand_library_object()
+        self.demand_library_duplicate_button.state(["!disabled"] if selected else ["disabled"])
+        self.demand_library_delete_button.state(
+            ["!disabled"] if selected and selected[0] == "custom" else ["disabled"]
+        )
+        self.add_demand_library_to_project_button.state(["!disabled"] if selected else ["disabled"])
+
+    def _unique_demand_library_name(self, base_name: str) -> str:
+        existing = {name.casefold() for name in self._all_demand_object_templates()}
+        if base_name.casefold() not in existing:
+            return base_name
+        suffix = 2
+        while f"{base_name} {suffix}".casefold() in existing:
+            suffix += 1
+        return f"{base_name} {suffix}"
+
+    def _save_demand_library_changes(self, previous: dict[str, DemandObject]) -> bool:
+        try:
+            self._save_custom_demand_object_templates()
+        except OSError as exc:
+            self.custom_demand_object_templates = previous
+            messagebox.showerror(APP_TITLE, f"Could not save the demand object library:\n{exc}", parent=self)
+            return False
+        return True
+
+    def _edit_demand_library_template(self, demand_object: DemandObject) -> DemandObject | None:
+        if not self.config_model.demand.hourly_schedule_library:
+            messagebox.showinfo(APP_TITLE, "Add a schedule to the project before editing a demand object.", parent=self)
+            return None
+        demand_object.schedule_name = next(iter(self.config_model.demand.hourly_schedule_library))
+        dialog = DemandObjectDialog(self, self.config_model, demand_object)
+        self.wait_window(dialog)
+        return dialog.result
+
+    def create_custom_demand_object_template(self) -> None:
+        name = self._unique_demand_library_name("Custom demand object")
+        result = self._edit_demand_library_template(DemandObject(name=name))
+        if result is None:
+            return
+        result.schedule_name = ""
+        previous = copy.deepcopy(self.custom_demand_object_templates)
+        self.custom_demand_object_templates[result.name] = result
+        if self._save_demand_library_changes(previous):
+            self._refresh_demand_object_library(select_name=result.name)
+
+    def duplicate_demand_object_template(self) -> None:
+        selected = self._selected_demand_library_object()
+        if selected is None:
+            return
+        source = copy.deepcopy(self._all_demand_object_templates()[selected[1]])
+        source.name = self._unique_demand_library_name(f"{source.name} copy")
+        previous = copy.deepcopy(self.custom_demand_object_templates)
+        self.custom_demand_object_templates[source.name] = source
+        if self._save_demand_library_changes(previous):
+            self._refresh_demand_object_library(select_name=source.name)
+
+    def delete_custom_demand_object_template(self) -> None:
+        selected = self._selected_demand_library_object()
+        if selected is None or selected[0] != "custom":
+            return
+        name = selected[1]
+        if not messagebox.askyesno(APP_TITLE, f"Delete custom demand object '{name}'?", parent=self):
+            return
+        previous = copy.deepcopy(self.custom_demand_object_templates)
+        del self.custom_demand_object_templates[name]
+        if self._save_demand_library_changes(previous):
+            self._refresh_demand_object_library()
+
+    def add_demand_object_from_library(self) -> None:
+        selected = self._selected_demand_library_object()
+        if selected is None:
+            return
+        result = self._edit_demand_library_template(copy.deepcopy(self._all_demand_object_templates()[selected[1]]))
+        if result is not None:
+            self.config_model.demand.demand_objects.append(result)
+            self._populate_demand_objects(select_index=len(self.config_model.demand.demand_objects) - 1)
+
+    def _add_demand_library_object_from_event(self, event: tk.Event) -> str:
+        if getattr(event, "y", None) is not None:
+            row_id = self.demand_library_tree.identify_row(event.y)
+            if row_id in self.demand_library_item_map:
+                self.demand_library_tree.selection_set(row_id)
+                self.demand_library_tree.focus(row_id)
+        if self._selected_demand_library_object() is not None:
+            self.add_demand_object_from_library()
+        return "break"
+
+    def save_selected_demand_object_to_library(self) -> None:
+        selected = self.demand_objects_tree.selection()
+        if not selected:
+            messagebox.showinfo(APP_TITLE, "Select a demand object first.", parent=self)
+            return
+        source = copy.deepcopy(self.config_model.demand.demand_objects[int(selected[0])])
+        source.name = self._unique_demand_library_name(source.name)
+        source.schedule_name = ""
+        previous = copy.deepcopy(self.custom_demand_object_templates)
+        self.custom_demand_object_templates[source.name] = source
+        if self._save_demand_library_changes(previous):
+            self._refresh_demand_object_library(select_name=source.name)
+
+    def edit_demand_object(self) -> None:
+        selected = self.demand_objects_tree.selection()
+        if not selected:
+            messagebox.showinfo(APP_TITLE, "Select a demand object first.", parent=self)
+            return
+        index = int(selected[0])
+        dialog = DemandObjectDialog(
+            self, self.config_model, copy.deepcopy(self.config_model.demand.demand_objects[index])
+        )
+        self.wait_window(dialog)
+        if dialog.result is not None:
+            self.config_model.demand.demand_objects[index] = dialog.result
+            self._populate_demand_objects(select_index=index)
+
+    def delete_demand_object(self) -> None:
+        selected = self.demand_objects_tree.selection()
+        if not selected:
+            return
+        index = int(selected[0])
+        demand_object = self.config_model.demand.demand_objects[index]
+        if not messagebox.askyesno(APP_TITLE, f"Delete demand object '{demand_object.name}'?", parent=self):
+            return
+        del self.config_model.demand.demand_objects[index]
+        self._populate_demand_objects()
+
+    def _edit_demand_object_from_event(self, event: tk.Event) -> str:
+        row_id = self.demand_objects_tree.identify_row(event.y)
+        if row_id:
+            self.demand_objects_tree.selection_set(row_id)
+            self.demand_objects_tree.focus(row_id)
+            self.edit_demand_object()
+        return "break"
+
+    def _edit_selected_demand_object_from_event(self, _event: tk.Event) -> str:
+        if self.demand_objects_tree.selection():
+            self.edit_demand_object()
+        return "break"
+
     def edit_hourly_demand_schedule(self) -> None:
         selected_name = self._selected_schedule_name()
         if selected_name is None:
@@ -3542,8 +4220,184 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_schedule_summary_var.set(f"Duplicate of {source_name}")
         self._refresh_schedule_management(select_name=name)
 
+    def rename_hourly_demand_schedule(self) -> None:
+        selected_name = self._selected_schedule_name()
+        if selected_name is None:
+            return
+        new_name = self.schedule_name_var.get().strip()
+        if not new_name:
+            messagebox.showwarning(APP_TITLE, "Schedule name cannot be blank.", parent=self)
+            self.schedule_name_entry.focus_set()
+            return
+        library = self.config_model.demand.hourly_schedule_library
+        if new_name != selected_name and any(
+            name.casefold() == new_name.casefold() for name in library if name != selected_name
+        ):
+            messagebox.showwarning(APP_TITLE, f"A schedule named '{new_name}' already exists.", parent=self)
+            self.schedule_name_entry.focus_set()
+            return
+        if new_name == selected_name:
+            return
+        renamed_items = [
+            (new_name if name == selected_name else name, schedule)
+            for name, schedule in library.items()
+        ]
+        library.clear()
+        library.update(renamed_items)
+        for demand_object in self.config_model.demand.demand_objects:
+            if demand_object.schedule_name == selected_name:
+                demand_object.schedule_name = new_name
+        self._populate_demand_objects()
+        self.config_model.demand.active_hourly_schedule_name = new_name
+        self.hourly_schedule_summary_var.set(f"Renamed schedule to: {new_name}")
+        self._refresh_schedule_management(select_name=new_name)
+
+    def _rename_schedule_from_event(self, _event: tk.Event) -> str:
+        self.rename_hourly_demand_schedule()
+        return "break"
+
+    def _focus_schedule_name_from_event(self, _event: tk.Event) -> str:
+        if self._selected_schedule_name() is not None:
+            self.schedule_name_entry.focus_set()
+            self.schedule_name_entry.selection_range(0, tk.END)
+        return "break"
+
+    def _selected_library_schedule(self) -> tuple[str, str] | None:
+        if not hasattr(self, "library_tree"):
+            return None
+        selected = self.library_tree.selection()
+        if not selected:
+            return None
+        return self.library_tree_item_map.get(selected[0])
+
+    def _refresh_schedule_library(self, select_name: str | None = None) -> None:
+        self.library_tree.delete(*self.library_tree.get_children())
+        self.library_tree_item_map: dict[str, tuple[str, str]] = {}
+        template_group = self.library_tree.insert("", "end", iid="library_templates", text="Templates", open=True, tags=("group",))
+        custom_group = self.library_tree.insert("", "end", iid="library_custom", text="Custom", open=True, tags=("group",))
+        selected_iid: str | None = None
+        for index, name in enumerate(common_hourly_schedule_templates()):
+            iid = f"library_template_{index}"
+            self.library_tree.insert(template_group, "end", iid=iid, text=name)
+            self.library_tree_item_map[iid] = ("template", name)
+            if name == select_name:
+                selected_iid = iid
+        for index, name in enumerate(self.custom_schedule_templates):
+            iid = f"library_custom_{index}"
+            self.library_tree.insert(custom_group, "end", iid=iid, text=name)
+            self.library_tree_item_map[iid] = ("custom", name)
+            if name == select_name:
+                selected_iid = iid
+        if selected_iid is not None:
+            self.library_tree.selection_set(selected_iid)
+            self.library_tree.focus(selected_iid)
+            self.library_tree.see(selected_iid)
+        self._update_library_management_state()
+
+    def _unique_library_name(self, base_name: str) -> str:
+        existing = {name.casefold() for name in self.common_schedule_templates}
+        if base_name.casefold() not in existing:
+            return base_name
+        suffix = 2
+        while f"{base_name} {suffix}".casefold() in existing:
+            suffix += 1
+        return f"{base_name} {suffix}"
+
+    def _save_library_changes(self, previous: dict[str, dict[str, list[float]]]) -> bool:
+        try:
+            self._save_custom_schedule_templates()
+        except OSError as exc:
+            self.custom_schedule_templates = previous
+            self.common_schedule_templates = {
+                **common_hourly_schedule_templates(),
+                **self.custom_schedule_templates,
+            }
+            messagebox.showerror(APP_TITLE, f"Could not save the custom schedule library:\n{exc}", parent=self)
+            return False
+        self.common_schedule_templates = {
+            **common_hourly_schedule_templates(),
+            **self.custom_schedule_templates,
+        }
+        return True
+
+    def create_custom_library_schedule(self) -> None:
+        default_name = self._unique_library_name("Custom schedule")
+        name = simpledialog.askstring(
+            "Add custom library schedule",
+            "Schedule name:",
+            initialvalue=default_name,
+            parent=self,
+        )
+        if name is None:
+            return
+        name = name.strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Schedule name cannot be blank.", parent=self)
+            return
+        if any(existing.casefold() == name.casefold() for existing in self.common_schedule_templates):
+            messagebox.showwarning(APP_TITLE, f"A library schedule named '{name}' already exists.", parent=self)
+            return
+        temporary_config = default_project_config("Schedule library")
+        temporary_config.demand.hourly_weekly_fractions = default_hourly_weekly_fractions()
+        dialog = HourlyDemandScheduleDialog(self, temporary_config)
+        self.wait_window(dialog)
+        if not dialog.saved:
+            return
+        previous = copy.deepcopy(self.custom_schedule_templates)
+        self.custom_schedule_templates[name] = copy.deepcopy(temporary_config.demand.hourly_weekly_fractions)
+        if self._save_library_changes(previous):
+            self._refresh_schedule_library(select_name=name)
+            self.status_var.set(f"Added '{name}' to the custom schedule library")
+
+    def duplicate_library_schedule(self) -> None:
+        selected = self._selected_library_schedule()
+        if selected is None:
+            return
+        _kind, source_name = selected
+        source = self.common_schedule_templates[source_name]
+        name = self._unique_library_name(f"{source_name} copy")
+        previous = copy.deepcopy(self.custom_schedule_templates)
+        self.custom_schedule_templates[name] = copy.deepcopy(source)
+        if self._save_library_changes(previous):
+            self._refresh_schedule_library(select_name=name)
+            self.status_var.set(f"Duplicated '{source_name}' in the custom schedule library")
+
+    def delete_custom_library_schedule(self) -> None:
+        selected = self._selected_library_schedule()
+        if selected is None or selected[0] != "custom":
+            return
+        name = selected[1]
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Delete custom library schedule '{name}'?",
+            parent=self,
+        ):
+            return
+        previous = copy.deepcopy(self.custom_schedule_templates)
+        del self.custom_schedule_templates[name]
+        if self._save_library_changes(previous):
+            self._refresh_schedule_library()
+            self.status_var.set(f"Deleted '{name}' from the custom schedule library")
+
+    def _library_selection_changed(self, _event: tk.Event | None = None) -> None:
+        self._update_library_management_state()
+
+    def _update_library_management_state(self) -> None:
+        selected = self._selected_library_schedule()
+        has_schedule = selected is not None
+        is_custom = has_schedule and selected[0] == "custom"
+        if hasattr(self, "library_duplicate_button"):
+            self.library_duplicate_button.state(["!disabled"] if has_schedule else ["disabled"])
+        if hasattr(self, "library_delete_button"):
+            self.library_delete_button.state(["!disabled"] if is_custom else ["disabled"])
+        if hasattr(self, "add_library_schedule_to_project_button"):
+            self.add_library_schedule_to_project_button.state(["!disabled"] if has_schedule else ["disabled"])
+
     def add_common_hourly_schedule(self) -> None:
-        template_name = self.common_schedule_var.get()
+        selected = self._selected_library_schedule()
+        if selected is None:
+            return
+        _kind, template_name = selected
         template = self.common_schedule_templates.get(template_name)
         if template is None:
             return
@@ -3556,13 +4410,65 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_schedule_summary_var.set(f"Added common schedule: {template_name}")
         self._refresh_schedule_management(select_name=name)
 
-    def _add_common_schedule_from_event(self, _event: tk.Event) -> str:
-        self.add_common_hourly_schedule()
+    def _add_library_schedule_from_event(self, event: tk.Event) -> str:
+        if getattr(event, "y", None) is not None:
+            row_id = self.library_tree.identify_row(event.y)
+            if row_id in self.library_tree_item_map:
+                self.library_tree.selection_set(row_id)
+                self.library_tree.focus(row_id)
+        if self._selected_library_schedule() is not None:
+            self.add_common_hourly_schedule()
         return "break"
+
+    def save_selected_schedule_to_library(self) -> None:
+        selected_name = self._selected_schedule_name()
+        if selected_name is None:
+            return
+        built_in_names = common_hourly_schedule_templates()
+        if any(name.casefold() == selected_name.casefold() for name in built_in_names):
+            messagebox.showwarning(
+                APP_TITLE,
+                "Built-in schedule names are reserved. Rename the project schedule before adding it to the library.",
+                parent=self,
+            )
+            return
+        existing_name = next(
+            (name for name in self.custom_schedule_templates if name.casefold() == selected_name.casefold()),
+            None,
+        )
+        if existing_name is not None and not messagebox.askyesno(
+            APP_TITLE,
+            f"Replace the custom library schedule '{existing_name}'?",
+            parent=self,
+        ):
+            return
+        previous = copy.deepcopy(self.custom_schedule_templates)
+        if existing_name is not None and existing_name != selected_name:
+            del self.custom_schedule_templates[existing_name]
+        schedule = copy.deepcopy(self.config_model.demand.hourly_schedule_library[selected_name])
+        self.custom_schedule_templates[selected_name] = schedule
+        if not self._save_library_changes(previous):
+            return
+        self._refresh_schedule_library(select_name=selected_name)
+        self.hourly_schedule_summary_var.set(f"Saved to common schedule library: {selected_name}")
+        self.status_var.set(f"Added '{selected_name}' to the common schedule library")
 
     def delete_hourly_demand_schedule(self) -> None:
         selected_name = self._selected_schedule_name()
         if selected_name is None:
+            return
+        users = [
+            demand_object.name
+            for demand_object in self.config_model.demand.demand_objects
+            if demand_object.schedule_name == selected_name
+        ]
+        if users:
+            messagebox.showwarning(
+                APP_TITLE,
+                f"Schedule '{selected_name}' is used by demand object(s): {', '.join(users)}. "
+                "Assign another schedule before deleting it.",
+                parent=self,
+            )
             return
         if not messagebox.askyesno(
             APP_TITLE,
@@ -3609,6 +4515,9 @@ class RainwaterTkApp(tk.Tk):
             index = names.index(target)
             self.schedule_list.selection_set(index)
             self.schedule_list.see(index)
+            self.schedule_name_var.set(target)
+        else:
+            self.schedule_name_var.set("")
         self._update_schedule_management_state()
 
     def _selected_schedule_name(self) -> str | None:
@@ -3627,6 +4536,7 @@ class RainwaterTkApp(tk.Tk):
     def _schedule_selection_changed(self, _event: tk.Event | None = None) -> None:
         selected_name = self._selected_schedule_name()
         if selected_name is not None:
+            self.schedule_name_var.set(selected_name)
             self.config_model.demand.active_hourly_schedule_name = selected_name
             self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(
                 self.config_model.demand.hourly_schedule_library[selected_name]
@@ -3642,6 +4552,12 @@ class RainwaterTkApp(tk.Tk):
             self.schedule_duplicate_button.state(["!disabled"] if has_schedule else ["disabled"])
         if hasattr(self, "edit_schedule_button"):
             self.edit_schedule_button.state(["!disabled"] if has_schedule else ["disabled"])
+        if hasattr(self, "rename_schedule_button"):
+            self.rename_schedule_button.state(["!disabled"] if has_schedule else ["disabled"])
+        if hasattr(self, "schedule_name_entry"):
+            self.schedule_name_entry.state(["!disabled"] if has_schedule else ["disabled"])
+        if hasattr(self, "save_schedule_to_library_button"):
+            self.save_schedule_to_library_button.state(["!disabled"] if has_schedule else ["disabled"])
 
     def _edit_demand_month_from_event(self, event: tk.Event) -> str:
         row_id = self.demand_tree.identify_row(event.y)
@@ -6637,7 +7553,7 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
         body.grid(sticky="nsew")
         ttk.Label(
             body,
-            text="Hourly values are percentages of each day's total demand. Each day must total 100%.",
+            text="Hourly multipliers range from 0 (off) to 1 (100% on). Active values distribute the daily demand.",
             foreground="#5f6b70",
         ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
         ttk.Label(body, text="Hour").grid(row=1, column=0, padx=3)
@@ -6648,16 +7564,16 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
                 row=hour + 2, column=0, sticky="e", padx=(0, 5), pady=1
             )
             for column, day in enumerate(WEEKDAY_KEYS, start=1):
-                fractions = config.demand.hourly_weekly_fractions.get(day, [1.0 / 24.0] * 24)
+                fractions = config.demand.hourly_weekly_fractions.get(day, [1.0] * 24)
                 value = fractions[hour] if hour < len(fractions) else 0.0
-                variable = tk.StringVar(value=f"{float(value) * 100:.3f}")
+                variable = tk.StringVar(value=f"{min(max(float(value), 0.0), 1.0):.3f}")
                 self.vars[(day, hour)] = variable
                 ttk.Entry(body, textvariable=variable, width=8, justify="right").grid(
                     row=hour + 2, column=column, padx=2, pady=1
                 )
         actions = ttk.Frame(body)
         actions.grid(row=26, column=0, columnspan=8, sticky="ew", pady=(10, 0))
-        ttk.Button(actions, text="Even distribution", command=self._set_even).grid(row=0, column=0)
+        ttk.Button(actions, text="Set all on", command=self._set_even).grid(row=0, column=0)
         ttk.Button(actions, text="Copy Monday to weekdays", command=self._copy_monday_to_weekdays).grid(
             row=0, column=1, padx=(8, 0)
         )
@@ -6676,7 +7592,7 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
 
     def _set_even(self) -> None:
         for variable in self.vars.values():
-            variable.set(f"{100 / 24:.3f}")
+            variable.set("1.000")
 
     def _copy_day(self, source: str, targets: list[str]) -> None:
         for target in targets:
@@ -6693,22 +7609,109 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
         schedule: dict[str, list[float]] = {}
         for day in WEEKDAY_KEYS:
             try:
-                percentages = [max(float(self.vars[(day, hour)].get()), 0.0) for hour in range(24)]
+                multipliers = [float(self.vars[(day, hour)].get()) for hour in range(24)]
             except ValueError:
-                messagebox.showwarning(APP_TITLE, f"Enter numeric hourly percentages for {self.DAY_LABELS[day]}.", parent=self)
+                messagebox.showwarning(APP_TITLE, f"Enter numeric hourly multipliers for {self.DAY_LABELS[day]}.", parent=self)
                 return
-            total = sum(percentages)
-            if abs(total - 100.0) > 0.05:
+            if any(value < 0.0 or value > 1.0 for value in multipliers):
                 messagebox.showwarning(
                     APP_TITLE,
-                    f"{self.DAY_LABELS[day]} totals {total:.3f}%. Adjust it to 100% before saving.",
+                    f"Hourly multipliers for {self.DAY_LABELS[day]} must be between 0 and 1.",
                     parent=self,
                 )
                 return
-            schedule[day] = [value / total for value in percentages]
+            schedule[day] = multipliers
         self.config_model.demand.hourly_weekly_fractions = schedule
         self.config_model.demand.hourly_schedule_enabled = True
         self.saved = True
+        self.destroy()
+
+
+class DemandObjectDialog(tk.Toplevel):
+    OBJECT_TYPES = ("Irrigation system", "Toilet", "Cooling tower", "Other")
+
+    def __init__(self, parent: RainwaterTkApp, config: ProjectConfig, demand_object: DemandObject) -> None:
+        super().__init__(parent)
+        self.title("Edit Demand Object")
+        self.resizable(False, False)
+        self.transient(parent)
+        self.grab_set()
+        self.config_model = config
+        self.result: DemandObject | None = None
+        self.name_var = tk.StringVar(value=demand_object.name)
+        self.type_var = tk.StringVar(
+            value=demand_object.object_type if demand_object.object_type in self.OBJECT_TYPES else "Other"
+        )
+        self.instantaneous_demand_var = tk.StringVar(
+            value=f"{volume_to_display(demand_object.instantaneous_demand_gallons_per_minute, config):.2f}"
+        )
+        schedule_names = list(config.demand.hourly_schedule_library)
+        selected_schedule = demand_object.schedule_name if demand_object.schedule_name in schedule_names else schedule_names[0]
+        self.schedule_var = tk.StringVar(value=selected_schedule)
+
+        body = ttk.Frame(self, padding=12)
+        body.grid(sticky="nsew")
+        ttk.Label(body, text="Name").grid(row=0, column=0, sticky="w", pady=3)
+        self.name_entry = ttk.Entry(body, textvariable=self.name_var, width=34)
+        self.name_entry.grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(body, text="Type").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Combobox(
+            body,
+            textvariable=self.type_var,
+            values=self.OBJECT_TYPES,
+            state="readonly",
+            width=31,
+        ).grid(row=1, column=1, sticky="ew", pady=3)
+        ttk.Label(body, text="Instantaneous demand").grid(row=2, column=0, sticky="w", pady=3)
+        demand_row = ttk.Frame(body)
+        demand_row.grid(row=2, column=1, sticky="ew", pady=3)
+        demand_row.columnconfigure(0, weight=1)
+        ttk.Entry(demand_row, textvariable=self.instantaneous_demand_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(demand_row, text=f"{volume_unit(config)}/min").grid(row=0, column=1, padx=(8, 0))
+        ttk.Label(body, text="Schedule").grid(row=3, column=0, sticky="w", pady=3)
+        ttk.Combobox(
+            body,
+            textvariable=self.schedule_var,
+            values=schedule_names,
+            state="readonly",
+            width=31,
+        ).grid(row=3, column=1, sticky="ew", pady=3)
+        buttons = ttk.Frame(body)
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=(0, 6))
+        ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.bind("<Return>", lambda _event: self._save())
+        self.after_idle(self._focus_dialog)
+
+    def _focus_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        x = parent.winfo_rootx() + max((parent.winfo_width() - self.winfo_reqwidth()) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - self.winfo_reqheight()) // 2, 0)
+        self.geometry(f"+{x}+{y}")
+        self.lift()
+        self.focus_force()
+        self.name_entry.focus_set()
+        self.name_entry.selection_range(0, tk.END)
+
+    def _save(self) -> None:
+        name = self.name_var.get().strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "Demand object name cannot be blank.", parent=self)
+            return
+        schedule_name = self.schedule_var.get()
+        if schedule_name not in self.config_model.demand.hourly_schedule_library:
+            messagebox.showwarning(APP_TITLE, "Select a schedule that is in the current project.", parent=self)
+            return
+        self.result = DemandObject(
+            name=name,
+            object_type=self.type_var.get() or "Other",
+            instantaneous_demand_gallons_per_minute=volume_to_internal(
+                max(_float(self.instantaneous_demand_var.get()), 0.0), self.config_model
+            ),
+            schedule_name=schedule_name,
+        )
         self.destroy()
 
 

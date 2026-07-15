@@ -14,6 +14,8 @@ site/
 
 rainwater_projects.db
 recent_projects.json
+schedule_library.json
+demand_object_library.json
 
 .DS_Store
 Thumbs.db

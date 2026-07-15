@@ -31,7 +31,7 @@ def _month_index_key(ts: pd.Timestamp) -> str:
     return MONTH_KEYS[ts.month - 1]
 
 
-def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
+def _base_daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
     m = _month_index_key(date)
     days = monthrange(date.year, date.month)[1]
 
@@ -58,6 +58,36 @@ def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
         recurring_daily = 0.0
 
     return float(recurring_daily + (monthly_other / days))
+
+
+def _schedule_fractions_for_date(
+    schedule: dict[str, list[float]], date: pd.Timestamp
+) -> list[float]:
+    day_key = WEEKDAY_KEYS[date.weekday()]
+    values = [min(max(float(value), 0.0), 1.0) for value in schedule.get(day_key, [])[:24]]
+    values.extend([0.0] * (24 - len(values)))
+    total = sum(values)
+    return [value / total for value in values] if total > 0.0 else [0.0] * 24
+
+
+def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
+    total = 0.0
+    for demand_object in demand.demand_objects:
+        schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
+        if schedule is None:
+            continue
+        day_key = WEEKDAY_KEYS[date.weekday()]
+        multipliers = [min(max(float(value), 0.0), 1.0) for value in schedule.get(day_key, [])[:24]]
+        total += (
+            max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
+            * 60.0
+            * sum(multipliers)
+        )
+    return total
+
+
+def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
+    return _base_daily_demand_for_date(demand, date) + _demand_object_daily_for_date(demand, date)
 
 
 def collected_water_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series:
@@ -184,7 +214,10 @@ def simulate_hourly_tank(
     booster_refill_target = booster_capacity * booster_refill_level
     refill_active = booster_capacity > 0.0 and booster_water < booster_refill_target
     collected = collected_water_series(config, data)
-    daily_demand = demand_series(config, data)
+    base_daily_demand = pd.Series(
+        [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
+        index=data.index,
+    )
     initial_fill = min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
     water = tank_size_gallons * initial_fill
     rows: list[dict[str, object]] = []
@@ -192,18 +225,33 @@ def simulate_hourly_tank(
     for day_index, date in enumerate(data["Date"]):
         if cancel_callback is not None and day_index % 20 == 0 and cancel_callback():
             raise AnalysisCancelledError("Analysis cancelled by user.")
-        day_key = WEEKDAY_KEYS[pd.Timestamp(date).weekday()]
+        timestamp = pd.Timestamp(date)
         schedule = config.demand.hourly_schedule_library.get(
             config.demand.active_hourly_schedule_name,
             config.demand.hourly_weekly_fractions,
         )
-        raw_fractions = schedule.get(day_key, [])
-        fractions = [max(float(value), 0.0) for value in raw_fractions[:24]]
-        fractions.extend([0.0] * (24 - len(fractions)))
-        fraction_total = sum(fractions)
-        fractions = [value / fraction_total for value in fractions] if fraction_total > 0 else [1.0 / 24.0] * 24
+        fractions = _schedule_fractions_for_date(schedule, timestamp)
+        if not any(fractions):
+            fractions = [1.0 / 24.0] * 24
+        object_hourly_demands = [0.0] * 24
+        for demand_object in config.demand.demand_objects:
+            object_schedule = config.demand.hourly_schedule_library.get(demand_object.schedule_name)
+            if object_schedule is None:
+                continue
+            day_key = WEEKDAY_KEYS[timestamp.weekday()]
+            object_multipliers = [
+                min(max(float(value), 0.0), 1.0)
+                for value in object_schedule.get(day_key, [])[:24]
+            ]
+            object_multipliers.extend([0.0] * (24 - len(object_multipliers)))
+            object_flow = max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
+            for object_hour, object_multiplier in enumerate(object_multipliers):
+                object_hourly_demands[object_hour] += object_flow * object_multiplier * 60.0
         for hour, fraction in enumerate(fractions):
-            demand_hour = max(float(daily_demand.iloc[day_index]) * fraction, 0.0)
+            demand_hour = max(
+                float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
+                0.0,
+            )
             pump_flow = 0.0
             filter_throughput = 0.0
             filter_loss = 0.0
