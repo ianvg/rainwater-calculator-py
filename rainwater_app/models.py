@@ -42,6 +42,8 @@ class TankParameters:
 @dataclass
 class ProjectConfig:
     name: str
+    author_name: str = ""
+    notes: str = ""
     street_address: str = ""
     city: str = ""
     state_or_province: str = ""

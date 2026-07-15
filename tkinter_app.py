@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tkinter as tk
+import tkinter.font as tkfont
 import tempfile
 import threading
 import webbrowser
@@ -21,7 +22,9 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 import pycountry
+from tkintermapview import TkinterMapView, decimal_to_osm
 from pypdf import PdfWriter
+from pypdf.annotations import Link
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from rainwater_app.acis import default_complete_calendar_range, fetch_daily_station_data, fetch_station_options
@@ -243,6 +246,25 @@ def _float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _parse_coordinates(latitude_text: str, longitude_text: str) -> tuple[float | None, float | None]:
+    latitude_value = latitude_text.strip()
+    longitude_value = longitude_text.strip()
+    if not latitude_value and not longitude_value:
+        return None, None
+    if not latitude_value or not longitude_value:
+        raise ValueError("Enter both latitude and longitude, or leave both fields blank.")
+    try:
+        latitude = float(latitude_value)
+        longitude = float(longitude_value)
+    except ValueError as exc:
+        raise ValueError("Latitude and longitude must be numbers.") from exc
+    if not -90 <= latitude <= 90:
+        raise ValueError("Latitude must be between -90 and 90 degrees.")
+    if not -180 <= longitude <= 180:
+        raise ValueError("Longitude must be between -180 and 180 degrees.")
+    return latitude, longitude
+
+
 def _state_code(value: str) -> str:
     return value.split(" - ", 1)[0].strip().upper()
 
@@ -313,6 +335,97 @@ def _report_surface_rows(config: ProjectConfig) -> list[dict[str, object]]:
         }
         for surface in config.surfaces
         if surface.area > 0
+    ]
+
+
+def _report_demand_summary(results_df: pd.DataFrame, config: ProjectConfig) -> tuple[list[dict[str, object]], float]:
+    if results_df.empty or not {"Date", "DemandGallons"}.issubset(results_df.columns):
+        return (
+            [
+                {"month": MONTH_LABELS[key], "demand_per_day": 0.0, "demand_per_month": 0.0}
+                for key in MONTH_KEYS
+            ],
+            0.0,
+        )
+
+    demand = results_df[["Date", "DemandGallons"]].copy()
+    demand["Date"] = pd.to_datetime(demand["Date"], errors="coerce")
+    demand["DemandGallons"] = pd.to_numeric(demand["DemandGallons"], errors="coerce").fillna(0.0)
+    demand = demand.dropna(subset=["Date"])
+    monthly_average = demand.groupby(demand["Date"].dt.month)["DemandGallons"].mean()
+    monthly_totals = demand.groupby([demand["Date"].dt.year, demand["Date"].dt.month])["DemandGallons"].sum()
+    mean_monthly_totals = monthly_totals.groupby(level=1).mean()
+    annual_average = demand.groupby(demand["Date"].dt.year)["DemandGallons"].sum().mean()
+    rows = [
+        {
+            "month": MONTH_LABELS[key],
+            "demand_per_day": volume_to_display(float(monthly_average.get(index, 0.0)), config),
+            "demand_per_month": volume_to_display(float(mean_monthly_totals.get(index, 0.0)), config),
+        }
+        for index, key in enumerate(MONTH_KEYS, start=1)
+    ]
+    return rows, volume_to_display(float(annual_average), config)
+
+
+def _yearly_demand_reliability(results_df: pd.DataFrame) -> list[dict[str, float | int]]:
+    if results_df.empty or not {"Date", "DemandMet"}.issubset(results_df.columns):
+        return []
+    values = results_df[["Date", "DemandMet"]].copy()
+    values["Date"] = pd.to_datetime(values["Date"], errors="coerce")
+    values = values.dropna(subset=["Date"])
+    values["DemandMet"] = values["DemandMet"].fillna(False).astype(bool)
+    rows: list[dict[str, float | int]] = []
+    for year, group in values.groupby(values["Date"].dt.year, sort=True):
+        total_days = len(group)
+        met_days = int(group["DemandMet"].sum())
+        met_percent = (met_days / total_days) * 100.0 if total_days else 0.0
+        rows.append(
+            {
+                "year": int(year),
+                "total_days": total_days,
+                "met_days": met_days,
+                "unmet_days": total_days - met_days,
+                "met_percent": met_percent,
+                "unmet_percent": 100.0 - met_percent,
+            }
+        )
+    return rows
+
+
+def _report_average_annual_precipitation(rainfall_df: pd.DataFrame, config: ProjectConfig) -> float:
+    if rainfall_df.empty or not {"Date", "Precipitation"}.issubset(rainfall_df.columns):
+        return 0.0
+    rainfall = rainfall_df[["Date", "Precipitation"]].copy()
+    rainfall["Date"] = pd.to_datetime(rainfall["Date"], errors="coerce")
+    rainfall["Precipitation"] = pd.to_numeric(rainfall["Precipitation"], errors="coerce").fillna(0.0)
+    rainfall = rainfall.dropna(subset=["Date"])
+    annual_average = rainfall.groupby(rainfall["Date"].dt.year)["Precipitation"].sum().mean()
+    return precip_to_display(float(annual_average), config)
+
+
+def _report_tank_level_distribution(
+    results_df: pd.DataFrame, config: ProjectConfig, bin_count: int = 6
+) -> list[dict[str, float | int]]:
+    if results_df.empty or "WaterInTankGallons" not in results_df.columns or bin_count <= 0:
+        return []
+    levels = [
+        volume_to_display(max(float(value), 0.0), config)
+        for value in pd.to_numeric(results_df["WaterInTankGallons"], errors="coerce").fillna(0.0)
+    ]
+    selected_capacity = volume_to_display(config.selected_tank_size_gal, config)
+    upper = max(selected_capacity, max(levels, default=0.0), 1.0)
+    bin_width = upper / bin_count
+    counts = [0] * bin_count
+    for level in levels:
+        index = min(max(int(level / bin_width), 0), bin_count - 1)
+        counts[index] += 1
+    return [
+        {
+            "low": index * bin_width,
+            "high": (index + 1) * bin_width,
+            "count": count,
+        }
+        for index, count in enumerate(counts)
     ]
 
 
@@ -394,6 +507,43 @@ document.getElementById('use').addEventListener('click',async()=>{if(!selected)r
     )
 
 
+class _StationMapView(TkinterMapView):
+    """TkinterMapView variant that owns and cancels its recurring Tk callbacks."""
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        self._map_after_ids: set[str] = set()
+        super().__init__(*args, **kwargs)
+
+    def after(self, ms: int, func: object = None, *args: object) -> str:  # type: ignore[override]
+        if func is None:
+            return super().after(ms)
+        callback_id: list[str] = []
+
+        def run_tracked_callback() -> None:
+            if callback_id:
+                self._map_after_ids.discard(callback_id[0])
+            func(*args)  # type: ignore[operator]
+
+        after_id = super().after(ms, run_tracked_callback)
+        callback_id.append(after_id)
+        self._map_after_ids.add(after_id)
+        return after_id
+
+    def after_cancel(self, after_id: str) -> None:
+        self._map_after_ids.discard(after_id)
+        super().after_cancel(after_id)
+
+    def destroy(self) -> None:
+        self.running = False
+        for after_id in tuple(self._map_after_ids):
+            try:
+                super().after_cancel(after_id)
+            except tk.TclError:
+                pass
+        self._map_after_ids.clear()
+        super().destroy()
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -420,12 +570,20 @@ class RainwaterTkApp(tk.Tk):
         self.curve_df = pd.DataFrame()
         self.results_df = pd.DataFrame()
         self.station_options: list[dict] = []
+        self.station_map_markers: list[object] = []
+        self.station_map_marker_by_label: dict[str, object] = {}
+        self.station_map_rendered_zoom: int | None = None
+        self.station_map_redraw_after_id: str | None = None
+        self.station_map_selected_label = ""
 
         self.project_name_var = tk.StringVar(value=self.config_model.name)
+        self.author_name_var = tk.StringVar(value=self.config_model.author_name)
         self.street_address_var = tk.StringVar(value=self.config_model.street_address)
         self.city_var = tk.StringVar(value=self.config_model.city)
         self.state_or_province_var = tk.StringVar(value=self.config_model.state_or_province)
         self.postal_code_var = tk.StringVar(value=self.config_model.postal_code)
+        self.latitude_var = tk.StringVar()
+        self.longitude_var = tk.StringVar()
         self.coordinates_var = tk.StringVar(value="Coordinates: not selected")
         self.unit_var = tk.StringVar(value=self.config_model.unit_system)
         self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
@@ -570,6 +728,7 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
         file_menu.add_command(label="Run analysis", accelerator="Ctrl+R", command=self.run_analysis)
         file_menu.add_separator()
+        file_menu.add_command(label="Export results...", command=self.export_results)
         file_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
         file_menu.add_command(label="Export HTML report...", command=self.export_html_report)
         file_menu.add_separator()
@@ -604,6 +763,8 @@ class RainwaterTkApp(tk.Tk):
         if self.notebook.select() != str(self.results_tab):
             self.last_analysis_warning_key = None
             return
+        if not self.results_df.empty or not self.curve_df.empty:
+            self.after_idle(self._draw_saved_analysis_charts)
         previous_signature = self.config_model.analysis_input_signature
         if not previous_signature:
             return
@@ -738,10 +899,32 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_inputs_tab(self) -> None:
         self.inputs_tab.columnconfigure(0, weight=1)
-        self.inputs_tab.columnconfigure(1, weight=1)
-        self.inputs_tab.rowconfigure(1, weight=1)
+        self.inputs_tab.rowconfigure(0, weight=1)
+        frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        self.inputs_canvas = tk.Canvas(
+            self.inputs_tab,
+            highlightthickness=0,
+            borderwidth=0,
+            background=frame_background,
+        )
+        self.inputs_canvas.grid(row=0, column=0, sticky="nsew")
+        inputs_scroll_y = ttk.Scrollbar(self.inputs_tab, orient="vertical", command=self.inputs_canvas.yview)
+        inputs_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.inputs_canvas.configure(yscrollcommand=inputs_scroll_y.set)
+        self.inputs_content = ttk.Frame(self.inputs_canvas, padding=10)
+        self.inputs_canvas_window = self.inputs_canvas.create_window(
+            (0, 0), window=self.inputs_content, anchor="nw"
+        )
+        self.inputs_content.columnconfigure(0, weight=1)
+        self.inputs_content.columnconfigure(1, weight=1)
+        self.inputs_content.rowconfigure(3, weight=1)
+        self.inputs_content.bind("<Configure>", self._update_inputs_scrollregion)
+        self.inputs_canvas.bind("<Configure>", self._resize_inputs_content)
+        self.bind_all("<MouseWheel>", self._scroll_inputs_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._scroll_inputs_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._scroll_inputs_mousewheel, add="+")
 
-        project_frame = ttk.LabelFrame(self.inputs_tab, text="Project Settings", padding=10)
+        project_frame = ttk.LabelFrame(self.inputs_content, text="Project Settings", padding=10)
         project_frame.grid(row=0, column=0, columnspan=2, sticky="ew")
         project_frame.columnconfigure(1, weight=1)
         ttk.Label(project_frame, text="Project name").grid(row=0, column=0, sticky="w")
@@ -762,36 +945,80 @@ class RainwaterTkApp(tk.Tk):
         self.country_combo.configure(postcommand=self._bind_country_combo_dropdown)
         self.country_combo.bind("<KeyPress>", self._select_country_by_typed_prefix)
         self.country_combo.bind("<<ComboboxSelected>>", self._country_changed)
-        ttk.Button(project_frame, text="Find on OpenStreetMap...", command=self.find_project_location).grid(
-            row=1, column=0, columnspan=6, sticky="w", pady=(8, 0)
+        ttk.Label(project_frame, text="Produced by / author").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.author_name_var).grid(
+            row=1, column=1, columnspan=5, sticky="ew", padx=(8, 0), pady=(8, 0)
         )
-        ttk.Label(project_frame, text="Street address").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(project_frame, textvariable=self.street_address_var).grid(
-            row=2,
+
+        notes_frame = ttk.LabelFrame(self.inputs_content, text="Notes", padding=10)
+        notes_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        notes_frame.columnconfigure(0, weight=1)
+        self.project_notes_text = tk.Text(notes_frame, height=3, wrap="word", undo=True)
+        self.project_notes_text.grid(row=0, column=0, sticky="ew")
+        notes_scroll = ttk.Scrollbar(notes_frame, orient="vertical", command=self.project_notes_text.yview)
+        notes_scroll.grid(row=0, column=1, sticky="ns")
+        self.project_notes_text.configure(yscrollcommand=notes_scroll.set)
+
+        location_frame = ttk.LabelFrame(self.inputs_content, text="Project Location", padding=10)
+        location_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        location_frame.columnconfigure(1, weight=1)
+        location_frame.columnconfigure(3, weight=1)
+        location_frame.columnconfigure(5, weight=1)
+        location_buttons = ttk.Frame(location_frame)
+        location_buttons.grid(row=0, column=0, columnspan=6, sticky="w")
+        ttk.Button(location_buttons, text="Find on OpenStreetMap...", command=self.find_project_location).grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Button(
+            location_buttons,
+            text="Find nearest OSM address",
+            command=self.find_address_for_coordinates,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(location_frame, text="Street address").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.street_address_var).grid(
+            row=1,
             column=1,
             columnspan=5,
             sticky="ew",
             padx=(8, 0),
             pady=(8, 0),
         )
-        ttk.Label(project_frame, text="City").grid(row=3, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(project_frame, textvariable=self.city_var).grid(
-            row=3, column=1, sticky="ew", padx=(8, 20), pady=(8, 0)
+        ttk.Label(location_frame, text="City").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.city_var).grid(
+            row=2, column=1, sticky="ew", padx=(8, 20), pady=(8, 0)
         )
-        ttk.Label(project_frame, text="State / province / region").grid(row=3, column=2, sticky="w", pady=(8, 0))
-        ttk.Entry(project_frame, textvariable=self.state_or_province_var, width=18).grid(
-            row=3, column=3, sticky="ew", padx=(8, 20), pady=(8, 0)
+        ttk.Label(location_frame, text="State / province / region").grid(row=2, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.state_or_province_var, width=18).grid(
+            row=2, column=3, sticky="ew", padx=(8, 20), pady=(8, 0)
         )
-        ttk.Label(project_frame, text="Postal code").grid(row=3, column=4, sticky="w", pady=(8, 0))
-        ttk.Entry(project_frame, textvariable=self.postal_code_var, width=14).grid(
-            row=3, column=5, sticky="ew", padx=(8, 0), pady=(8, 0)
+        ttk.Label(location_frame, text="Postal code").grid(row=2, column=4, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.postal_code_var, width=14).grid(
+            row=2, column=5, sticky="ew", padx=(8, 0), pady=(8, 0)
         )
-        ttk.Label(project_frame, textvariable=self.coordinates_var, foreground="#5f6b70").grid(
+        ttk.Label(location_frame, text="Latitude").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.latitude_var, width=18).grid(
+            row=3, column=1, sticky="w", padx=(8, 20), pady=(8, 0)
+        )
+        ttk.Label(location_frame, text="Longitude").grid(row=3, column=2, sticky="w", pady=(8, 0))
+        ttk.Entry(location_frame, textvariable=self.longitude_var, width=18).grid(
+            row=3, column=3, sticky="w", padx=(8, 20), pady=(8, 0)
+        )
+        ttk.Label(location_frame, textvariable=self.coordinates_var, foreground="#5f6b70").grid(
             row=4, column=1, columnspan=5, sticky="w", pady=(6, 0)
         )
 
-        surfaces_frame = ttk.LabelFrame(self.inputs_tab, text="Collection surfaces", padding=10)
-        surfaces_frame.grid(row=1, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
+        surface_title = ttk.Frame(self.inputs_content)
+        ttk.Label(surface_title, text="Collection surfaces").grid(row=0, column=0, sticky="w")
+        surface_tip_button = ttk.Button(
+            surface_title,
+            text="ⓘ",
+            width=2,
+            command=self._show_collection_surface_tip,
+            takefocus=True,
+        )
+        surface_tip_button.grid(row=0, column=1, padx=(4, 0))
+        surfaces_frame = ttk.LabelFrame(self.inputs_content, labelwidget=surface_title, padding=10)
+        surfaces_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0), padx=(0, 5))
         surfaces_frame.rowconfigure(0, weight=1)
         surfaces_frame.columnconfigure(0, weight=1)
         self.surface_tree = ttk.Treeview(surfaces_frame, columns=("surface", "area", "runoff"), show="headings", height=12)
@@ -802,6 +1029,9 @@ class RainwaterTkApp(tk.Tk):
         self.surface_tree.column("area", width=90, anchor="e")
         self.surface_tree.column("runoff", width=90, anchor="e")
         self.surface_tree.grid(row=0, column=0, sticky="nsew")
+        surface_scroll_y = ttk.Scrollbar(surfaces_frame, orient="vertical", command=self.surface_tree.yview)
+        surface_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.surface_tree.configure(yscrollcommand=surface_scroll_y.set)
         self.surface_tree.bind("<Double-1>", self._edit_surface_from_event)
         self.surface_tree.bind("<Return>", self._edit_selected_surface_from_event)
         surface_buttons = ttk.Frame(surfaces_frame)
@@ -809,8 +1039,8 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(surface_buttons, text="Add collection surface", command=self.add_surface).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(surface_buttons, text="Edit selected surface", command=self.edit_surface).grid(row=0, column=1)
 
-        right_frame = ttk.Frame(self.inputs_tab)
-        right_frame.grid(row=1, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
+        right_frame = ttk.Frame(self.inputs_content)
+        right_frame.grid(row=3, column=1, sticky="nsew", pady=(10, 0), padx=(5, 0))
         right_frame.columnconfigure(0, weight=1)
 
         settings_frame = ttk.LabelFrame(right_frame, text="Demand and Analysis Settings", padding=10)
@@ -845,8 +1075,43 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 10, "Initial fill", self.initial_fill_var, self.percent_unit_var)
         self._labeled_entry(settings_frame, 11, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
 
+    def _update_inputs_scrollregion(self, _event: tk.Event | None = None) -> None:
+        self.inputs_canvas.configure(scrollregion=self.inputs_canvas.bbox("all"))
+
+    def _show_collection_surface_tip(self) -> None:
+        messagebox.showinfo(
+            "Collection surfaces",
+            "Enter the gross horizontal roof area projected over the ground. "
+            "For a sloped roof, use its plan-view footprint rather than the larger sloped surface area.",
+            parent=self,
+        )
+
+    def _resize_inputs_content(self, event: tk.Event) -> None:
+        self.inputs_canvas.itemconfigure(self.inputs_canvas_window, width=event.width)
+
+    def _scroll_inputs_mousewheel(self, event: tk.Event) -> str | None:
+        if self.notebook.select() != str(self.inputs_tab):
+            return None
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        canvas_x = self.inputs_canvas.winfo_rootx()
+        canvas_y = self.inputs_canvas.winfo_rooty()
+        if not (
+            canvas_x <= pointer_x < canvas_x + self.inputs_canvas.winfo_width()
+            and canvas_y <= pointer_y < canvas_y + self.inputs_canvas.winfo_height()
+        ):
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        self.inputs_canvas.yview_scroll(direction, "units")
+        return "break"
+
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
+        self.import_tab.rowconfigure(2, weight=1)
 
         csv_frame = ttk.LabelFrame(self.import_tab, text="Rainfall CSV", padding=10)
         csv_frame.grid(row=0, column=0, sticky="ew")
@@ -885,6 +1150,7 @@ class RainwaterTkApp(tk.Tk):
         self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
         self.station_combo.grid(row=4, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
         self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
+        self.station_combo.bind("<<ComboboxSelected>>", self._station_selection_changed)
         self.import_station_button = ttk.Button(
             self.weather_frame,
             text="Import Selected Station",
@@ -892,11 +1158,34 @@ class RainwaterTkApp(tk.Tk):
         )
         self.import_station_button.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(4, 0))
 
+        station_map_frame = ttk.LabelFrame(self.import_tab, text="Weather stations", padding=6)
+        station_map_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        station_map_frame.columnconfigure(0, weight=1)
+        station_map_frame.rowconfigure(0, weight=1)
+        self.station_map = _StationMapView(station_map_frame, width=800, height=260, corner_radius=0)
+        self.station_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
+        self.station_map.set_position(39.5, -98.35)
+        self.station_map.set_zoom(3)
+        self.station_map.grid(row=0, column=0, sticky="nsew")
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
+            self.station_map.canvas.bind(sequence, self._station_map_view_changed, add="+")
+        ttk.Label(
+            station_map_frame,
+            text="Map data © OpenStreetMap contributors",
+            foreground="#5f6b70",
+        ).grid(row=1, column=0, sticky="e", pady=(4, 0))
+
     def _build_demand_tab(self) -> None:
         self.demand_tab.columnconfigure(0, weight=1)
         self.demand_tab.rowconfigure(0, weight=1)
         columns = ["month"] + [field for field, _label in DEMAND_FIELDS]
-        self.demand_tree = ttk.Treeview(self.demand_tab, columns=columns, show="headings", height=14)
+        self.demand_tree = ttk.Treeview(
+            self.demand_tab,
+            columns=columns,
+            show="headings",
+            height=14,
+            style="MonthlyDemand.Treeview",
+        )
         self.demand_tree.heading("month", text="Month")
         self.demand_tree.column("month", width=80, anchor="w")
         for field, _label in DEMAND_FIELDS:
@@ -912,35 +1201,45 @@ class RainwaterTkApp(tk.Tk):
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
         self.results_tab.columnconfigure(1, weight=1)
-        self.results_tab.columnconfigure(2, weight=1)
         self.results_tab.rowconfigure(1, weight=1)
         self.results_tab.rowconfigure(2, weight=1)
+        self.results_tab.rowconfigure(3, weight=1)
 
         ttk.Label(self.results_tab, textvariable=self.reliability_var, font=("Segoe UI", 12, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Checkbutton(
-            self.results_tab,
+        self.curve_canvas = tk.Canvas(self.results_tab, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
+        self.tank_canvas = tk.Canvas(self.results_tab, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=(5, 0))
+        self.tank_points_check = ttk.Checkbutton(
+            self.tank_canvas,
             text="Show tank chart points",
             variable=self.show_tank_points_var,
             command=self._draw_tank_chart,
-        ).grid(row=0, column=1, columnspan=2, sticky="e")
-        self.curve_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
-        self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
-        self.tank_canvas = tk.Canvas(self.results_tab, height=230, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
-        self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=5)
+        )
+        self.tank_points_check.place(x=58, rely=1, y=-4, anchor="sw")
         self.histogram_canvas = tk.Canvas(
             self.results_tab,
-            height=230,
+            height=170,
             bg="white",
             highlightthickness=1,
             highlightbackground="#b7b7b7",
         )
-        self.histogram_canvas.grid(row=1, column=2, sticky="nsew", pady=(8, 8), padx=(5, 0))
+        self.histogram_canvas.grid(row=2, column=0, sticky="nsew", pady=(0, 8), padx=(0, 5))
+        self.yearly_reliability_canvas = tk.Canvas(
+            self.results_tab,
+            height=170,
+            bg="white",
+            highlightthickness=1,
+            highlightbackground="#b7b7b7",
+        )
+        self.yearly_reliability_canvas.grid(row=2, column=1, sticky="nsew", pady=(0, 8), padx=(5, 0))
         self.curve_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
         self.tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
         self.histogram_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
+        self.yearly_reliability_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
         columns = ("date", "precip", "collected", "overflow", "demand", "unmet", "tank")
-        self.results_tree = ttk.Treeview(self.results_tab, columns=columns, show="headings", height=12)
+        self.results_tree = ttk.Treeview(self.results_tab, columns=columns, show="headings", height=7)
         headings = {
             "date": "Date",
             "precip": "Precip.",
@@ -953,11 +1252,11 @@ class RainwaterTkApp(tk.Tk):
         for col, heading in headings.items():
             self.results_tree.heading(col, text=heading)
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
-        self.results_tree.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        self.results_tree.grid(row=3, column=0, columnspan=2, sticky="nsew")
         results_scroll_y = ttk.Scrollbar(self.results_tab, orient="vertical", command=self.results_tree.yview)
-        results_scroll_y.grid(row=2, column=3, sticky="ns")
+        results_scroll_y.grid(row=3, column=2, sticky="ns")
         results_scroll_x = ttk.Scrollbar(self.results_tab, orient="horizontal", command=self.results_tree.xview)
-        results_scroll_x.grid(row=3, column=0, columnspan=3, sticky="ew")
+        results_scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
         self.results_tree.configure(yscrollcommand=results_scroll_y.set, xscrollcommand=results_scroll_x.set)
 
     def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
@@ -973,6 +1272,12 @@ class RainwaterTkApp(tk.Tk):
         except ValueError:
             show_warning = False
         self.selected_tank_warning_var.set("!" if show_warning else "")
+
+    def _set_selected_tank_reliability(self, reliability: float) -> None:
+        tank_size = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
+        self.reliability_var.set(
+            f"Reliability for {tank_size:,.0f} {volume_unit(self.config_model)} tank: {reliability:.2f}%"
+        )
 
     def _select_state_by_first_letter(self, event: tk.Event) -> str | None:
         return self._select_state_by_char(str(event.char))
@@ -1133,6 +1438,7 @@ class RainwaterTkApp(tk.Tk):
         for index, label in enumerate(labels):
             if str(label).casefold().startswith(prefix):
                 self.station_combo.current(index)
+                self._update_station_marker_selection()
                 if listbox is not None:
                     if isinstance(listbox, str):
                         self.tk.call(listbox, "selection", "clear", 0, "end")
@@ -1150,6 +1456,138 @@ class RainwaterTkApp(tk.Tk):
     def _reset_station_typeahead(self) -> None:
         self.station_typeahead = ""
         self.station_typeahead_after_id = None
+
+    @staticmethod
+    def _station_coordinates(station: dict) -> tuple[float, float] | None:
+        try:
+            latitude = float(station["latitude"])
+            longitude = float(station["longitude"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+            return None
+        return latitude, longitude
+
+    def _station_selection_changed(self, _event: tk.Event | None = None) -> None:
+        self._reset_station_typeahead()
+        self._update_station_marker_selection()
+
+    def _station_marker_clicked(self, marker: object) -> None:
+        marker_data = getattr(marker, "data", {})
+        labels_in_marker = marker_data.get("labels", []) if isinstance(marker_data, dict) else []
+        if len(labels_in_marker) > 1:
+            latitude, longitude = getattr(marker, "position")
+            self.station_map.set_position(latitude, longitude)
+            self.station_map.set_zoom(min(round(self.station_map.zoom) + 2, self.station_map.max_zoom))
+            self._schedule_station_map_redraw()
+            return
+        label = str(labels_in_marker[0]) if labels_in_marker else ""
+        labels = list(self.station_combo["values"])
+        if label not in labels:
+            return
+        self.station_combo.current(labels.index(label))
+        self.station_combo.focus_set()
+        self._station_selection_changed()
+
+    @classmethod
+    def _cluster_stations(cls, stations: list[dict], zoom: int, cluster_pixels: int = 70) -> list[list[dict]]:
+        clusters: dict[tuple[int, int], list[dict]] = {}
+        for station in stations:
+            coordinates = cls._station_coordinates(station)
+            if coordinates is None:
+                continue
+            tile_x, tile_y = decimal_to_osm(*coordinates, zoom)
+            key = (int(tile_x * 256 // cluster_pixels), int(tile_y * 256 // cluster_pixels))
+            clusters.setdefault(key, []).append(station)
+        return list(clusters.values())
+
+    def _clear_station_map_markers(self) -> None:
+        markers = tuple(self.station_map_markers)
+        self.station_map_markers = []
+        self.station_map_marker_by_label = {}
+        for marker in markers:
+            try:
+                marker.delete()
+            except (IndexError, tk.TclError):
+                pass
+
+    def _render_station_map(self, *, fit_bounds: bool) -> None:
+        if not hasattr(self, "station_map") or not self.station_map.winfo_exists():
+            return
+        self._clear_station_map_markers()
+        selected_label = self.station_var.get()
+        self.station_map_selected_label = selected_label
+        valid_stations = [station for station in self.station_options if self._station_coordinates(station) is not None]
+        positions = [self._station_coordinates(station) for station in valid_stations]
+        zoom = max(round(self.station_map.zoom), 1)
+        self.station_map_rendered_zoom = zoom
+        for cluster in self._cluster_stations(valid_stations, zoom):
+            cluster_positions = [self._station_coordinates(station) for station in cluster]
+            latitude = sum(position[0] for position in cluster_positions if position is not None) / len(cluster_positions)
+            longitude = sum(position[1] for position in cluster_positions if position is not None) / len(cluster_positions)
+            labels = [self._station_label(station) for station in cluster]
+            selected = selected_label in labels
+            marker_text = labels[0] if selected and len(labels) == 1 else f"{len(labels)} stations" if len(labels) > 1 else None
+            marker = self.station_map.set_marker(
+                latitude,
+                longitude,
+                text=marker_text,
+                command=self._station_marker_clicked,
+                data={"labels": labels},
+                marker_color_circle="#b71c1c" if selected else "#1565c0",
+                marker_color_outside="#d32f2f" if selected else "#1976d2",
+            )
+            self.station_map_markers.append(marker)
+            for label in labels:
+                self.station_map_marker_by_label[label] = marker
+        if not fit_bounds or not positions:
+            return
+        if len(positions) == 1:
+            self.station_map.set_position(*positions[0])
+            self.station_map.set_zoom(10)
+            self._schedule_station_map_redraw()
+            return
+        latitudes = [position[0] for position in positions]
+        longitudes = [position[1] for position in positions]
+        latitude_padding = max((max(latitudes) - min(latitudes)) * 0.06, 0.05)
+        longitude_padding = max((max(longitudes) - min(longitudes)) * 0.06, 0.05)
+        self.station_map.fit_bounding_box(
+            (max(latitudes) + latitude_padding, min(longitudes) - longitude_padding),
+            (min(latitudes) - latitude_padding, max(longitudes) + longitude_padding),
+        )
+        self._schedule_station_map_redraw()
+
+    def _update_station_marker_selection(self) -> None:
+        selected_label = self.station_var.get()
+        markers_to_update = {
+            marker
+            for label in (self.station_map_selected_label, selected_label)
+            if (marker := self.station_map_marker_by_label.get(label)) is not None
+        }
+        self.station_map_selected_label = selected_label
+        for marker in markers_to_update:
+            marker_data = getattr(marker, "data", {})
+            labels = marker_data.get("labels", []) if isinstance(marker_data, dict) else []
+            selected = selected_label in labels
+            marker.marker_color_circle = "#b71c1c" if selected else "#1565c0"
+            marker.marker_color_outside = "#d32f2f" if selected else "#1976d2"
+            text = labels[0] if selected and len(labels) == 1 else f"{len(labels)} stations" if len(labels) > 1 else None
+            marker.set_text(text)
+
+    def _station_map_view_changed(self, _event: tk.Event | None = None) -> None:
+        self._schedule_station_map_redraw()
+
+    def _schedule_station_map_redraw(self) -> None:
+        if self.station_map_redraw_after_id is not None:
+            self.after_cancel(self.station_map_redraw_after_id)
+        self.station_map_redraw_after_id = self.after(250, self._redraw_station_map_for_zoom)
+
+    def _redraw_station_map_for_zoom(self) -> None:
+        self.station_map_redraw_after_id = None
+        if not hasattr(self, "station_map") or not self.station_map.winfo_exists():
+            return
+        if round(self.station_map.zoom) != self.station_map_rendered_zoom:
+            self._render_station_map(fit_bounds=False)
 
     def _bind_station_combo_dropdown(self) -> None:
         self.after_idle(self._bind_station_combo_listbox)
@@ -1184,10 +1622,15 @@ class RainwaterTkApp(tk.Tk):
     def _populate_from_model(self) -> None:
         cfg = self.config_model
         self.project_name_var.set(cfg.name)
+        self.author_name_var.set(cfg.author_name)
+        self.project_notes_text.delete("1.0", tk.END)
+        self.project_notes_text.insert("1.0", cfg.notes)
         self.street_address_var.set(cfg.street_address)
         self.city_var.set(cfg.city)
         self.state_or_province_var.set(cfg.state_or_province)
         self.postal_code_var.set(cfg.postal_code)
+        self.latitude_var.set("" if cfg.latitude is None else f"{cfg.latitude:.8f}")
+        self.longitude_var.set("" if cfg.longitude is None else f"{cfg.longitude:.8f}")
         self._update_coordinates_label()
         self.unit_var.set(cfg.unit_system)
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
@@ -1224,10 +1667,17 @@ class RainwaterTkApp(tk.Tk):
     def _apply_form_to_model(self) -> bool:
         cfg = self.config_model
         cfg.name = self.project_name_var.get().strip() or "Unnamed Project"
+        cfg.author_name = self.author_name_var.get().strip()
+        cfg.notes = self.project_notes_text.get("1.0", "end-1c").strip()
         cfg.street_address = self.street_address_var.get().strip()
         cfg.city = self.city_var.get().strip()
         cfg.state_or_province = self.state_or_province_var.get().strip()
         cfg.postal_code = self.postal_code_var.get().strip()
+        try:
+            cfg.latitude, cfg.longitude = _parse_coordinates(self.latitude_var.get(), self.longitude_var.get())
+            self._update_coordinates_label()
+        except ValueError:
+            pass
         cfg.country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(self.canadian_precip_var.get(), "TOTAL_PRECIPITATION")
         if cfg.country_code == "CAN":
@@ -1282,12 +1732,33 @@ class RainwaterTkApp(tk.Tk):
 
     def _update_demand_headings(self) -> None:
         unit = volume_unit(self.config_model)
+        demand_style = ttk.Style(self)
+        demand_style.configure("MonthlyDemand.Treeview.Heading", padding=(4, 16))
+        heading_font_name = demand_style.lookup("MonthlyDemand.Treeview.Heading", "font") or "TkHeadingFont"
+        heading_font = tkfont.nametofont(str(heading_font_name))
+        month_minimum_width = heading_font.measure("Month") + 18
+        self.demand_tree.column("month", minwidth=month_minimum_width, width=max(80, month_minimum_width))
         for field, label in DEMAND_FIELDS:
             if field in {"male_occupancy", "female_occupancy"}:
                 heading = f"{label} (people/day)"
             else:
                 heading = f"{label} ({unit}/month)"
-            self.demand_tree.heading(field, text=heading)
+            words = heading.split()
+            minimum_width = max(heading_font.measure(word) for word in words) + 18
+            target_width = max(105, minimum_width)
+            lines: list[str] = []
+            current_line = ""
+            for word in words:
+                candidate = word if not current_line else f"{current_line} {word}"
+                if current_line and heading_font.measure(candidate) + 18 > target_width:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    current_line = candidate
+            if current_line:
+                lines.append(current_line)
+            self.demand_tree.column(field, minwidth=minimum_width, width=target_width)
+            self.demand_tree.heading(field, text="\n".join(lines))
 
     def _update_rainfall_summary(self) -> None:
         if self.rainfall_df.empty:
@@ -1322,9 +1793,25 @@ class RainwaterTkApp(tk.Tk):
         else:
             self.coordinates_var.set(f"Coordinates: {latitude:.6f}, {longitude:.6f}")
 
+    def _coordinates_from_form(self, *, require_coordinates: bool) -> tuple[float | None, float | None] | None:
+        try:
+            latitude, longitude = _parse_coordinates(self.latitude_var.get(), self.longitude_var.get())
+        except ValueError as exc:
+            messagebox.showwarning(APP_TITLE, str(exc))
+            return None
+        if require_coordinates and (latitude is None or longitude is None):
+            messagebox.showinfo(APP_TITLE, "Enter latitude and longitude first.")
+            return None
+        self.config_model.latitude = latitude
+        self.config_model.longitude = longitude
+        self._update_coordinates_label()
+        return latitude, longitude
+
     def find_project_location(self) -> None:
-        latitude = self.config_model.latitude
-        longitude = self.config_model.longitude
+        coordinates = self._coordinates_from_form(require_coordinates=False)
+        if coordinates is None:
+            return
+        latitude, longitude = coordinates
         has_location = latitude is not None and longitude is not None
         if not has_location:
             country = self._selected_country_code()
@@ -1357,6 +1844,22 @@ class RainwaterTkApp(tk.Tk):
         if self.location_poll_after_id is None:
             self.location_poll_after_id = self.after(100, self._poll_location_results)
 
+    def find_address_for_coordinates(self) -> None:
+        coordinates = self._coordinates_from_form(require_coordinates=True)
+        if coordinates is None:
+            return
+        latitude, longitude = coordinates
+        assert latitude is not None and longitude is not None
+        self.status_var.set("Finding the nearest OpenStreetMap address...")
+        threading.Thread(
+            target=self._reverse_geocode_project_location,
+            args=(latitude, longitude),
+            name="rwh-reverse-geocode",
+            daemon=True,
+        ).start()
+        if self.location_poll_after_id is None:
+            self.location_poll_after_id = self.after(100, self._poll_location_results)
+
     def _poll_location_results(self) -> None:
         self.location_poll_after_id = None
         try:
@@ -1367,6 +1870,8 @@ class RainwaterTkApp(tk.Tk):
                     latitude, longitude = float(result[1]), float(result[2])
                     self.config_model.latitude = latitude
                     self.config_model.longitude = longitude
+                    self.latitude_var.set(f"{latitude:.8f}")
+                    self.longitude_var.set(f"{longitude:.8f}")
                     self._update_coordinates_label()
                     self.after(150, self._focus_main_window)
                     self.status_var.set("Finding the nearest OpenStreetMap address...")
@@ -1379,10 +1884,10 @@ class RainwaterTkApp(tk.Tk):
                 elif kind == "address":
                     self._apply_reverse_geocode_result(result[1])
                 elif kind == "error":
-                    self.status_var.set("Coordinates selected; address lookup failed")
+                    self.status_var.set("OpenStreetMap address lookup failed")
                     messagebox.showwarning(
                         APP_TITLE,
-                        f"The exact coordinates were saved, but the nearest address could not be found:\n{result[1]}",
+                        f"The coordinates were saved, but the nearest address could not be found:\n{result[1]}",
                     )
         except queue.Empty:
             pass
@@ -1529,7 +2034,7 @@ class RainwaterTkApp(tk.Tk):
             self._add_recent_project_path(self.project_file_path)
             if not self.results_df.empty and not self.curve_df.empty:
                 reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
-                self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
+                self._set_selected_tank_reliability(reliability)
                 self._populate_results()
                 self.after_idle(self._draw_saved_analysis_charts)
                 self.status_var.set(f"Loaded project '{name}' with saved analysis")
@@ -1768,6 +2273,7 @@ class RainwaterTkApp(tk.Tk):
         self.station_combo["values"] = labels
         self.station_var.set(labels[0] if labels else "")
         self._reset_station_typeahead()
+        self._render_station_map(fit_bounds=True)
         descriptor = "ECCC climate station(s)" if provider == "ECCC" else "ACIS station(s)"
         self.status_var.set(f"Found {len(self.station_options)} {descriptor}")
 
@@ -1785,6 +2291,8 @@ class RainwaterTkApp(tk.Tk):
         self.station_options = []
         if hasattr(self, "station_combo"):
             self.station_combo["values"] = []
+        if hasattr(self, "station_map"):
+            self._clear_station_map_markers()
         self._reset_station_typeahead()
 
     def import_acis_weather(self) -> None:
@@ -1974,7 +2482,7 @@ class RainwaterTkApp(tk.Tk):
             self.status_var.set("Analysis running: Part B - drawing results")
             self.update_idletasks()
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
-            self.reliability_var.set(f"Reliability for selected tank: {reliability:.2f}%")
+            self._set_selected_tank_reliability(reliability)
             self._populate_results()
             self._draw_saved_analysis_charts()
             cfg.analysis_input_signature = analysis_input_signature(cfg, self.rainfall_df)
@@ -2117,6 +2625,19 @@ class RainwaterTkApp(tk.Tk):
         webbrowser.open(f"http://127.0.0.1:{port}/{quote(html_path.name)}")
 
     def destroy(self) -> None:
+        for after_id_name in (
+            "station_typeahead_after_id",
+            "state_typeahead_after_id",
+            "country_typeahead_after_id",
+            "station_map_redraw_after_id",
+        ):
+            after_id = getattr(self, after_id_name, None)
+            if after_id is not None:
+                try:
+                    self.after_cancel(after_id)
+                except tk.TclError:
+                    pass
+                setattr(self, after_id_name, None)
         if self.station_lookup_poll_after_id is not None:
             self.after_cancel(self.station_lookup_poll_after_id)
             self.station_lookup_poll_after_id = None
@@ -2130,6 +2651,8 @@ class RainwaterTkApp(tk.Tk):
         for preview in self.report_preview_directories:
             preview.cleanup()
         self.report_preview_directories.clear()
+        if hasattr(self, "station_map") and self.station_map.winfo_exists():
+            self.station_map.destroy()
         super().destroy()
 
     def _default_report_metadata(self) -> dict[str, str]:
@@ -2151,6 +2674,7 @@ class RainwaterTkApp(tk.Tk):
             "date": dt.date.today().isoformat(),
             "location": location,
             "project_name": self.project_name_var.get().strip() or self.config_model.name,
+            "author_name": self.author_name_var.get().strip(),
             "end_uses": end_uses,
         }
 
@@ -2170,14 +2694,28 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_report_content(self, metadata: dict[str, str]) -> dict[str, object]:
         cfg = self.config_model
+        monthly_demand, total_annual_demand = _report_demand_summary(self.results_df, cfg)
+        precipitation_field = (
+            cfg.canadian_precipitation_field if cfg.country_code == "CAN" else cfg.acis_precipitation_field
+        )
         selected_reliability: float | None = None
         if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
             selected_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
         return {
             "metadata": dict(metadata),
+            "notes": cfg.notes,
             "area_unit": area_unit(cfg),
             "volume_unit": volume_unit(cfg),
+            "precipitation_unit": precip_unit(cfg),
+            "average_annual_precipitation": _report_average_annual_precipitation(self.rainfall_df, cfg),
+            "precipitation_basis": CANADIAN_PRECIPITATION_LABELS.get(
+                precipitation_field, "Total precipitation"
+            ),
             "surfaces": _report_surface_rows(cfg),
+            "monthly_demand": monthly_demand,
+            "total_annual_demand": total_annual_demand,
+            "yearly_reliability": _yearly_demand_reliability(self.results_df),
+            "tank_level_distribution": _report_tank_level_distribution(self.results_df, cfg),
             "curve": [
                 {
                     "tank_size": volume_to_display(row.TankSizeGallons, cfg),
@@ -2185,6 +2723,7 @@ class RainwaterTkApp(tk.Tk):
                 }
                 for row in self.curve_df.itertuples(index=False)
             ],
+            "selected_tank_size": volume_to_display(cfg.selected_tank_size_gal, cfg),
             "selected_reliability": selected_reliability,
         }
 
@@ -2202,6 +2741,17 @@ class RainwaterTkApp(tk.Tk):
         )
         if not surface_rows:
             surface_rows = _latex_row("No collection surfaces", "0.00", "0.000")
+        demand_rows = "\n".join(
+            _latex_row(
+                report["monthly_demand"][index]["month"],
+                f"{report['monthly_demand'][index]['demand_per_day']:,.0f}",
+                f"{report['monthly_demand'][index]['demand_per_month']:,.0f}",
+                report["monthly_demand"][index + 6]["month"],
+                f"{report['monthly_demand'][index + 6]['demand_per_day']:,.0f}",
+                f"{report['monthly_demand'][index + 6]['demand_per_month']:,.0f}",
+            )
+            for index in range(6)
+        )
 
         coordinates = "\n".join(
             f"({_latex_number(point['tank_size'])},{_latex_number(point['reliability'])})"
@@ -2210,6 +2760,34 @@ class RainwaterTkApp(tk.Tk):
         selected_reliability = "--"
         if report["selected_reliability"] is not None:
             selected_reliability = f"{report['selected_reliability']:.2f}\\%"
+        author_line = ""
+        if metadata.get("author_name", "").strip():
+            author_line = rf"\noindent\textbf{{Produced by:}} {_latex_escape(metadata['author_name'])}\par\medskip"
+        notes_latex = _latex_escape(report.get("notes", "").strip() or "No notes provided.")
+        notes_latex = notes_latex.replace("\n\n", r"\par\medskip ").replace("\n", r"\par ")
+        selected_marker = ""
+        if report["selected_reliability"] is not None:
+            selected_marker = rf"""
+\addplot+[only marks, mark=o, red, mark size=7pt, very thick] coordinates {{
+({_latex_number(report['selected_tank_size'])},{_latex_number(report['selected_reliability'])})
+}};
+"""
+        yearly_met_coordinates = " ".join(
+            f"({_latex_number(row['year'])},{_latex_number(row['met_percent'])})"
+            for row in report["yearly_reliability"]
+        )
+        yearly_unmet_coordinates = " ".join(
+            f"({_latex_number(row['year'])},{_latex_number(row['unmet_percent'])})"
+            for row in report["yearly_reliability"]
+        )
+        distribution_coordinates = " ".join(
+            f"({_latex_number(index + 1)},{_latex_number(row['count'])})"
+            for index, row in enumerate(report["tank_level_distribution"])
+        )
+        distribution_labels = ",".join(
+            _latex_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
+            for row in report["tank_level_distribution"]
+        )
 
         return rf"""\documentclass[11pt]{{article}}
 \usepackage[margin=0.75in]{{geometry}}
@@ -2217,6 +2795,7 @@ class RainwaterTkApp(tk.Tk):
 \usepackage{{pgfplots}}
 \usepackage{{longtable}}
 \usepackage{{array}}
+\usepackage[hidelinks]{{hyperref}}
 \pgfplotsset{{compat=1.18}}
 
 \title{{RWH Calculator Report}}
@@ -2224,18 +2803,26 @@ class RainwaterTkApp(tk.Tk):
 
 \begin{{document}}
 \maketitle
+{author_line}
+\tableofcontents
+\newpage
 
-\section*{{Project Information}}
+\section{{Project Information}}
 \begin{{tabular}}{{@{{}}p{{1.6in}}p{{4.8in}}@{{}}}}
 \textbf{{Client name}} & {_latex_escape(metadata["client_name"])} \\
 \textbf{{Date}} & {_latex_escape(metadata["date"])} \\
 \textbf{{Location}} & {_latex_escape(metadata["location"])} \\
 \textbf{{Project name}} & {_latex_escape(metadata["project_name"])} \\
 \textbf{{End-uses of water}} & {_latex_escape(metadata["end_uses"])} \\
+\textbf{{Average annual precipitation}} & {_latex_number(report['average_annual_precipitation'])} {_latex_escape(report['precipitation_unit'])} \\
+\textbf{{Precipitation basis}} & {_latex_escape(report['precipitation_basis'])} \\
 \textbf{{Selected tank reliability}} & {selected_reliability} \\
 \end{{tabular}}
 
-\section*{{Surface Area Summary}}
+\section{{Notes}}
+{notes_latex}
+
+\section{{Surface Area Summary}}
 \begin{{longtable}}{{@{{}}p{{2.8in}}rr@{{}}}}
 \toprule
 Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
@@ -2244,7 +2831,31 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
 \bottomrule
 \end{{longtable}}
 
-\section*{{Reliability Curve}}
+\section{{Tank Summary}}
+\begin{{tabular}}{{@{{}}lr@{{}}}}
+\toprule
+Tank property & Value \\
+\midrule
+Size & {_latex_number(report['selected_tank_size'])} {_latex_escape(volume)} \\
+\bottomrule
+\end{{tabular}}
+
+\section{{Demand Summary}}
+\small
+\begin{{tabular}}{{@{{}}lrrlrr@{{}}}}
+\toprule
+Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/month) & Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/month) \\
+\midrule
+{demand_rows}
+\midrule
+\addlinespace[1pt]
+\midrule
+\multicolumn{{5}}{{r}}{{\textbf{{Total Annual Demand}}}} & \textbf{{{_latex_escape(f"{float(report['total_annual_demand']):,.0f}")} {_latex_escape(volume)}}} \\
+\bottomrule
+\end{{tabular}}
+\normalsize
+
+\section{{Reliability Curve}}
 \begin{{center}}
 \begin{{tikzpicture}}
 \begin{{axis}}[
@@ -2260,6 +2871,51 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
 \addplot+[blue, thick] coordinates {{
 {coordinates}
 }};
+{selected_marker}
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+
+\section{{Yearly Demand Reliability}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    width=6.6in,
+    height=3.8in,
+    ybar stacked,
+    ymin=0,
+    ymax=100,
+    ylabel={{Days (\%)}},
+    xlabel={{Year}},
+    xtick=data,
+    x tick label style={{rotate=45, anchor=east, font=\scriptsize}},
+    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=2}},
+    grid=major,
+]
+\addplot+[fill=green!65!black, draw=green!45!black] coordinates {{{yearly_met_coordinates}}};
+\addplot+[fill=red!65, draw=red!60!black] coordinates {{{yearly_unmet_coordinates}}};
+\legend{{Demand met,Demand not met}}
+\end{{axis}}
+\end{{tikzpicture}}
+\end{{center}}
+
+\section{{Tank Level Distribution}}
+\begin{{center}}
+\begin{{tikzpicture}}
+\begin{{axis}}[
+    width=6.6in,
+    height=3.8in,
+    ybar,
+    ymin=0,
+    ylabel={{Days}},
+    xlabel={{Tank level range ({_latex_escape(volume)})}},
+    xtick={{1,...,6}},
+    xticklabels={{{distribution_labels}}},
+    x tick label style={{rotate=30, anchor=east, font=\scriptsize}},
+    nodes near coords,
+    grid=major,
+]
+\addplot+[fill=green!65!black, draw=green!45!black] coordinates {{{distribution_coordinates}}};
 \end{{axis}}
 \end{{tikzpicture}}
 \end{{center}}
@@ -2277,12 +2933,23 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
             f"<td>{surface['runoff_coefficient']:.3f}</td></tr>"
             for surface in surfaces
         ) or '<tr><td>No collection surfaces</td><td>0.00</td><td>0.000</td></tr>'
+        demand_rows = "".join(
+            f"<tr><td>{escape(report['monthly_demand'][index]['month'])}</td>"
+            f"<td>{float(report['monthly_demand'][index]['demand_per_day']):,.0f}</td>"
+            f"<td>{float(report['monthly_demand'][index]['demand_per_month']):,.0f}</td>"
+            f"<td>{escape(report['monthly_demand'][index + 6]['month'])}</td>"
+            f"<td>{float(report['monthly_demand'][index + 6]['demand_per_day']):,.0f}</td>"
+            f"<td>{float(report['monthly_demand'][index + 6]['demand_per_month']):,.0f}</td></tr>"
+            for index in range(6)
+        )
 
         chart_width, chart_height = 900.0, 420.0
         left, right, top, bottom = 72.0, 24.0, 28.0, 62.0
         plot_width = chart_width - left - right
         plot_height = chart_height - top - bottom
         x_values = [float(point["tank_size"]) for point in curve]
+        if report["selected_reliability"] is not None:
+            x_values.append(float(report["selected_tank_size"]))
         x_min, x_max = min(x_values), max(x_values)
         if x_min == x_max:
             x_max = x_min + 1
@@ -2303,6 +2970,16 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
             f'{float(point["reliability"]):.2f}% reliability</title></circle>'
             for point in curve
         )
+        selected_marker = ""
+        if report["selected_reliability"] is not None:
+            selected_x = chart_x(float(report["selected_tank_size"]))
+            selected_y = chart_y(float(report["selected_reliability"]))
+            selected_marker = (
+                f'<circle class="selected-tank" cx="{selected_x:.2f}" cy="{selected_y:.2f}" r="10">'
+                f'<title>Selected tank: {float(report["selected_tank_size"]):,.0f} '
+                f'{escape(report["volume_unit"])} at {float(report["selected_reliability"]):.2f}% reliability</title>'
+                "</circle>"
+            )
         y_grid = "".join(
             f'<line x1="{left}" y1="{chart_y(value):.2f}" x2="{left + plot_width}" y2="{chart_y(value):.2f}" />'
             f'<text x="{left - 14}" y="{chart_y(value) + 4:.2f}" text-anchor="end">{value}</text>'
@@ -2315,6 +2992,9 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
         )
         selected = report["selected_reliability"]
         selected_text = "--" if selected is None else f"{selected:.2f}%"
+        author_html = ""
+        if metadata.get("author_name", "").strip():
+            author_html = f'<p class="author">Produced by {escape(metadata["author_name"])}</p>'
         info_rows = "".join(
             f'<div class="fact"><dt>{escape(label)}</dt><dd>{escape(value or "Not specified")}</dd></div>'
             for label, value in [
@@ -2323,8 +3003,85 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient \\
                 ("Location", metadata["location"]),
                 ("Project name", metadata["project_name"]),
                 ("End-uses of water", metadata["end_uses"]),
+                (
+                    "Average annual precipitation",
+                    f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+                ),
+                ("Precipitation basis", report["precipitation_basis"]),
                 ("Selected tank reliability", selected_text),
             ]
+        )
+        notes_html = escape(report.get("notes", "").strip() or "No notes provided.")
+        yearly = report["yearly_reliability"]
+        yearly_chart_width = max(900.0, 90.0 + len(yearly) * 24.0)
+        yearly_chart_height = 420.0
+        yearly_left, yearly_right, yearly_top, yearly_bottom = 72.0, 24.0, 38.0, 62.0
+        yearly_plot_width = yearly_chart_width - yearly_left - yearly_right
+        yearly_plot_height = yearly_chart_height - yearly_top - yearly_bottom
+        yearly_baseline = yearly_top + yearly_plot_height
+        yearly_bars = ""
+        yearly_labels = ""
+        if yearly:
+            yearly_slot = yearly_plot_width / len(yearly)
+            yearly_label_step = max((len(yearly) + 9) // 10, 1)
+            for index, row in enumerate(yearly):
+                bar_x = yearly_left + index * yearly_slot + max(yearly_slot * 0.15, 1.0)
+                bar_width = max(yearly_slot * 0.7, 1.0)
+                met_height = yearly_plot_height * float(row["met_percent"]) / 100.0
+                unmet_height = yearly_plot_height - met_height
+                tooltip = (
+                    f"{int(row['year'])}: demand met {int(row['met_days'])} days "
+                    f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
+                    f"({float(row['unmet_percent']):.2f}%)"
+                )
+                yearly_bars += (
+                    f'<rect class="year-met" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
+                    f'width="{bar_width:.2f}" height="{met_height:.2f}"><title>{escape(tooltip)}</title></rect>'
+                    f'<rect class="year-unmet" x="{bar_x:.2f}" y="{yearly_top:.2f}" '
+                    f'width="{bar_width:.2f}" height="{unmet_height:.2f}"><title>{escape(tooltip)}</title></rect>'
+                )
+                if index % yearly_label_step == 0 or index == len(yearly) - 1:
+                    yearly_labels += (
+                        f'<text x="{bar_x + bar_width / 2:.2f}" y="{yearly_baseline + 22:.2f}" '
+                        f'text-anchor="middle">{int(row["year"])}</text>'
+                    )
+        yearly_grid = "".join(
+            f'<line x1="{yearly_left}" y1="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" '
+            f'x2="{yearly_left + yearly_plot_width}" y2="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" />'
+            f'<text x="{yearly_left - 12}" y="{yearly_top + yearly_plot_height * (100 - value) / 100 + 4:.2f}" '
+            f'text-anchor="end">{value}%</text>'
+            for value in range(0, 101, 25)
+        )
+        distribution = report["tank_level_distribution"]
+        distribution_width, distribution_height = 900.0, 420.0
+        distribution_left, distribution_right, distribution_top, distribution_bottom = 72.0, 24.0, 28.0, 72.0
+        distribution_plot_width = distribution_width - distribution_left - distribution_right
+        distribution_plot_height = distribution_height - distribution_top - distribution_bottom
+        distribution_max = max((int(row["count"]) for row in distribution), default=1) or 1
+        distribution_bars = ""
+        if distribution:
+            distribution_slot = distribution_plot_width / len(distribution)
+            for index, row in enumerate(distribution):
+                bar_x = distribution_left + index * distribution_slot + distribution_slot * 0.12
+                bar_width = distribution_slot * 0.76
+                bar_height = distribution_plot_height * int(row["count"]) / distribution_max
+                bar_y = distribution_top + distribution_plot_height - bar_height
+                range_label = f"{float(row['low']):,.0f}-{float(row['high']):,.0f}"
+                distribution_bars += (
+                    f'<rect class="distribution-bar" x="{bar_x:.2f}" y="{bar_y:.2f}" width="{bar_width:.2f}" '
+                    f'height="{bar_height:.2f}"><title>{escape(range_label)} {escape(report["volume_unit"])}: '
+                    f'{int(row["count"])} days</title></rect>'
+                    f'<text x="{bar_x + bar_width / 2:.2f}" y="{distribution_top + distribution_plot_height + 22:.2f}" '
+                    f'text-anchor="middle">{escape(range_label)}</text>'
+                    f'<text x="{bar_x + bar_width / 2:.2f}" y="{max(bar_y - 7, distribution_top + 11):.2f}" '
+                    f'text-anchor="middle">{int(row["count"])}</text>'
+                )
+        distribution_grid = "".join(
+            f'<line x1="{distribution_left}" y1="{distribution_top + distribution_plot_height * (4 - index) / 4:.2f}" '
+            f'x2="{distribution_left + distribution_plot_width}" y2="{distribution_top + distribution_plot_height * (4 - index) / 4:.2f}" />'
+            f'<text x="{distribution_left - 12}" y="{distribution_top + distribution_plot_height * (4 - index) / 4 + 4:.2f}" '
+            f'text-anchor="end">{distribution_max * index / 4:.0f}</text>'
+            for index in range(5)
         )
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2339,21 +3096,41 @@ h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:
 section {{ padding:34px 52px; border-bottom:1px solid var(--line); }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
 .fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
+.toc ul {{ margin:0; padding:0; list-style:none; columns:2; }} .toc li {{ break-inside:avoid; border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:10px 0; color:var(--blue); font-weight:700; text-decoration:none; }} .toc a:hover {{ text-decoration:underline; }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
+.demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
 .curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
+.selected-tank {{ fill:none; stroke:#d71920; stroke-width:4; }} .selected-tank:hover {{ fill:none; r:11; }}
+.year-met {{ fill:#2e8b57; }} .year-unmet {{ fill:#c94c4c; }} .chart-legend {{ display:flex; gap:20px; margin:8px 0 0 72px; font-size:12px; color:var(--muted); }} .swatch {{ display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px; }} .swatch.year-met {{ background:#2e8b57; }} .swatch.year-unmet {{ background:#c94c4c; }}
+.distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:var(--muted); font-size:13px; font-weight:700; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:700px) {{ main {{ width:100%; margin:0; }} header,section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
 @media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><main>
-<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>RWH Calculator Report</p></header>
-<section><h2>Project information</h2><dl>{info_rows}</dl></section>
-<section><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
-<section><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
-<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}
+<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>RWH Calculator Report</p>{author_html}</header>
+<nav class="toc" aria-label="Table of contents"><section><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li></ul></section></nav>
+<section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl></section>
+<section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
+<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
+<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{float(report['total_annual_demand']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
+<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
 <text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
-</svg></div></section><footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
+</svg></div></section>
+<section id="yearly-demand-reliability"><h2>Yearly demand reliability</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
+<g class="grid">{yearly_grid}{yearly_labels}</g>{yearly_bars}
+<text class="axis-label" x="{yearly_left + yearly_plot_width / 2:.2f}" y="{yearly_chart_height - 10:.2f}" text-anchor="middle">Year</text>
+<text class="axis-label" transform="translate(18 {yearly_top + yearly_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days (%)</text>
+</svg></div><div class="chart-legend"><span><i class="swatch year-met"></i>Demand met</span><span><i class="swatch year-unmet"></i>Demand not met</span></div></section>
+<section id="tank-level-distribution"><h2>Tank level distribution</h2><div class="chart"><svg viewBox="0 0 {distribution_width:.0f} {distribution_height:.0f}" role="img" aria-label="Distribution of days by tank level range">
+<g class="grid">{distribution_grid}</g>{distribution_bars}
+<text class="axis-label" x="{distribution_left + distribution_plot_width / 2:.2f}" y="{distribution_height - 10:.2f}" text-anchor="middle">Tank level range ({escape(report['volume_unit'])})</text>
+<text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days</text>
+</svg></div></section>
+<footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
 </main></body></html>"""
 
     def _compile_latex_report(self, tex_path: Path, pdf_path: Path, report: dict[str, object]) -> None:
@@ -2366,17 +3143,18 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             work_dir = Path(temp_dir)
             work_tex = work_dir / tex_path.name
             work_tex.write_text(tex_path.read_text(encoding="utf-8"), encoding="utf-8")
-            result = subprocess.run(
-                [pdflatex, "-interaction=nonstopmode", "-halt-on-error", work_tex.name],
-                cwd=work_dir,
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if result.returncode != 0:
-                log = (result.stdout + "\n" + result.stderr).strip()
-                raise RuntimeError(f"LaTeX failed. Source saved to {tex_path}.\n\n{log[-2000:]}")
+            for _pass in range(2):
+                result = subprocess.run(
+                    [pdflatex, "-interaction=nonstopmode", "-halt-on-error", work_tex.name],
+                    cwd=work_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    log = (result.stdout + "\n" + result.stderr).strip()
+                    raise RuntimeError(f"LaTeX failed. Source saved to {tex_path}.\n\n{log[-2000:]}")
             compiled_pdf = work_dir / work_tex.with_suffix(".pdf").name
             if not compiled_pdf.exists():
                 raise RuntimeError(f"LaTeX did not create a PDF. Source saved to {tex_path}.")
@@ -2400,6 +3178,18 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             selected_reliability = f"{report['selected_reliability']:.2f}%"
 
         pages: list[list[str]] = [[]]
+        section_pages: dict[str, int] = {}
+        toc_links: list[tuple[tuple[float, float, float, float], str]] = []
+        section_titles = (
+            "Project Information",
+            "Notes",
+            "Surface Area Summary",
+            "Tank Summary",
+            "Demand Summary",
+            "Reliability Curve",
+            "Yearly Demand Reliability",
+            "Tank Level Distribution",
+        )
         y = 744.0
 
         def page() -> list[str]:
@@ -2430,6 +3220,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             nonlocal y
             if y < 112:
                 add_page()
+            section_pages[value] = len(pages) - 1
             y -= 10
             text(54, y, value, size=14, bold=True)
             y -= 18
@@ -2437,6 +3228,16 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 
         text(54, y, "RWH Calculator Report", size=20, bold=True)
         y -= 34
+        if metadata.get("author_name", "").strip():
+            text(54, y, f"Produced by: {metadata['author_name']}", size=10)
+            y -= 22
+        text(54, y, "Table of Contents", size=14, bold=True)
+        y -= 24
+        for title in section_titles:
+            text(72, y, title, size=11)
+            toc_links.append(((68.0, y - 4.0, 300.0, y + 12.0), title))
+            y -= 24
+        add_page()
         heading("Project Information")
         for label, value in [
             ("Client name", metadata["client_name"]),
@@ -2444,6 +3245,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             ("Location", metadata["location"]),
             ("Project name", metadata["project_name"]),
             ("End-uses of water", metadata["end_uses"]),
+            (
+                "Average annual precipitation",
+                f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+            ),
+            ("Precipitation basis", report["precipitation_basis"]),
             ("Selected tank reliability", selected_reliability),
         ]:
             if y < 84:
@@ -2451,6 +3257,15 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             text(54, y, f"{label}:", size=10, bold=True)
             add_wrapped(value or "Not specified", x=190, size=10, width=58)
             y -= 2
+
+        heading("Notes")
+        notes = str(report.get("notes", "")).strip() or "No notes provided."
+        for paragraph_index, paragraph in enumerate(notes.splitlines() or [notes]):
+            if paragraph_index and not paragraph:
+                y -= 6
+                continue
+            add_wrapped(paragraph or " ", x=54, size=10, width=90)
+        y -= 2
 
         heading("Surface Area Summary")
         text(54, y, "Surface", size=10, bold=True)
@@ -2467,10 +3282,137 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             text(450, y, runoff, size=9)
             y -= 14
 
+        heading("Tank Summary")
+        text(54, y, "Tank property", size=10, bold=True)
+        text(330, y, "Value", size=10, bold=True)
+        y -= 8
+        line(54, y, 558, y)
+        y -= 14
+        text(54, y, "Size", size=9)
+        text(330, y, f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}", size=9)
+        y -= 14
+
+        heading("Demand Summary")
+        column_x = (54.0, 100.0, 190.0, 310.0, 356.0, 446.0)
+        headers = (
+            "Month",
+            f"{report['volume_unit']}/day",
+            f"{report['volume_unit']}/month",
+            "Month",
+            f"{report['volume_unit']}/day",
+            f"{report['volume_unit']}/month",
+        )
+        for x_pos, label in zip(column_x, headers):
+            text(x_pos, y, label, size=9, bold=True)
+        y -= 8
+        line(54, y, 558, y)
+        y -= 14
+        for index in range(6):
+            left_month = report["monthly_demand"][index]
+            right_month = report["monthly_demand"][index + 6]
+            text(column_x[0], y, left_month["month"], size=9)
+            text(column_x[1], y, f"{float(left_month['demand_per_day']):,.0f}", size=9)
+            text(column_x[2], y, f"{float(left_month['demand_per_month']):,.0f}", size=9)
+            text(column_x[3], y, right_month["month"], size=9)
+            text(column_x[4], y, f"{float(right_month['demand_per_day']):,.0f}", size=9)
+            text(column_x[5], y, f"{float(right_month['demand_per_month']):,.0f}", size=9)
+            y -= 14
+        line(54, y + 5, 558, y + 5, width=0.4)
+        line(54, y + 2, 558, y + 2, width=0.4)
+        y -= 12
+        text(320, y, "Total Annual Demand", size=9, bold=True)
+        text(450, y, f"{float(report['total_annual_demand']):,.0f} {report['volume_unit']}", size=9, bold=True)
+        y -= 14
+
         heading("Reliability Curve")
         self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250, report)
 
-        self._write_pdf_with_pypdf(pdf_path, pages)
+        add_page()
+        heading("Yearly Demand Reliability")
+        self._draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, report)
+
+        add_page()
+        heading("Tank Level Distribution")
+        self._draw_pdf_tank_level_distribution(page(), 78, 400, 456, 250, report)
+
+        self._write_pdf_with_pypdf(pdf_path, pages, section_pages, toc_links)
+
+    def _draw_pdf_yearly_demand_reliability(
+        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+    ) -> None:
+        yearly = report["yearly_reliability"]
+        if not yearly:
+            return
+        commands.append("0.50 w 0.85 0.85 0.85 RG")
+        for index in range(5):
+            gy = y + height * index / 4
+            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
+            commands.append(
+                f"BT /F1 8 Tf 1 0 0 1 {x - 28:.2f} {gy - 3:.2f} Tm ({index * 25}%) Tj ET"
+            )
+        commands.append("0 0 0 RG 0.75 w")
+        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
+        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
+        slot_width = width / len(yearly)
+        label_step = max((len(yearly) + 9) // 10, 1)
+        for index, row in enumerate(yearly):
+            left = x + index * slot_width + max(slot_width * 0.15, 0.5)
+            bar_width = max(slot_width * 0.7, 0.5)
+            met_height = height * float(row["met_percent"]) / 100.0
+            commands.append("0.18 0.55 0.34 rg")
+            commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {met_height:.2f} re f")
+            commands.append("0.79 0.30 0.30 rg")
+            commands.append(f"{left:.2f} {y + met_height:.2f} {bar_width:.2f} {height - met_height:.2f} re f")
+            if index % label_step == 0 or index == len(yearly) - 1:
+                commands.append(
+                    f"BT /F1 7 Tf 1 0 0 1 {left - 2:.2f} {y - 16:.2f} Tm ({int(row['year'])}) Tj ET"
+                )
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 12:.2f} {y - 34:.2f} Tm (Year) Tj ET")
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 46:.2f} {y + height / 2:.2f} Tm (Days %) Tj ET")
+        commands.append("0.18 0.55 0.34 rg 82 370 10 10 re f")
+        commands.append("BT /F1 8 Tf 1 0 0 1 98 372 Tm (Demand met) Tj ET")
+        commands.append("0.79 0.30 0.30 rg 176 370 10 10 re f")
+        commands.append("BT /F1 8 Tf 1 0 0 1 192 372 Tm (Demand not met) Tj ET")
+        commands.append("0 0 0 rg 0 0 0 RG")
+
+    def _draw_pdf_tank_level_distribution(
+        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+    ) -> None:
+        distribution = report["tank_level_distribution"]
+        if not distribution:
+            return
+        max_count = max(int(row["count"]) for row in distribution) or 1
+        commands.append("0.50 w 0.85 0.85 0.85 RG")
+        for index in range(5):
+            gy = y + height * index / 4
+            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
+            commands.append(
+                f"BT /F1 8 Tf 1 0 0 1 {x - 28:.2f} {gy - 3:.2f} Tm ({max_count * index / 4:.0f}) Tj ET"
+            )
+        commands.append("0 0 0 RG 0.75 w")
+        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
+        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
+        slot_width = width / len(distribution)
+        for index, row in enumerate(distribution):
+            left = x + index * slot_width + slot_width * 0.12
+            bar_width = slot_width * 0.76
+            bar_height = height * int(row["count"]) / max_count
+            commands.append("0.18 0.55 0.34 rg")
+            commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {bar_height:.2f} re f")
+            label = _pdf_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
+            commands.append(
+                f"BT /F1 7 Tf 1 0 0 1 {left:.2f} {y - 16:.2f} Tm ({label}) Tj ET"
+            )
+            commands.append(
+                f"BT /F1 8 Tf 1 0 0 1 {left + bar_width / 2 - 4:.2f} {y + bar_height + 6:.2f} "
+                f"Tm ({int(row['count'])}) Tj ET"
+            )
+        commands.append(
+            f"BT /F1 9 Tf 1 0 0 1 {x + width / 2 - 58:.2f} {y - 34:.2f} "
+            f"Tm (Tank level range ({_pdf_escape(report['volume_unit'])})) Tj ET"
+        )
+        commands.append(f"BT /F1 9 Tf 1 0 0 1 {x - 42:.2f} {y + height / 2:.2f} Tm (Days) Tj ET")
+        commands.append("0 0 0 rg 0 0 0 RG")
 
     def _draw_pdf_reliability_curve(
         self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
@@ -2479,8 +3421,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         if not curve:
             return
         values = [(float(point["tank_size"]), float(point["reliability"])) for point in curve]
-        x_min = min(v[0] for v in values)
-        x_max = max(v[0] for v in values)
+        x_domain = [v[0] for v in values]
+        if report["selected_reliability"] is not None:
+            x_domain.append(float(report["selected_tank_size"]))
+        x_min = min(x_domain)
+        x_max = max(x_domain)
         if x_min == x_max:
             x_max = x_min + 1
 
@@ -2517,9 +3462,28 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         commands.append("0.04 0.36 0.67 rg")
         for px, py in points:
             commands.append(f"{px - 1.5:.2f} {py - 1.5:.2f} {3:.2f} {3:.2f} re f")
+        if report["selected_reliability"] is not None:
+            px = sx(float(report["selected_tank_size"]))
+            py = sy(float(report["selected_reliability"]))
+            radius = 6.0
+            control = radius * 0.55228475
+            commands.append(
+                "0.84 0.05 0.08 RG 2.25 w "
+                f"{px + radius:.2f} {py:.2f} m "
+                f"{px + radius:.2f} {py + control:.2f} {px + control:.2f} {py + radius:.2f} {px:.2f} {py + radius:.2f} c "
+                f"{px - control:.2f} {py + radius:.2f} {px - radius:.2f} {py + control:.2f} {px - radius:.2f} {py:.2f} c "
+                f"{px - radius:.2f} {py - control:.2f} {px - control:.2f} {py - radius:.2f} {px:.2f} {py - radius:.2f} c "
+                f"{px + control:.2f} {py - radius:.2f} {px + radius:.2f} {py - control:.2f} {px + radius:.2f} {py:.2f} c S"
+            )
         commands.append("0 0 0 rg 0 0 0 RG")
 
-    def _write_pdf_with_pypdf(self, pdf_path: Path, pages: list[list[str]]) -> None:
+    def _write_pdf_with_pypdf(
+        self,
+        pdf_path: Path,
+        pages: list[list[str]],
+        section_pages: dict[str, int] | None = None,
+        toc_links: list[tuple[tuple[float, float, float, float], str]] | None = None,
+    ) -> None:
         writer = PdfWriter()
         regular_font = writer._add_object(
             DictionaryObject(
@@ -2556,6 +3520,13 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             content = DecodedStreamObject()
             content.set_data("\n".join(page_commands).encode("latin-1", errors="replace"))
             page[NameObject("/Contents")] = writer._add_object(content)
+
+        for title, page_index in (section_pages or {}).items():
+            writer.add_outline_item(title, page_index)
+        for rect, title in toc_links or []:
+            target_page = (section_pages or {}).get(title)
+            if target_page is not None:
+                writer.add_annotation(0, Link(rect=rect, target_page_index=target_page))
 
         with pdf_path.open("wb") as handle:
             writer.write(handle)
@@ -2626,9 +3597,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self.curve_canvas.delete("all")
         self.tank_canvas.delete("all")
         self.histogram_canvas.delete("all")
+        self.yearly_reliability_canvas.delete("all")
         self.curve_canvas.hover_points = []
         self.tank_canvas.hover_points = []
         self.histogram_canvas.hover_points = []
+        self.yearly_reliability_canvas.hover_points = []
 
     def _draw_saved_analysis_charts(self) -> None:
         if not self.results_tab.winfo_ismapped():
@@ -2637,6 +3610,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         self._draw_curve()
         self._draw_tank_chart()
         self._draw_tank_level_histogram()
+        self._draw_yearly_demand_reliability()
 
     def _schedule_results_chart_redraw(self, _event: tk.Event | None = None) -> None:
         if self.results_df.empty and self.curve_df.empty:
@@ -2686,6 +3660,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             "Day of record",
             hover_labels,
             show_points=self.show_tank_points_var.get(),
+            bottom_padding=78,
         )
 
     def _draw_tank_level_histogram(self) -> None:
@@ -2707,7 +3682,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             counts[index] += 1
 
         width = max(canvas.winfo_width(), 300)
-        height = max(canvas.winfo_height(), 220)
+        height = max(canvas.winfo_height(), 160)
         pad_left, pad_right, pad_top, pad_bottom = 48, 14, 32, 64
         plot_width = width - pad_left - pad_right
         plot_height = height - pad_top - pad_bottom
@@ -2736,10 +3711,69 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
         canvas.create_text(
             pad_left + plot_width / 2,
-            height - 8,
+            ((height - pad_bottom + 15) + height) / 2,
             text=f"Tank level range ({unit})",
             font=("Segoe UI", 8),
         )
+
+    def _draw_yearly_demand_reliability(self) -> None:
+        canvas = self.yearly_reliability_canvas
+        canvas.delete("all")
+        canvas.hover_points = []
+        yearly = _yearly_demand_reliability(self.results_df)
+        width = max(canvas.winfo_width(), 300)
+        height = max(canvas.winfo_height(), 160)
+        pad_left, pad_right, pad_top, pad_bottom = 50, 14, 46, 44
+        plot_width = width - pad_left - pad_right
+        plot_height = height - pad_top - pad_bottom
+        canvas.create_text(width / 2, 14, text="Yearly Demand Reliability", font=("Segoe UI", 10, "bold"))
+        canvas.create_rectangle(16, 27, 26, 35, fill="#2e8b57", outline="")
+        canvas.create_text(31, 31, text="Demand met", anchor="w", font=("Segoe UI", 7))
+        canvas.create_rectangle(112, 27, 122, 35, fill="#c94c4c", outline="")
+        canvas.create_text(127, 31, text="Demand not met", anchor="w", font=("Segoe UI", 7))
+        for tick in range(5):
+            value = 100 - tick * 25
+            y = pad_top + plot_height * tick / 4
+            canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
+            canvas.create_text(pad_left - 7, y, text=f"{value}%", anchor="e", font=("Segoe UI", 7))
+        canvas.create_line(pad_left, pad_top, pad_left, height - pad_bottom, fill="#555")
+        canvas.create_line(pad_left, height - pad_bottom, width - pad_right, height - pad_bottom, fill="#555")
+        if not yearly:
+            canvas.create_text(width / 2, height / 2, text="No data")
+            return
+
+        slot_width = plot_width / len(yearly)
+        label_step = max((len(yearly) + 7) // 8, 1)
+        baseline = height - pad_bottom
+        for index, row in enumerate(yearly):
+            left = pad_left + index * slot_width + max(slot_width * 0.15, 1.0)
+            right = pad_left + (index + 1) * slot_width - max(slot_width * 0.15, 1.0)
+            met_height = plot_height * float(row["met_percent"]) / 100.0
+            boundary = baseline - met_height
+            canvas.create_rectangle(left, boundary, right, baseline, fill="#2e8b57", outline="#246b49")
+            canvas.create_rectangle(left, pad_top, right, boundary, fill="#c94c4c", outline="#9e3737")
+            center_x = (left + right) / 2
+            label = (
+                f"Year: {int(row['year'])}\n"
+                f"Demand met: {int(row['met_days'])} days ({float(row['met_percent']):.2f}%)\n"
+                f"Demand not met: {int(row['unmet_days'])} days ({float(row['unmet_percent']):.2f}%)"
+            )
+            if met_height > 0:
+                canvas.hover_points.append((center_x, boundary + met_height / 2, label))
+            unmet_height = plot_height - met_height
+            if unmet_height > 0:
+                canvas.hover_points.append((center_x, pad_top + unmet_height / 2, label))
+            if index % label_step == 0 or index == len(yearly) - 1:
+                canvas.create_text(center_x, baseline + 13, text=str(int(row["year"])), font=("Segoe UI", 7))
+        canvas.create_text(12, pad_top + plot_height / 2, text="Days (%)", angle=90, font=("Segoe UI", 8))
+        canvas.create_text(
+            pad_left + plot_width / 2,
+            ((baseline + 13) + height) / 2,
+            text="Year",
+            font=("Segoe UI", 8),
+        )
+        canvas.bind("<Motion>", self._show_chart_hover)
+        canvas.bind("<Leave>", self._hide_chart_hover)
 
     def _draw_line_chart(
         self,
@@ -2751,12 +3785,13 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         x_label: str,
         hover_labels: list[str] | None = None,
         show_points: bool = True,
+        bottom_padding: int = 58,
     ) -> None:
         canvas.delete("all")
         canvas.hover_points = []
         width = max(canvas.winfo_width(), 300)
-        height = max(canvas.winfo_height(), 220)
-        pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, 58
+        height = max(canvas.winfo_height(), 160)
+        pad_left, pad_right, pad_top, pad_bottom = 56, 18, 32, bottom_padding
         plot_w = width - pad_left - pad_right
         plot_h = height - pad_top - pad_bottom
         canvas.create_text(width / 2, 16, text=title, font=("Segoe UI", 10, "bold"))
@@ -2783,10 +3818,18 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
             points.extend([px, py])
             canvas.hover_points.append((px, py, hover_label))
         if len(points) >= 4:
-            canvas.create_line(*points, fill="#0b5cab", width=2)
+            canvas.create_line(*points, fill="#0b5cab", width=2, tags=("chart-data",))
         if show_points:
             for px, py, _hover_label in canvas.hover_points:
-                canvas.create_oval(px - 2, py - 2, px + 2, py + 2, fill="#0b5cab", outline="")
+                canvas.create_oval(
+                    px - 2,
+                    py - 2,
+                    px + 2,
+                    py + 2,
+                    fill="#0b5cab",
+                    outline="",
+                    tags=("chart-data",),
+                )
         for i in range(5):
             y = pad_top + (plot_h * i / 4)
             value = y_max - ((y_max - y_min) * i / 4)
@@ -2801,10 +3844,11 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
         canvas.create_text(14, height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
         canvas.create_text(
             pad_left + plot_w / 2,
-            height - 8,
+            ((height - pad_bottom + 17) + height) / 2,
             text=x_label,
             font=("Segoe UI", 8),
         )
+        canvas.tag_raise("chart-data")
         canvas.bind("<Motion>", self._show_chart_hover)
         canvas.bind("<Leave>", self._hide_chart_hover)
 
@@ -2939,6 +3983,7 @@ class ReportDialog(tk.Toplevel):
         self.title("PDF Report")
         self.resizable(True, False)
         self.result: dict[str, str] | None = None
+        self.author_name = defaults.get("author_name", "")
         self.vars = {
             "client_name": tk.StringVar(value=defaults["client_name"]),
             "date": tk.StringVar(value=defaults["date"]),
@@ -2975,6 +4020,7 @@ class ReportDialog(tk.Toplevel):
 
     def _save(self) -> None:
         self.result = {key: var.get().strip() for key, var in self.vars.items()}
+        self.result["author_name"] = self.author_name.strip()
         self.result["end_uses"] = self.end_uses_text.get("1.0", "end").strip() or "Not specified"
         self.destroy()
 
@@ -2993,6 +4039,7 @@ class DemandDialog(tk.Toplevel):
         ttk.Label(body, text="Field").grid(row=0, column=0, sticky="w", pady=(0, 6))
         ttk.Label(body, text="Value").grid(row=0, column=1, sticky="w", pady=(0, 6))
         ttk.Label(body, text="Unit").grid(row=0, column=2, sticky="w", pady=(0, 6), padx=(8, 0))
+        self.first_entry: ttk.Entry | None = None
         for row, (field, label) in enumerate(DEMAND_FIELDS):
             value = getattr(config.demand, field)[month]
             if field in {"male_occupancy", "female_occupancy"}:
@@ -3004,7 +4051,10 @@ class DemandDialog(tk.Toplevel):
             self.vars[field] = var
             grid_row = row + 1
             ttk.Label(body, text=label).grid(row=grid_row, column=0, sticky="w", pady=2)
-            ttk.Entry(body, textvariable=var, width=18).grid(row=grid_row, column=1, sticky="w", pady=2)
+            entry = ttk.Entry(body, textvariable=var, width=18)
+            entry.grid(row=grid_row, column=1, sticky="w", pady=2)
+            if self.first_entry is None:
+                self.first_entry = entry
             ttk.Label(body, text=unit).grid(row=grid_row, column=2, sticky="w", padx=(8, 0), pady=2)
         buttons = ttk.Frame(body)
         buttons.grid(row=len(DEMAND_FIELDS) + 1, column=0, columnspan=3, sticky="e", pady=(10, 0))
@@ -3012,6 +4062,36 @@ class DemandDialog(tk.Toplevel):
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.transient(parent)
         self.grab_set()
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.after_idle(self._focus_dialog)
+
+    def _focus_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        dialog_width = self.winfo_reqwidth()
+        dialog_height = self.winfo_reqheight()
+        target_root_x = parent.winfo_rootx() + (parent.winfo_width() - dialog_width) // 2
+        target_root_y = parent.winfo_rooty() + (parent.winfo_height() - dialog_height) // 2
+        x = self.winfo_x() + target_root_x - self.winfo_rootx()
+        y = self.winfo_y() + target_root_y - self.winfo_rooty()
+        self.geometry(f"{dialog_width}x{dialog_height}{x:+d}{y:+d}")
+        self.deiconify()
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(10, self._center_mapped_dialog)
+        self.after(50, lambda: self.attributes("-topmost", False) if self.winfo_exists() else None)
+        if self.first_entry is not None:
+            self.first_entry.focus_force()
+            self.first_entry.selection_range(0, tk.END)
+
+    def _center_mapped_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        target_root_x = parent.winfo_rootx() + (parent.winfo_width() - self.winfo_width()) // 2
+        target_root_y = parent.winfo_rooty() + (parent.winfo_height() - self.winfo_height()) // 2
+        x = self.winfo_x() + target_root_x - self.winfo_rootx()
+        y = self.winfo_y() + target_root_y - self.winfo_rooty()
+        self.geometry(f"{self.winfo_width()}x{self.winfo_height()}{x:+d}{y:+d}")
 
     def _save(self) -> None:
         for field, _label in DEMAND_FIELDS:

@@ -82,6 +82,25 @@ def test_reliability_curve_bounds() -> None:
     assert curve["ReliabilityPercent"].between(0, 100).all()
 
 
+def test_reliability_is_percentage_of_days_full_daily_demand_is_met() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 100.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.tank_parameters.reliable_fill_percent = 50.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=1, freq="D"),
+            "Precipitation": [0.0],
+        }
+    )
+
+    result = simulate_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert bool(result.loc[0, "DemandMet"])
+    assert not bool(result.loc[0, "ReserveTargetMet"])
+    assert result.loc[0, "ReliabilityPercent"] == 100.0
+
+
 def test_simple_daily_demand_is_added_to_daily_demand() -> None:
     cfg = default_project_config()
     cfg.demand.simple_daily_demand_gallons = 125.0

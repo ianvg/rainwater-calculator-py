@@ -156,6 +156,8 @@ class SQLiteStore:
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
+            author_name=payload.get("author_name", ""),
+            notes=payload.get("notes", ""),
             street_address=payload.get("street_address", payload.get("address", "")),
             city=payload.get("city", ""),
             state_or_province=payload.get("state_or_province", ""),

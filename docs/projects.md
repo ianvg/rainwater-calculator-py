@@ -4,13 +4,23 @@ A project groups the rainfall series, inputs, collection surfaces, demand settin
 
 ## Project settings
 
-Enter a project name, street address, city, state/province/region, postal code, unit system, and country in the Project Settings section. Address components are stored separately in the project file and are combined as the default report location. They are not transmitted to an online geocoding service.
+Enter the project name, optional produced-by/author name, unit system, and country in **Project Settings**. Enter the street address, city, state/province/region, and postal code in the separate **Project Location** section immediately below it. Address components are stored separately in the project file and are combined as the default report location. They are not transmitted to an online geocoding service.
+
+When an author name is provided, reports display a **Produced by** line near the top. Leaving the field blank is valid and omits that line from reports.
+
+Use the multiline **Notes** section between Project Settings and Project Location for free-form project notes. Notes are stored with the project and appear as the second section of generated reports.
+
+The entire Project Inputs tab scrolls vertically. Use its visible scrollbar or the mouse wheel while the pointer is over the tab to reach collection-surface and demand-analysis controls on shorter displays.
+
+Select the information icon beside **Collection surfaces** for guidance on surface area. Roof collection area is entered as the gross horizontal plan-view area projected over the ground, not the larger area measured along a sloped roof surface.
 
 The country is stored as an ISO 3166-1 alpha-3 code. The other fields represent common concepts from ISO 19160-4 and UPU S42: thoroughfare/delivery information, locality, administrative region, and postcode. This component model supports later country-specific formatting, but the calculator does not currently implement the complete library of S42 national address templates.
 
 ### Select a location on OpenStreetMap
 
 Select **Find on OpenStreetMap...** to open an interactive map in the default browser. Click a point and select **Use selected location**. After the application accepts the location, the map requests that its browser window close and focus returns to the calculator. The exact clicked latitude and longitude are stored with the project and displayed below the address fields. The application sends the selected coordinate to OpenStreetMap Nominatim once to retrieve the nearest mapped address, then fills the structured address fields. Review the result because reverse geocoding identifies the nearest suitable mapped object and may not return the physical or postal address expected for the site.
+
+Latitude and longitude can also be entered directly. Enter both values in decimal degrees; latitude must be between -90 and 90 and longitude between -180 and 180. Manual coordinates can be saved alongside a manually entered address without contacting OpenStreetMap. To replace the address fields with the nearest mapped address for those coordinates, select **Find nearest OSM address**. The map picker starts at manually entered coordinates when they are present.
 
 Map tiles and address lookup require an internet connection. The map displays OpenStreetMap attribution, requests only tiles needed for the interactive viewport, and does not provide bulk or offline downloading. Do not submit personal or confidential locations. Production deployments can replace the services with the `RWH_OSM_TILE_URL` and `RWH_NOMINATIM_URL` environment variables.
 

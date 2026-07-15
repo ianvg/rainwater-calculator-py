@@ -14,6 +14,8 @@ After stations are retrieved, type the first few letters of a station name to pr
 
 While the application searches the weather service for stations, the lower-right progress bar animates and the station-selection controls remain disabled until the search finishes.
 
+After a station search completes, the map in the lower half of the tab displays every returned station that has valid coordinates and adjusts its view to include them. Nearby stations are grouped into numbered markers when zoomed out and separate automatically as the map is enlarged. Select a grouped marker to zoom into it. The selected station or group is red; other markers are blue. Select an individual marker to select the corresponding station in the dropdown, or select a station in the dropdown to highlight its marker. Map tiles require an internet connection and are provided by OpenStreetMap.
+
 ACIS importing requires an internet connection. After a successful import, the rainfall summary identifies the station name, station ID, number of rows, and record dates. Station information is retained when the project is saved and reopened.
 
 ## Import Canadian climate data

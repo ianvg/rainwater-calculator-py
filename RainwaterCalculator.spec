@@ -12,7 +12,6 @@ a = Analysis(
     excludes=[
         "altair",
         "matplotlib",
-        "PIL",
         "plotly",
         "pyarrow",
         "pytest",

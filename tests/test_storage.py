@@ -5,6 +5,8 @@ def test_legacy_project_defaults_to_united_states() -> None:
     config = SQLiteStore._config_from_dict({"name": "Legacy project"})
 
     assert config.country_code == "USA"
+    assert config.author_name == ""
+    assert config.notes == ""
     assert config.street_address == ""
     assert config.city == ""
     assert config.state_or_province == ""
@@ -19,6 +21,15 @@ def test_project_country_code_is_loaded() -> None:
 
     assert config.country_code == "CAN"
     assert config.canadian_precipitation_field == "TOTAL_RAIN"
+
+
+def test_project_author_name_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {"name": "Authored project", "author_name": "Jane Engineer", "notes": "First line\nSecond line"}
+    )
+
+    assert config.author_name == "Jane Engineer"
+    assert config.notes == "First line\nSecond line"
 
 
 def test_acis_precipitation_field_is_loaded() -> None:
