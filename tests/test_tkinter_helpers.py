@@ -6,6 +6,9 @@ from rainwater_app.defaults import default_project_config
 from rainwater_app.models import Surface
 from tkinter_app import (
     RainwaterTkApp,
+    _demand_flow_from_gallons_per_minute,
+    _demand_flow_to_gallons_per_minute,
+    _normalized_demand_object_indices,
     _parse_coordinates,
     _validated_demand_object_library,
     _validated_schedule_library,
@@ -15,6 +18,19 @@ from tkinter_app import (
     _report_tank_level_distribution,
     _yearly_demand_reliability,
 )
+
+
+@pytest.mark.parametrize(
+    ("unit", "display_value"),
+    [("gpm", 2.0), ("gal/hr", 120.0), ("lpm", 7.57082), ("liter/hr", 454.2492)],
+)
+def test_demand_flow_units_round_trip(unit: str, display_value: float) -> None:
+    assert _demand_flow_from_gallons_per_minute(2.0, unit) == pytest.approx(display_value)
+    assert _demand_flow_to_gallons_per_minute(display_value, unit) == pytest.approx(2.0)
+
+
+def test_demand_object_assignments_drop_invalid_and_duplicate_indices() -> None:
+    assert _normalized_demand_object_indices([2, "0", 2, -1, 4, "bad"], 3) == [2, 0]
 
 
 def test_custom_demand_object_library_validation() -> None:

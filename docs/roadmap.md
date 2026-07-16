@@ -8,6 +8,66 @@ Develop an OpenStudio-style system editor in which users assemble arbitrary rain
 
 The current direct and indirect templates are the first constrained implementation of this model. Future work should include connection validation, loop detection, deterministic flow priority, controller state, component-level diagnostics, saved reusable templates, and a migration path that preserves existing projects.
 
+## Economic analysis and lifecycle cost
+
+Add an economic analysis driven by simulated rainwater supply rather than a user-estimated tank-efficiency factor. The first release should support water and sewer tariffs, installed cost, annual maintenance as either a fixed amount or percentage of installed cost, gross and net annual savings, and simple payback. Results should be available for the selected tank and every candidate tank size so users can compare hydraulic reliability with financial performance.
+
+Implementation requirements include:
+
+- Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
+- Calculate avoided utility consumption from simulated rainwater delivered to end uses. Do not count overflow, filter loss, unmet demand, municipal makeup, or stored water as savings.
+- Define how sewer savings apply by end-use category because irrigation and other outdoor uses may not incur sewer charges.
+- Support tiered or time-varying tariffs before presenting results as more than a simple-rate estimate.
+- Report annual supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, incentives, net present value, and internal rate of return.
+- Include units and assumptions in screen results and exported reports, and distinguish user inputs from calculated outputs.
+- Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that should display as not achieved rather than divide by zero.
+- Add deterministic tests that reconcile economic outputs to hourly and daily hydraulic totals, including municipal-backup and outdoor-demand scenarios.
+
+## First-flush diversion and event losses
+
+Add an explicit first-flush diversion model instead of requiring users to fold this loss into the runoff coefficient. First flush should be triggered by a new rainfall event, not subtracted independently from every wet calendar day.
+
+Implementation requirements include:
+
+- Add first-flush depth or volume to collection-surface parameters, with automatic Imperial and Metric conversion.
+- Define a rainfall event using a configurable antecedent dry period. Consecutive wet timesteps within the same event should share one first-flush allowance.
+- Track remaining diversion volume through the event and apply it before runoff enters storage.
+- Define behavior for multiple collection surfaces and permit either per-surface diverters or one shared downstream diverter.
+- Keep first-flush loss separate from runoff coefficient, surface wetting loss, filter loss, tank overflow, and conveyance loss in calculations and reports.
+- Report diverted volume by timestep, event, year, and full analysis period.
+- Add tests for rainfall below the diversion threshold, multi-timestep storms, storms spanning midnight, dry-period reset, zero diversion, and unit conversion.
+
+## Unusable tank volume and operating levels
+
+Add explicit unusable storage, sometimes called dead space, so the simulation can distinguish physical tank capacity from water available for withdrawal. This must remain separate from initial fill and reliability-reserve settings.
+
+Implementation requirements include:
+
+- Add a minimum operating volume that can be entered as an absolute volume or percentage of capacity and normalized internally to volume.
+- Prevent normal demand and pump withdrawals from reducing tank level below the minimum operating volume while still including that water in the displayed physical tank level.
+- Define whether emergency withdrawal, maintenance drain-down, and overflow calculations use total or usable capacity.
+- Apply the same concept consistently to primary and booster tanks where configured.
+- Report total capacity, unusable volume, usable capacity, physical water level, usable water available, and unmet demand attributable to the operating limit.
+- Migrate existing projects with zero unusable volume so prior results remain unchanged.
+- Add boundary tests for empty, partially filled, exactly-at-minimum, full, and oversized minimum-volume configurations.
+
+## Candidate tank performance comparison
+
+Expand the reliability curve dataset into an auditable performance table for every candidate tank size. In addition to reliability, each row should include total demand, rainwater supplied, unmet demand, municipal makeup, overflow, first-flush loss, other treatment losses, and final storage. Economic analysis should add annual savings and payback columns when its inputs are configured.
+
+Implementation requirements include:
+
+- Extend the reliability-curve engine to aggregate the same mass-balance outputs used by the selected-tank simulation rather than running a separate simplified interpretation.
+- Preserve cancellation and progress reporting because additional candidate metrics increase calculation cost.
+- Add a sortable/exportable comparison table and allow users to promote a candidate to the primary tank without re-entering its size.
+- Add a recommendation aid that identifies diminishing reliability gains, but expose the threshold as a user-controlled assumption and avoid presenting it as a universally optimal tank size.
+- Include candidate metrics in saved analysis results and invalidate them when rainfall, demand, loss, operating-level, system, or economic inputs change.
+- Add reconciliation tests proving that each candidate row matches an independent simulation of the same tank size.
+
+## Rainfall timing and data-resolution clarity
+
+Do not claim that a daily-rainfall analysis accounts for the time of day rainfall occurs. The current hourly demand simulation places each daily rainfall total at the end-of-day boundary. Future true subdaily rainfall support should retain observation timestamps, declare the source resolution, align rainfall and demand time zones, and route collection during the corresponding timestep. Reports should state whether results use daily or subdaily rainfall and identify any temporal allocation assumption.
+
 ## International rainfall data
 
 Extend rainfall importing beyond the current US ACIS and Canadian ECCC workflows using a layered provider strategy:

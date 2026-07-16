@@ -92,7 +92,15 @@ def test_instantaneous_demand_object_flow_is_loaded() -> None:
 
 def test_system_builder_layout_is_loaded() -> None:
     layout = [
-        {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80}
+        {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80},
+        {
+            "id": "end_uses_1",
+            "component_type": "end_uses",
+            "name": "End-uses",
+            "x": 400,
+            "y": 80,
+            "demand_object_indices": [0, 2],
+        },
     ]
 
     connections = [{"source_component": "rainwater_input_1", "target_component": "primary_tank_1"}]

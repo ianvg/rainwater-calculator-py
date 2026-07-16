@@ -56,6 +56,7 @@ from rainwater_app.rainfall import load_rainfall_csv
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.stations import bounding_box, nearest_stations
 from rainwater_app.units import (
+    LITERS_PER_GALLON,
     area_to_display,
     area_to_internal,
     area_unit,
@@ -68,11 +69,52 @@ from rainwater_app.units import (
 )
 
 APP_TITLE = "Rainwater Harvesting Calculator"
+DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
 DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 680
 MINIMUM_WINDOW_WIDTH = 1000
 MAX_RECENT_PROJECTS = 8
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
+
+
+def _demand_flow_to_gallons_per_minute(value: float, unit: str) -> float:
+    if unit == "gpm":
+        return value
+    if unit == "gal/hr":
+        return value / 60.0
+    if unit == "lpm":
+        return value / LITERS_PER_GALLON
+    if unit == "liter/hr":
+        return value / (LITERS_PER_GALLON * 60.0)
+    raise ValueError(f"Unsupported demand flow unit: {unit}")
+
+
+def _demand_flow_from_gallons_per_minute(value: float, unit: str) -> float:
+    if unit == "gpm":
+        return value
+    if unit == "gal/hr":
+        return value * 60.0
+    if unit == "lpm":
+        return value * LITERS_PER_GALLON
+    if unit == "liter/hr":
+        return value * LITERS_PER_GALLON * 60.0
+    raise ValueError(f"Unsupported demand flow unit: {unit}")
+
+
+def _normalized_demand_object_indices(value: object, demand_object_count: int) -> list[int]:
+    if not isinstance(value, list):
+        return []
+    normalized: list[int] = []
+    for raw_index in value:
+        try:
+            index = int(raw_index)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= index < demand_object_count and index not in normalized:
+            normalized.append(index)
+    return normalized
+
+
 ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
 ECCC_SOURCE_URL = "https://climate.weather.gc.ca/"
 OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
@@ -1291,6 +1333,23 @@ class RainwaterTkApp(tk.Tk):
             )
         messagebox.showinfo("Rainfall data source", detail, parent=self)
 
+    def _show_rainfall_csv_format_tip(self) -> None:
+        unit = precip_unit(self.config_model)
+        messagebox.showinfo(
+            "Daily rainfall CSV format",
+            "The CSV must contain columns named Date and Precipitation. "
+            "Header capitalization and surrounding spaces are ignored; additional columns are allowed.\n\n"
+            "Use one row per day. Dates should preferably use the unambiguous YYYY-MM-DD format. "
+            f"Precipitation must be numeric and expressed in {unit}, matching the current project units. "
+            "Blank or nonnumeric precipitation values are treated as zero.\n\n"
+            "Example:\n"
+            "Date,Precipitation\n"
+            "2025-01-01,0.00\n"
+            "2025-01-02,0.37\n"
+            "2025-01-03,0.00",
+            parent=self,
+        )
+
     def _open_weather_source(self, _event: tk.Event | None = None) -> None:
         webbrowser.open(self.weather_source_url)
 
@@ -1302,6 +1361,8 @@ class RainwaterTkApp(tk.Tk):
 
     def _scroll_import_mousewheel(self, event: tk.Event) -> str | None:
         if self.notebook.select() != str(self.import_tab):
+            return None
+        if self.rainwater_data_notebook.select() != str(self.daily_rainwater_tab):
             return None
         pointer_x, pointer_y = self.winfo_pointerxy()
         if hasattr(self, "station_map") and self.station_map.winfo_exists():
@@ -1521,6 +1582,39 @@ class RainwaterTkApp(tk.Tk):
             foreground="#667278",
             wraplength=220,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.system_end_uses_editor = ttk.LabelFrame(
+            system_edit, text="Demand objects", padding=6
+        )
+        self.system_end_uses_editor.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        self.system_end_uses_editor.columnconfigure(0, weight=1)
+        ttk.Label(self.system_end_uses_editor, text="Available").grid(row=0, column=0, sticky="w")
+        self.system_available_demands_list = tk.Listbox(
+            self.system_end_uses_editor, height=4, exportselection=False
+        )
+        self.system_available_demands_list.grid(row=1, column=0, sticky="ew", pady=(2, 4))
+        self.system_add_demand_button = ttk.Button(
+            self.system_end_uses_editor,
+            text="Add selected",
+            command=self.add_demand_to_selected_end_uses,
+        )
+        self.system_add_demand_button.grid(row=2, column=0, sticky="ew")
+        ttk.Label(self.system_end_uses_editor, text="Assigned").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.system_assigned_demands_list = tk.Listbox(
+            self.system_end_uses_editor, height=4, exportselection=False
+        )
+        self.system_assigned_demands_list.grid(row=4, column=0, sticky="ew", pady=(2, 4))
+        self.system_remove_demand_button = ttk.Button(
+            self.system_end_uses_editor,
+            text="Remove selected",
+            command=self.remove_demand_from_selected_end_uses,
+        )
+        self.system_remove_demand_button.grid(row=5, column=0, sticky="ew")
+        self.system_available_demands_list.bind(
+            "<Double-1>", lambda _event: self.add_demand_to_selected_end_uses()
+        )
+        self.system_assigned_demands_list.bind(
+            "<Double-1>", lambda _event: self.remove_demand_from_selected_end_uses()
+        )
         ttk.Label(
             self.indirect_system_diagram_frame,
             text="Link objects by selecting an output node and then an input node. Select a link and press Delete to remove it.",
@@ -1716,6 +1810,7 @@ class RainwaterTkApp(tk.Tk):
             self.system_component_name_entry.state(["disabled"])
             self.apply_system_component_name_button.state(["disabled"])
             self.system_component_edit_status_var.set("Select a system object to edit.")
+            self.system_end_uses_editor.grid_remove()
             return
         self.system_component_name_var.set(str(item.get("name", "")))
         self.system_component_name_entry.state(["!disabled"])
@@ -1724,6 +1819,63 @@ class RainwaterTkApp(tk.Tk):
             str(item.get("component_type", "")), str(item.get("component_type", "System object"))
         )
         self.system_component_edit_status_var.set(f"Editing: {component_type}")
+        if str(item.get("component_type", "")) == "end_uses":
+            self.system_end_uses_editor.grid()
+            self._refresh_end_uses_demand_editor(item)
+        else:
+            self.system_end_uses_editor.grid_remove()
+
+    def _refresh_end_uses_demand_editor(self, item: dict[str, object]) -> None:
+        demand_objects = self.config_model.demand.demand_objects
+        assigned = _normalized_demand_object_indices(
+            item.get("demand_object_indices"), len(demand_objects)
+        )
+        item["demand_object_indices"] = assigned
+        self._system_available_demand_indices = [
+            index for index in range(len(demand_objects)) if index not in assigned
+        ]
+        self._system_assigned_demand_indices = assigned
+        self.system_available_demands_list.delete(0, tk.END)
+        self.system_assigned_demands_list.delete(0, tk.END)
+        for index in self._system_available_demand_indices:
+            self.system_available_demands_list.insert(tk.END, demand_objects[index].name)
+        for index in self._system_assigned_demand_indices:
+            self.system_assigned_demands_list.insert(tk.END, demand_objects[index].name)
+        self.system_add_demand_button.state(
+            ["!disabled"] if self._system_available_demand_indices else ["disabled"]
+        )
+        self.system_remove_demand_button.state(
+            ["!disabled"] if self._system_assigned_demand_indices else ["disabled"]
+        )
+
+    def add_demand_to_selected_end_uses(self) -> None:
+        item = self._system_layout_item(self.system_builder_selected_id or "")
+        selected = self.system_available_demands_list.curselection()
+        if item is None or str(item.get("component_type")) != "end_uses" or not selected:
+            return
+        demand_index = self._system_available_demand_indices[selected[0]]
+        assigned = _normalized_demand_object_indices(
+            item.get("demand_object_indices"), len(self.config_model.demand.demand_objects)
+        )
+        if demand_index not in assigned:
+            assigned.append(demand_index)
+        item["demand_object_indices"] = assigned
+        self._render_system_builder()
+
+    def remove_demand_from_selected_end_uses(self) -> None:
+        item = self._system_layout_item(self.system_builder_selected_id or "")
+        selected = self.system_assigned_demands_list.curselection()
+        if item is None or str(item.get("component_type")) != "end_uses" or not selected:
+            return
+        demand_index = self._system_assigned_demand_indices[selected[0]]
+        item["demand_object_indices"] = [
+            index
+            for index in _normalized_demand_object_indices(
+                item.get("demand_object_indices"), len(self.config_model.demand.demand_objects)
+            )
+            if index != demand_index
+        ]
+        self._render_system_builder()
 
     def apply_system_component_name(self) -> None:
         if self.system_builder_selected_id is None:
@@ -1783,6 +1935,15 @@ class RainwaterTkApp(tk.Tk):
             except (KeyError, TypeError, ValueError):
                 continue
             label = str(item.get("name") or self._system_component_templates().get(component_type, component_type))
+            if component_type == "end_uses":
+                assigned_count = len(
+                    _normalized_demand_object_indices(
+                        item.get("demand_object_indices"),
+                        len(self.config_model.demand.demand_objects),
+                    )
+                )
+                if assigned_count:
+                    label = f"{label}\n({assigned_count} demand{'s' if assigned_count != 1 else ''})"
             selected = component_id == self.system_builder_selected_id
             outline = "#1565c0" if selected else "#30363a"
             fill = "#e8f1fb" if selected else "#f7f9fa"
@@ -1907,15 +2068,31 @@ class RainwaterTkApp(tk.Tk):
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
         self.import_tab.rowconfigure(0, weight=1)
+        self.rainwater_data_notebook = ttk.Notebook(self.import_tab)
+        self.rainwater_data_notebook.grid(row=0, column=0, sticky="nsew")
+        self.daily_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=8)
+        self.hourly_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
+        self.rainwater_data_notebook.add(self.daily_rainwater_tab, text="Daily data")
+        self.rainwater_data_notebook.add(self.hourly_rainwater_tab, text="Hourly data")
+        self.daily_rainwater_tab.columnconfigure(0, weight=1)
+        self.daily_rainwater_tab.rowconfigure(0, weight=1)
+        self.hourly_rainwater_tab.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.hourly_rainwater_tab,
+            text="Hourly rainwater data is a work in progress.",
+            foreground="#667278",
+        ).grid(row=0, column=0, sticky="nw")
         frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
         self.import_canvas = tk.Canvas(
-            self.import_tab,
+            self.daily_rainwater_tab,
             highlightthickness=0,
             borderwidth=0,
             background=frame_background,
         )
         self.import_canvas.grid(row=0, column=0, sticky="nsew")
-        import_scroll_y = ttk.Scrollbar(self.import_tab, orient="vertical", command=self.import_canvas.yview)
+        import_scroll_y = ttk.Scrollbar(
+            self.daily_rainwater_tab, orient="vertical", command=self.import_canvas.yview
+        )
         import_scroll_y.grid(row=0, column=1, sticky="ns")
         self.import_canvas.configure(yscrollcommand=import_scroll_y.set)
         import_content = ttk.Frame(self.import_canvas, padding=(0, 0, 8, 8))
@@ -1932,7 +2109,16 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Button-4>", self._scroll_import_mousewheel, add="+")
         self.bind_all("<Button-5>", self._scroll_import_mousewheel, add="+")
 
-        csv_frame = ttk.LabelFrame(import_content, text="Rainfall CSV", padding=10)
+        csv_title = ttk.Frame(import_content)
+        ttk.Label(csv_title, text="Rainfall CSV").grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            csv_title,
+            text="i",
+            width=2,
+            command=self._show_rainfall_csv_format_tip,
+            takefocus=True,
+        ).grid(row=0, column=1, padx=(5, 0))
+        csv_frame = ttk.LabelFrame(import_content, labelwidget=csv_title, padding=10)
         csv_frame.grid(row=0, column=0, sticky="ew")
         csv_frame.columnconfigure(0, weight=1)
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
@@ -3237,6 +3423,7 @@ class RainwaterTkApp(tk.Tk):
             self.demand_objects_tree.selection_set(iid)
             self.demand_objects_tree.focus(iid)
             self.demand_objects_tree.see(iid)
+        self._render_system_builder()
 
     def _update_demand_headings(self) -> None:
         unit = volume_unit(self.config_model)
@@ -4380,7 +4567,17 @@ class RainwaterTkApp(tk.Tk):
         if not messagebox.askyesno(APP_TITLE, f"Delete demand object '{demand_object.name}'?", parent=self):
             return
         del self.config_model.demand.demand_objects[index]
+        for item in self.config_model.system_layout:
+            assigned = _normalized_demand_object_indices(
+                item.get("demand_object_indices"), len(self.config_model.demand.demand_objects) + 1
+            )
+            item["demand_object_indices"] = [
+                assigned_index - 1 if assigned_index > index else assigned_index
+                for assigned_index in assigned
+                if assigned_index != index
+            ]
         self._populate_demand_objects()
+        self._render_system_builder()
 
     def _edit_demand_object_from_event(self, event: tk.Event) -> str:
         row_id = self.demand_objects_tree.identify_row(event.y)
@@ -7860,8 +8057,11 @@ class DemandObjectDialog(tk.Toplevel):
         self.type_var = tk.StringVar(
             value=demand_object.object_type if demand_object.object_type in self.OBJECT_TYPES else "Other"
         )
+        initial_flow_unit = "lpm" if config.unit_system == "Metric" else "gpm"
+        self.instantaneous_demand_unit_var = tk.StringVar(value=initial_flow_unit)
+        self._instantaneous_demand_unit = initial_flow_unit
         self.instantaneous_demand_var = tk.StringVar(
-            value=f"{volume_to_display(demand_object.instantaneous_demand_gallons_per_minute, config):.2f}"
+            value=f"{_demand_flow_from_gallons_per_minute(demand_object.instantaneous_demand_gallons_per_minute, initial_flow_unit):.8g}"
         )
         schedule_names = list(config.demand.hourly_schedule_library)
         selected_schedule = demand_object.schedule_name if demand_object.schedule_name in schedule_names else schedule_names[0]
@@ -7885,7 +8085,15 @@ class DemandObjectDialog(tk.Toplevel):
         demand_row.grid(row=2, column=1, sticky="ew", pady=3)
         demand_row.columnconfigure(0, weight=1)
         ttk.Entry(demand_row, textvariable=self.instantaneous_demand_var).grid(row=0, column=0, sticky="ew")
-        ttk.Label(demand_row, text=f"{volume_unit(config)}/min").grid(row=0, column=1, padx=(8, 0))
+        demand_unit_combo = ttk.Combobox(
+            demand_row,
+            textvariable=self.instantaneous_demand_unit_var,
+            values=DEMAND_FLOW_UNITS,
+            state="readonly",
+            width=9,
+        )
+        demand_unit_combo.grid(row=0, column=1, padx=(8, 0))
+        demand_unit_combo.bind("<<ComboboxSelected>>", self._change_instantaneous_demand_unit)
         ttk.Label(body, text="Schedule").grid(row=3, column=0, sticky="w", pady=3)
         ttk.Combobox(
             body,
@@ -7913,6 +8121,22 @@ class DemandObjectDialog(tk.Toplevel):
         self.name_entry.focus_set()
         self.name_entry.selection_range(0, tk.END)
 
+    def _change_instantaneous_demand_unit(self, _event: tk.Event | None = None) -> None:
+        new_unit = self.instantaneous_demand_unit_var.get()
+        old_unit = self._instantaneous_demand_unit
+        if new_unit == old_unit:
+            return
+        try:
+            current_value = float(self.instantaneous_demand_var.get())
+        except ValueError:
+            self.instantaneous_demand_unit_var.set(old_unit)
+            self.bell()
+            return
+        internal_flow = _demand_flow_to_gallons_per_minute(current_value, old_unit)
+        converted = _demand_flow_from_gallons_per_minute(internal_flow, new_unit)
+        self.instantaneous_demand_var.set(f"{converted:.8g}")
+        self._instantaneous_demand_unit = new_unit
+
     def _save(self) -> None:
         name = self.name_var.get().strip()
         if not name:
@@ -7925,8 +8149,9 @@ class DemandObjectDialog(tk.Toplevel):
         self.result = DemandObject(
             name=name,
             object_type=self.type_var.get() or "Other",
-            instantaneous_demand_gallons_per_minute=volume_to_internal(
-                max(_float(self.instantaneous_demand_var.get()), 0.0), self.config_model
+            instantaneous_demand_gallons_per_minute=_demand_flow_to_gallons_per_minute(
+                max(_float(self.instantaneous_demand_var.get()), 0.0),
+                self.instantaneous_demand_unit_var.get(),
             ),
             schedule_name=schedule_name,
         )

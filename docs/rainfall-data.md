@@ -50,6 +50,15 @@ Choose the CSV import action and select a rainfall file. The standard input cont
 | `Date` | Observation date |
 | `Precipitation` | Daily precipitation amount |
 
+Header capitalization and surrounding spaces are ignored, and additional columns are allowed. Use one row per day and preferably format dates as `YYYY-MM-DD`. Precipitation must be numeric and use inches for an Imperial project or millimetres for a Metric project. Blank or nonnumeric precipitation values are treated as zero.
+
+```csv
+Date,Precipitation
+2025-01-01,0.00
+2025-01-02,0.37
+2025-01-03,0.00
+```
+
 Review the rainfall summary after importing. Confirm that the date range, row count, units, and source are reasonable before running an analysis.
 
 ## Data checks
