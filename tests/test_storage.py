@@ -19,6 +19,9 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.system_parameters.filter_recovery_percent == 100.0
     assert config.system_parameters.booster_refill_level_percent == 50.0
     assert config.system_parameters.municipal_backup_enabled is True
+    assert config.financial_parameters.currency == "USD"
+    assert config.financial_parameters.tariff_billing_unit == "per 1,000 gal"
+    assert config.financial_parameters.analysis_period_years == 20
 
 
 def test_system_component_parameters_are_loaded() -> None:
@@ -44,6 +47,31 @@ def test_system_component_parameters_are_loaded() -> None:
     assert config.system_parameters.booster_initial_fill_percent == 40.0
     assert config.system_parameters.booster_refill_level_percent == 35.0
     assert config.system_parameters.municipal_backup_enabled is False
+
+
+def test_financial_parameters_are_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Financial project",
+            "financial_parameters": {
+                "currency": "CAD",
+                "water_rate": 4.5,
+                "sewer_rate": 7.25,
+                "tariff_billing_unit": "per m³",
+                "sewer_eligible_percent": 40.0,
+                "installed_cost": 12000.0,
+                "incentives": 1000.0,
+                "fixed_annual_maintenance": 125.0,
+                "annual_maintenance_percent": 1.5,
+                "analysis_period_years": 25,
+            },
+        }
+    )
+
+    assert config.financial_parameters.currency == "CAD"
+    assert config.financial_parameters.tariff_billing_unit == "per m³"
+    assert config.financial_parameters.installed_cost == 12000.0
+    assert config.financial_parameters.analysis_period_years == 25
 
 
 def test_demand_objects_are_loaded_as_model_objects() -> None:

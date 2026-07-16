@@ -87,6 +87,20 @@ class SystemComponentParameters:
 
 
 @dataclass
+class FinancialParameters:
+    currency: str = "USD"
+    water_rate: float = 0.0
+    sewer_rate: float = 0.0
+    tariff_billing_unit: str = "per 1,000 gal"
+    sewer_eligible_percent: float = 100.0
+    installed_cost: float = 0.0
+    incentives: float = 0.0
+    fixed_annual_maintenance: float = 0.0
+    annual_maintenance_percent: float = 0.0
+    analysis_period_years: int = 20
+
+
+@dataclass
 class ProjectConfig:
     name: str
     author_name: str = ""
@@ -118,6 +132,7 @@ class ProjectConfig:
     analysis_unit_system: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)
     system_parameters: SystemComponentParameters = field(default_factory=SystemComponentParameters)
+    financial_parameters: FinancialParameters = field(default_factory=FinancialParameters)
 
     def to_dict(self) -> Dict:
         return asdict(self)

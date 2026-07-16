@@ -288,6 +288,9 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "750 gal" in html
     assert "<h2>Demand summary</h2>" in html
     assert 'aria-label="Table of contents"' in html
+    assert 'class="report-shell"' in html
+    assert ".toc { position:sticky" in html
+    assert "IntersectionObserver" in html
     assert 'href="#demand-summary"' in html
     assert 'href="#notes"' in html
     assert 'href="#yearly-demand-reliability"' in html
@@ -315,6 +318,7 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "Yearly demand reliability - multitank" in html
     assert html.count('class="series-toggle"') == 4
     assert "multitank-chart-1-series-1" in html
+    assert 'href="#multitank-chart-1"' in html
     assert "multitank-chart-1-series-2" in html
     assert 'class="tank-history"' in html
     assert 'data-years="2024,2025"' in html
@@ -473,3 +477,24 @@ def test_forward_system_connection_uses_compact_orthogonal_route() -> None:
     assert len(points) == 8
     assert points[:2] == (168.0, 100.0)
     assert points[-2:] == (332.0, 220.0)
+
+
+def test_reverse_connection_uses_gap_when_source_is_above_target() -> None:
+    points = RainwaterTkApp._system_connection_points(500.0, 100.0, 220.0, 260.0, 420.0)
+    coordinate_pairs = list(zip(points[::2], points[1::2]))
+
+    assert coordinate_pairs == [
+        (568.0, 100.0),
+        (592.0, 100.0),
+        (592.0, 180.0),
+        (128.0, 180.0),
+        (128.0, 260.0),
+        (152.0, 260.0),
+    ]
+
+
+def test_system_block_collision_includes_visual_spacing() -> None:
+    assert RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 220.0, 100.0)
+    assert RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 100.0, 160.0)
+    assert not RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 232.0, 100.0)
+    assert not RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 100.0, 168.0)

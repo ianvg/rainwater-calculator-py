@@ -10,18 +10,20 @@ The current direct and indirect templates are the first constrained implementati
 
 ## Economic analysis and lifecycle cost
 
-Add an economic analysis driven by simulated rainwater supply rather than a user-estimated tank-efficiency factor. The first release should support water and sewer tariffs, installed cost, annual maintenance as either a fixed amount or percentage of installed cost, gross and net annual savings, and simple payback. Results should be available for the selected tank and every candidate tank size so users can compare hydraulic reliability with financial performance.
+The first economic-analysis release is implemented for the selected tank. It is driven by simulated rainwater supply rather than a user-estimated tank-efficiency factor and supports simple water and sewer tariffs, installed cost, incentives, fixed and percentage annual maintenance, gross and net annual savings, simple payback, and an undiscounted analysis-period net benefit.
+
+The remaining roadmap work is to add end-use-derived sewer eligibility, tiered and time-varying tariffs, candidate-tank financial comparisons, escalation, discounting, equipment replacement, energy consumption, net present value, and internal rate of return.
 
 Implementation requirements include:
 
-- Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
-- Calculate avoided utility consumption from simulated rainwater delivered to end uses. Do not count overflow, filter loss, unmet demand, municipal makeup, or stored water as savings.
+- [Implemented] Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
+- [Implemented] Calculate avoided utility consumption from simulated rainwater delivered to end uses. Do not count overflow, filter loss, unmet demand, municipal makeup, or stored water as savings.
 - Define how sewer savings apply by end-use category because irrigation and other outdoor uses may not incur sewer charges.
 - Support tiered or time-varying tariffs before presenting results as more than a simple-rate estimate.
-- Report annual supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, incentives, net present value, and internal rate of return.
-- Include units and assumptions in screen results and exported reports, and distinguish user inputs from calculated outputs.
-- Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that should display as not achieved rather than divide by zero.
-- Add deterministic tests that reconcile economic outputs to hourly and daily hydraulic totals, including municipal-backup and outdoor-demand scenarios.
+- [Implemented for the selected tank] Report annual supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, net present value, and internal rate of return.
+- [Implemented on screen] Include units and assumptions in results and distinguish user inputs from calculated outputs. Exported-report integration remains planned.
+- [Implemented] Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that display as not achieved rather than divide by zero.
+- [Partially implemented] Deterministic tests reconcile economic outputs to delivered hydraulic totals and tariff units. End-use-specific outdoor and municipal-backup scenarios remain planned with automatic sewer eligibility.
 
 ## First-flush diversion and event losses
 

@@ -32,6 +32,7 @@ nav:
   - Shortcuts: shortcuts.md
   - Troubleshooting: troubleshooting.md
   - Roadmap: roadmap.md
+  - Financial analysis: financial-analysis.md
 
 markdown_extensions:
   - admonition

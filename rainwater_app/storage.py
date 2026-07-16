@@ -9,7 +9,15 @@ from typing import Any
 
 import pandas as pd
 
-from .models import DemandObject, DemandProfile, ProjectConfig, Surface, SystemComponentParameters, TankParameters
+from .models import (
+    DemandObject,
+    DemandProfile,
+    FinancialParameters,
+    ProjectConfig,
+    Surface,
+    SystemComponentParameters,
+    TankParameters,
+)
 
 
 class SQLiteStore:
@@ -211,6 +219,7 @@ class SQLiteStore:
             demand.active_hourly_schedule_name = next(iter(demand.hourly_schedule_library))
         tank_params = TankParameters(**payload.get("tank_parameters", {}))
         system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
+        financial_params = FinancialParameters(**payload.get("financial_parameters", {}))
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
@@ -255,6 +264,7 @@ class SQLiteStore:
             analysis_unit_system=payload.get("analysis_unit_system"),
             tank_parameters=tank_params,
             system_parameters=system_params,
+            financial_parameters=financial_params,
         )
 
 

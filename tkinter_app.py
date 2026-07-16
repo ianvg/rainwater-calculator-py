@@ -42,6 +42,7 @@ from rainwater_app.eccc import (
     fetch_canadian_station_options_bbox,
 )
 from rainwater_app.engine import AnalysisCancelledError, reliability_curve, simulate_hourly_tank, simulate_tank
+from rainwater_app.financial import calculate_financial_results
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
     DemandObject,
@@ -782,6 +783,10 @@ class RainwaterTkApp(tk.Tk):
         self.station_map_rendered_zoom: int | None = None
         self.station_map_redraw_after_id: str | None = None
         self.station_map_selected_label = ""
+        self.system_multi_select_var = tk.BooleanVar(value=False)
+        self.system_geometry_status_var = tk.StringVar(value="Turn on multi-select, then choose two or more objects.")
+        self.system_builder_selected_ids: set[str] = set()
+        self.system_builder_resize_state: tuple[object, ...] | None = None
 
         self.project_name_var = tk.StringVar(value=self.config_model.name)
         self.author_name_var = tk.StringVar(value=self.config_model.author_name)
@@ -830,6 +835,21 @@ class RainwaterTkApp(tk.Tk):
         self.tank_size_unit_var = tk.StringVar()
         self.percent_unit_var = tk.StringVar(value="%")
         self.reserve_unit_var = tk.StringVar(value="% of daily demand")
+        financial = self.config_model.financial_parameters
+        self.financial_currency_var = tk.StringVar(value=financial.currency)
+        self.financial_water_rate_var = tk.StringVar(value=str(financial.water_rate))
+        self.financial_sewer_rate_var = tk.StringVar(value=str(financial.sewer_rate))
+        self.financial_tariff_unit_var = tk.StringVar(value=financial.tariff_billing_unit)
+        self.financial_sewer_eligible_var = tk.StringVar(value=str(financial.sewer_eligible_percent))
+        self.financial_installed_cost_var = tk.StringVar(value=str(financial.installed_cost))
+        self.financial_incentives_var = tk.StringVar(value=str(financial.incentives))
+        self.financial_fixed_maintenance_var = tk.StringVar(value=str(financial.fixed_annual_maintenance))
+        self.financial_maintenance_percent_var = tk.StringVar(value=str(financial.annual_maintenance_percent))
+        self.financial_analysis_period_var = tk.StringVar(value=str(financial.analysis_period_years))
+        self.financial_status_var = tk.StringVar(value="Run a tank analysis to calculate financial results.")
+        self.financial_result_vars = {key: tk.StringVar(value="--") for key in (
+            "supplied", "gross", "maintenance", "net", "net_cost", "payback", "period_benefit"
+        )}
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.average_annual_precipitation_var = tk.StringVar(value="Average annual precipitation: --")
@@ -925,6 +945,7 @@ class RainwaterTkApp(tk.Tk):
         self.demand_tab = ttk.Frame(self.notebook, padding=10)
         self.analysis_tab = ttk.Frame(self.notebook, padding=10)
         self.results_tab = ttk.Frame(self.notebook, padding=10)
+        self.financial_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.inputs_tab, text="Project Inputs")
         self.notebook.add(self.import_tab, text="Rainwater Data")
         self.notebook.add(self.schedules_tab, text="Schedules")
@@ -932,6 +953,7 @@ class RainwaterTkApp(tk.Tk):
         self.notebook.add(self.demand_tab, text="Demand parameters")
         self.notebook.add(self.system_parameters_tab, text="System parameters")
         self.notebook.add(self.analysis_tab, text="Analysis settings")
+        self.notebook.add(self.financial_tab, text="Financial analysis")
         self.notebook.add(self.results_tab, text="Results")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
 
@@ -942,6 +964,7 @@ class RainwaterTkApp(tk.Tk):
         self._build_collection_tab()
         self._build_demand_tab()
         self._build_analysis_tab()
+        self._build_financial_tab()
         self._build_results_tab()
 
         status_frame = ttk.Frame(self, padding=(10, 4))
@@ -1027,6 +1050,11 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _on_notebook_tab_changed(self, _event: tk.Event) -> None:
+        if self.notebook.select() == str(self.financial_tab):
+            self.update_financial_analysis(show_errors=False)
+            self.last_analysis_warning_key = None
+            self.last_unit_conversion_notice = None
+            return
         if self.notebook.select() != str(self.results_tab):
             self.last_analysis_warning_key = None
             self.last_unit_conversion_notice = None
@@ -1419,10 +1447,12 @@ class RainwaterTkApp(tk.Tk):
         system_library = ttk.Frame(self.system_builder_side_tabs, padding=8)
         system_templates = ttk.Frame(self.system_builder_side_tabs, padding=8)
         system_edit = ttk.Frame(self.system_builder_side_tabs, padding=8)
+        system_geometry = ttk.Frame(self.system_builder_side_tabs, padding=8)
         self.system_component_edit_tab = system_edit
         self.system_builder_side_tabs.add(system_library, text="System object library")
         self.system_builder_side_tabs.add(system_templates, text="System templates")
         self.system_builder_side_tabs.add(system_edit, text="Edit")
+        self.system_builder_side_tabs.add(system_geometry, text="Geometry")
         system_library.columnconfigure(0, weight=1)
         system_library.rowconfigure(0, weight=1)
         self.system_component_library = ttk.Treeview(system_library, show="tree", height=15, selectmode="browse")
@@ -1455,6 +1485,29 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(
             system_templates,
             text="Applying a template replaces the objects and links currently on the canvas.",
+            foreground="#667278",
+            wraplength=230,
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        system_geometry.columnconfigure(0, weight=1)
+        ttk.Checkbutton(
+            system_geometry,
+            text="Select multiple objects",
+            variable=self.system_multi_select_var,
+            command=self._system_multi_select_changed,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            system_geometry,
+            text="Align selected horizontally",
+            command=self.align_selected_system_objects_horizontally,
+        ).grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            system_geometry,
+            text="Clear selection",
+            command=self.clear_system_geometry_selection,
+        ).grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(
+            system_geometry,
+            textvariable=self.system_geometry_status_var,
             foreground="#667278",
             wraplength=230,
         ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -1653,6 +1706,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_type_var.set(system_type)
         self.current_system_type_var.set(f"Current system type: {system_type}")
         self.system_builder_selected_id = None
+        self.system_builder_selected_ids.clear()
         self.system_builder_selected_connection = None
         self.system_builder_pending_source = None
         self._render_system_builder()
@@ -1663,6 +1717,11 @@ class RainwaterTkApp(tk.Tk):
         if label is None:
             return
         component_id = self._new_system_component_id(component_type)
+        position = self._nearest_available_system_position(x, y)
+        if position is None:
+            self.status_var.set("No open space is available for another system object")
+            return
+        x, y = position
         self.config_model.system_layout.append(
             {"id": component_id, "component_type": component_type, "name": label, "x": x, "y": y}
         )
@@ -1702,6 +1761,96 @@ class RainwaterTkApp(tk.Tk):
             (item for item in self.config_model.system_layout if str(item.get("id")) == component_id),
             None,
         )
+
+    @staticmethod
+    def _system_blocks_overlap(
+        first_x: float, first_y: float, second_x: float, second_y: float
+    ) -> bool:
+        """Treat system blocks as solid rectangles with a small visual gap."""
+        return RainwaterTkApp._system_rectangles_overlap(
+            first_x, first_y, 124.0, 60.0, second_x, second_y, 124.0, 60.0
+        )
+
+    @staticmethod
+    def _system_rectangles_overlap(
+        first_x: float,
+        first_y: float,
+        first_width: float,
+        first_height: float,
+        second_x: float,
+        second_y: float,
+        second_width: float,
+        second_height: float,
+    ) -> bool:
+        return (
+            abs(first_x - second_x) < (first_width + second_width) / 2.0 + 8.0
+            and abs(first_y - second_y) < (first_height + second_height) / 2.0 + 8.0
+        )
+
+    def _system_position_overlaps(
+        self,
+        x: float,
+        y: float,
+        *,
+        width: float = 124.0,
+        height: float = 60.0,
+        exclude_id: str | None = None,
+    ) -> bool:
+        for item in self.config_model.system_layout:
+            if exclude_id is not None and str(item.get("id")) == exclude_id:
+                continue
+            try:
+                other_x, other_y = float(item["x"]), float(item["y"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            other_width = max(float(item.get("width", 124.0)), 80.0)
+            other_height = max(float(item.get("height", 60.0)), 44.0)
+            if self._system_rectangles_overlap(
+                x, y, width, height, other_x, other_y, other_width, other_height
+            ):
+                return True
+        return False
+
+    def _system_canvas_dimensions(self) -> tuple[float, float]:
+        width = max(
+            float(self.system_builder_canvas.winfo_width()),
+            float(self.system_builder_canvas.cget("width")),
+        )
+        height = max(
+            float(self.system_builder_canvas.winfo_height()),
+            float(self.system_builder_canvas.cget("height")),
+        )
+        return width, height
+
+    def _nearest_available_system_position(self, x: float, y: float) -> tuple[float, float] | None:
+        width, height = self._system_canvas_dimensions()
+        requested = (
+            min(max(float(x), 65.0), max(width - 65.0, 65.0)),
+            min(max(float(y), 35.0), max(height - 35.0, 35.0)),
+        )
+        if not self._system_position_overlaps(*requested):
+            return requested
+        candidates = [
+            (candidate_x, candidate_y)
+            for candidate_y in self._float_range(35.0, max(height - 35.0, 35.0), 68.0)
+            for candidate_x in self._float_range(65.0, max(width - 65.0, 65.0), 132.0)
+            if not self._system_position_overlaps(candidate_x, candidate_y)
+        ]
+        if not candidates:
+            return None
+        return min(
+            candidates,
+            key=lambda point: (point[0] - requested[0]) ** 2 + (point[1] - requested[1]) ** 2,
+        )
+
+    @staticmethod
+    def _float_range(start: float, stop: float, step: float) -> list[float]:
+        values: list[float] = []
+        value = start
+        while value <= stop + 0.001:
+            values.append(value)
+            value += step
+        return values
 
     @staticmethod
     def _system_component_ports(component_type: str) -> tuple[bool, bool]:
@@ -1748,7 +1897,42 @@ class RainwaterTkApp(tk.Tk):
                 self._render_system_builder()
             return
         component_tag = next((tag for tag in tags if tag.startswith("component:")), None)
-        self.system_builder_selected_id = component_tag.split(":", 1)[1] if component_tag else None
+        clicked_id = component_tag.split(":", 1)[1] if component_tag else None
+        if (
+            clicked_id is not None
+            and clicked_id == self.system_builder_selected_id
+            and not self.system_multi_select_var.get()
+        ):
+            item = self._system_layout_item(clicked_id)
+            if item is not None:
+                x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
+                item_width = float(item.get("width", 124.0))
+                item_height = float(item.get("height", 60.0))
+                horizontal = "w" if event.x < x else "e"
+                vertical = "n" if event.y < y else "s"
+                corner_x = x - item_width / 2.0 if horizontal == "w" else x + item_width / 2.0
+                corner_y = y - item_height / 2.0 if vertical == "n" else y + item_height / 2.0
+                if abs(event.x - corner_x) <= 10.0 and abs(event.y - corner_y) <= 10.0:
+                    self.system_builder_resize_state = (
+                        clicked_id, vertical + horizontal, x, y, item_width, item_height,
+                        float(event.x), float(event.y),
+                    )
+                    return
+        if self.system_multi_select_var.get():
+            if clicked_id is not None:
+                if clicked_id in self.system_builder_selected_ids:
+                    self.system_builder_selected_ids.remove(clicked_id)
+                else:
+                    self.system_builder_selected_ids.add(clicked_id)
+            self.system_builder_selected_id = None
+            self.system_geometry_status_var.set(
+                f"{len(self.system_builder_selected_ids)} object(s) selected."
+            )
+            self.system_builder_canvas.focus_set()
+            self._render_system_builder()
+            return
+        self.system_builder_selected_ids.clear()
+        self.system_builder_selected_id = clicked_id
         self.system_builder_selected_connection = None
         self.system_builder_pending_source = None
         if self.system_builder_selected_id:
@@ -1760,18 +1944,141 @@ class RainwaterTkApp(tk.Tk):
         self._render_system_builder()
 
     def _system_canvas_drag(self, event: tk.Event) -> None:
+        if self.system_builder_resize_state is not None:
+            self._resize_selected_system_object(event)
+            return
         if self.system_builder_selected_id is None:
             return
         item = self._system_layout_item(self.system_builder_selected_id)
         if item is None:
             return
         offset_x, offset_y = self.system_builder_drag_offset
-        item["x"] = min(max(event.x - offset_x, 65.0), max(self.system_builder_canvas.winfo_width() - 65.0, 65.0))
-        item["y"] = min(max(event.y - offset_y, 35.0), max(self.system_builder_canvas.winfo_height() - 35.0, 35.0))
+        item_width = max(float(item.get("width", 124.0)), 80.0)
+        item_height = max(float(item.get("height", 60.0)), 44.0)
+        width, height = self._system_canvas_dimensions()
+        proposed_x = min(max(event.x - offset_x, item_width / 2.0 + 3.0), max(width - item_width / 2.0 - 3.0, item_width / 2.0 + 3.0))
+        proposed_y = min(max(event.y - offset_y, item_height / 2.0 + 3.0), max(height - item_height / 2.0 - 3.0, item_height / 2.0 + 3.0))
+        current_x, current_y = float(item["x"]), float(item["y"])
+        if not self._system_position_overlaps(
+            proposed_x, proposed_y, width=item_width, height=item_height,
+            exclude_id=self.system_builder_selected_id
+        ):
+            item["x"], item["y"] = proposed_x, proposed_y
+        elif not self._system_position_overlaps(
+            proposed_x, current_y, width=item_width, height=item_height,
+            exclude_id=self.system_builder_selected_id
+        ):
+            item["x"] = proposed_x
+        elif not self._system_position_overlaps(
+            current_x, proposed_y, width=item_width, height=item_height,
+            exclude_id=self.system_builder_selected_id
+        ):
+            item["y"] = proposed_y
         self._render_system_builder()
 
     def _system_canvas_release(self, _event: tk.Event) -> None:
         self.system_builder_drag_offset = (0.0, 0.0)
+        self.system_builder_resize_state = None
+
+    def _resize_selected_system_object(self, event: tk.Event) -> None:
+        state = self.system_builder_resize_state
+        if state is None:
+            return
+        component_id, corner, original_x, original_y, original_width, original_height, press_x, press_y = state
+        item = self._system_layout_item(str(component_id))
+        if item is None:
+            return
+        dx, dy = float(event.x) - float(press_x), float(event.y) - float(press_y)
+        left = float(original_x) - float(original_width) / 2.0
+        right = float(original_x) + float(original_width) / 2.0
+        top = float(original_y) - float(original_height) / 2.0
+        bottom = float(original_y) + float(original_height) / 2.0
+        if "w" in str(corner):
+            left = min(left + dx, right - 80.0)
+        else:
+            right = max(right + dx, left + 80.0)
+        if "n" in str(corner):
+            top = min(top + dy, bottom - 44.0)
+        else:
+            bottom = max(bottom + dy, top + 44.0)
+        width, height = self._system_canvas_dimensions()
+        if left < 3.0 or right > width - 3.0 or top < 3.0 or bottom > height - 3.0:
+            return
+        new_width, new_height = right - left, bottom - top
+        new_x, new_y = (left + right) / 2.0, (top + bottom) / 2.0
+        if self._system_position_overlaps(
+            new_x,
+            new_y,
+            width=new_width,
+            height=new_height,
+            exclude_id=str(component_id),
+        ):
+            return
+        item.update({"x": new_x, "y": new_y, "width": new_width, "height": new_height})
+        self._render_system_builder()
+
+    def _system_multi_select_changed(self) -> None:
+        if not self.system_multi_select_var.get():
+            self.system_builder_selected_ids.clear()
+            self.system_geometry_status_var.set("Turn on multi-select, then choose two or more objects.")
+        else:
+            self.system_builder_selected_id = None
+            self.system_geometry_status_var.set("Click objects on the canvas to add or remove them.")
+        self._render_system_builder()
+
+    def clear_system_geometry_selection(self) -> None:
+        self.system_builder_selected_ids.clear()
+        self.system_geometry_status_var.set("0 objects selected.")
+        self._render_system_builder()
+
+    def align_selected_system_objects_horizontally(self) -> None:
+        items = [
+            item for item in self.config_model.system_layout
+            if str(item.get("id")) in self.system_builder_selected_ids
+        ]
+        if len(items) < 2:
+            self.system_geometry_status_var.set("Select at least two objects to align.")
+            return
+        items.sort(key=lambda item: float(item.get("x", 0.0)))
+        canvas_width, canvas_height = self._system_canvas_dimensions()
+        target_y = sum(float(item.get("y", 0.0)) for item in items) / len(items)
+        max_height = max(float(item.get("height", 60.0)) for item in items)
+        target_y = min(max(target_y, max_height / 2.0 + 3.0), canvas_height - max_height / 2.0 - 3.0)
+        widths = [float(item.get("width", 124.0)) for item in items]
+        planned_x = [float(items[0].get("x", 0.0))]
+        for index in range(1, len(items)):
+            minimum_x = planned_x[-1] + widths[index - 1] / 2.0 + widths[index] / 2.0 + 8.0
+            planned_x.append(max(float(items[index].get("x", 0.0)), minimum_x))
+        left_edge = planned_x[0] - widths[0] / 2.0
+        right_edge = planned_x[-1] + widths[-1] / 2.0
+        shift = 0.0
+        if left_edge < 3.0:
+            shift = 3.0 - left_edge
+        if right_edge + shift > canvas_width - 3.0:
+            shift += canvas_width - 3.0 - (right_edge + shift)
+        planned_x = [value + shift for value in planned_x]
+        if planned_x[0] - widths[0] / 2.0 < 3.0:
+            self.system_geometry_status_var.set("The selected objects do not fit horizontally on the canvas.")
+            return
+        selected_ids = {str(item.get("id")) for item in items}
+        for item, x, item_width in zip(items, planned_x, widths):
+            item_height = float(item.get("height", 60.0))
+            for other in self.config_model.system_layout:
+                if str(other.get("id")) in selected_ids:
+                    continue
+                if self._system_rectangles_overlap(
+                    x, target_y, item_width, item_height,
+                    float(other.get("x", 0.0)), float(other.get("y", 0.0)),
+                    float(other.get("width", 124.0)), float(other.get("height", 60.0)),
+                ):
+                    self.system_geometry_status_var.set(
+                        "Alignment is blocked by an unselected object; move it or include it in the selection."
+                    )
+                    return
+        for item, x in zip(items, planned_x):
+            item["x"], item["y"] = x, target_y
+        self.system_geometry_status_var.set(f"Aligned {len(items)} objects horizontally.")
+        self._render_system_builder()
 
     def _cancel_system_link(self, _event: tk.Event | None = None) -> str:
         self.system_builder_pending_source = None
@@ -1923,24 +2230,35 @@ class RainwaterTkApp(tk.Tk):
         target_x: float,
         target_y: float,
         canvas_height: float,
+        source_width: float = 124.0,
+        target_width: float = 124.0,
+        source_height: float = 60.0,
+        target_height: float = 60.0,
     ) -> tuple[float, ...]:
         """Route a connection to the target's left port without crossing either object."""
-        start_x = source_x + 68.0
-        end_x = target_x - 68.0
+        start_x = source_x + source_width / 2.0 + 6.0
+        end_x = target_x - target_width / 2.0 - 6.0
         if end_x >= start_x + 24.0:
             midpoint = (start_x + end_x) / 2.0
             return (start_x, source_y, midpoint, source_y, midpoint, target_y, end_x, target_y)
 
         source_rail_x = start_x + 24.0
         target_rail_x = end_x - 24.0
-        upper_corridor = min(source_y, target_y) - 52.0
-        lower_corridor = max(source_y, target_y) + 52.0
-        if upper_corridor >= 10.0:
-            corridor_y = upper_corridor
-        elif lower_corridor <= max(canvas_height - 10.0, 10.0):
-            corridor_y = lower_corridor
+        if abs(target_y - source_y) >= (source_height + target_height) / 2.0 + 24.0:
+            # When the blocks have a clear vertical gap, route through that gap. For a
+            # source above its target this reads naturally as right, down, left, down,
+            # then right into the target's inlet instead of looping over both blocks.
+            corridor_y = (source_y + target_y) / 2.0
         else:
-            corridor_y = upper_corridor
+            corridor_offset = max(source_height, target_height) / 2.0 + 22.0
+            upper_corridor = min(source_y, target_y) - corridor_offset
+            lower_corridor = max(source_y, target_y) + corridor_offset
+            if upper_corridor >= 10.0:
+                corridor_y = upper_corridor
+            elif lower_corridor <= max(canvas_height - 10.0, 10.0):
+                corridor_y = lower_corridor
+            else:
+                corridor_y = upper_corridor
         return (
             start_x,
             source_y,
@@ -1972,7 +2290,15 @@ class RainwaterTkApp(tk.Tk):
             selected = connection is self.system_builder_selected_connection
             canvas.create_line(
                 *self._system_connection_points(
-                    source_x, source_y, target_x, target_y, canvas.winfo_height()
+                    source_x,
+                    source_y,
+                    target_x,
+                    target_y,
+                    canvas.winfo_height(),
+                    float(source.get("width", 124.0)),
+                    float(target.get("width", 124.0)),
+                    float(source.get("height", 60.0)),
+                    float(target.get("height", 60.0)),
                 ),
                 fill="#1565c0" if selected else "#58656b",
                 width=4 if selected else 3,
@@ -1985,6 +2311,8 @@ class RainwaterTkApp(tk.Tk):
                 component_id = str(item["id"])
                 component_type = str(item["component_type"])
                 x, y = float(item["x"]), float(item["y"])
+                object_width = max(float(item.get("width", 124.0)), 80.0)
+                object_height = max(float(item.get("height", 60.0)), 44.0)
             except (KeyError, TypeError, ValueError):
                 continue
             label = str(item.get("name") or self._system_component_templates().get(component_type, component_type))
@@ -1998,22 +2326,30 @@ class RainwaterTkApp(tk.Tk):
                 if assigned_count:
                     label = f"{label}\n({assigned_count} demand{'s' if assigned_count != 1 else ''})"
             selected = component_id == self.system_builder_selected_id
-            outline = "#1565c0" if selected else "#30363a"
-            fill = "#e8f1fb" if selected else "#f7f9fa"
+            geometry_selected = component_id in self.system_builder_selected_ids
+            outline = "#1565c0" if selected or geometry_selected else "#30363a"
+            fill = "#e8f1fb" if selected or geometry_selected else "#f7f9fa"
             tag = f"component:{component_id}"
-            canvas.create_rectangle(x - 62, y - 30, x + 62, y + 30, fill=fill, outline=outline, width=3 if selected else 2, tags=(tag,))
-            canvas.create_text(x, y, text=label, width=112, justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,))
+            half_width, half_height = object_width / 2.0, object_height / 2.0
+            canvas.create_rectangle(
+                x - half_width, y - half_height, x + half_width, y + half_height,
+                fill=fill, outline=outline, width=3 if selected or geometry_selected else 2, tags=(tag,)
+            )
+            canvas.create_text(
+                x, y, text=label, width=max(object_width - 12.0, 68.0),
+                justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,)
+            )
             has_inlet, has_outlet = self._system_component_ports(component_type)
             if has_inlet:
                 canvas.create_oval(
-                    x - 72, y - 7, x - 58, y + 7,
+                    x - half_width - 10, y - 7, x - half_width + 4, y + 7,
                     fill="#ffffff", outline="#30363a", width=2,
                     tags=(f"port:{component_id}:in",),
                 )
             if has_outlet:
                 pending = component_id == self.system_builder_pending_source
                 canvas.create_oval(
-                    x + 58, y - 7, x + 72, y + 7,
+                    x + half_width - 4, y - 7, x + half_width + 10, y + 7,
                     fill="#2e8b57" if pending else "#ffffff",
                     outline="#1565c0" if pending else "#30363a",
                     width=3 if pending else 2,
@@ -2645,6 +2981,221 @@ class RainwaterTkApp(tk.Tk):
             row=0, column=1
         )
         self._update_multitank_comparison_state()
+
+    def _build_financial_tab(self) -> None:
+        self.financial_tab.columnconfigure(0, weight=1)
+        self.financial_tab.columnconfigure(1, weight=1)
+        self.financial_tab.rowconfigure(1, weight=1)
+        self.financial_tab.rowconfigure(2, weight=1)
+        ttk.Label(
+            self.financial_tab,
+            text=(
+                "This simple-rate estimate values only rainwater delivered to demand by the latest simulation. "
+                "Overflow, unmet demand, municipal makeup, treatment loss, and water left in storage are excluded."
+            ),
+            foreground="#667278",
+            wraplength=950,
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+
+        inputs = ttk.LabelFrame(self.financial_tab, text="Financial assumptions", padding=12)
+        inputs.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
+        inputs.columnconfigure(1, weight=1)
+        ttk.Label(inputs, text="Currency").grid(row=0, column=0, sticky="w", pady=3)
+        ttk.Combobox(
+            inputs,
+            textvariable=self.financial_currency_var,
+            values=("USD", "CAD", "EUR", "GBP", "AUD", "Other"),
+            state="readonly",
+            width=14,
+        ).grid(row=0, column=1, sticky="ew", pady=3)
+        ttk.Label(inputs, text="Tariff billing unit").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Combobox(
+            inputs,
+            textvariable=self.financial_tariff_unit_var,
+            values=("per 1,000 gal", "per m³"),
+            state="readonly",
+            width=14,
+        ).grid(row=1, column=1, sticky="ew", pady=3)
+        self._labeled_entry(inputs, 2, "Water rate", self.financial_water_rate_var, self.financial_tariff_unit_var)
+        self._labeled_entry(inputs, 3, "Sewer rate", self.financial_sewer_rate_var, self.financial_tariff_unit_var)
+        self._labeled_entry(inputs, 4, "Rainwater supply eligible for sewer savings", self.financial_sewer_eligible_var, self.percent_unit_var)
+        self._labeled_entry(inputs, 5, "Installed system cost", self.financial_installed_cost_var, self.financial_currency_var)
+        self._labeled_entry(inputs, 6, "Incentives or rebates", self.financial_incentives_var, self.financial_currency_var)
+        self._labeled_entry(inputs, 7, "Fixed annual maintenance", self.financial_fixed_maintenance_var, self.financial_currency_var)
+        self._labeled_entry(inputs, 8, "Annual maintenance", self.financial_maintenance_percent_var, self.percent_unit_var)
+        ttk.Label(inputs, text="Analysis period").grid(row=9, column=0, sticky="w", pady=3)
+        ttk.Spinbox(
+            inputs, from_=1, to=100, increment=1,
+            textvariable=self.financial_analysis_period_var, width=10,
+        ).grid(row=9, column=1, sticky="w", pady=3)
+        ttk.Label(inputs, text="years").grid(row=9, column=2, sticky="w", padx=(6, 0), pady=3)
+        ttk.Button(inputs, text="Update financial analysis", command=self.update_financial_analysis).grid(
+            row=10, column=0, columnspan=3, sticky="ew", pady=(12, 0)
+        )
+
+        outputs = ttk.LabelFrame(self.financial_tab, text="Selected-tank financial results", padding=12)
+        outputs.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
+        outputs.columnconfigure(1, weight=1)
+        result_rows = (
+            ("Average annual rainwater supplied", "supplied"),
+            ("Gross annual utility savings", "gross"),
+            ("Annual maintenance cost", "maintenance"),
+            ("Net annual savings", "net"),
+            ("Net installed cost after incentives", "net_cost"),
+            ("Simple payback", "payback"),
+            ("Net benefit over analysis period", "period_benefit"),
+        )
+        for row, (label, key) in enumerate(result_rows):
+            ttk.Label(outputs, text=label).grid(row=row, column=0, sticky="w", pady=5)
+            ttk.Label(
+                outputs,
+                textvariable=self.financial_result_vars[key],
+                font=("Segoe UI", 10, "bold"),
+                anchor="e",
+            ).grid(row=row, column=1, sticky="e", padx=(12, 0), pady=5)
+        ttk.Separator(outputs).grid(row=len(result_rows), column=0, columnspan=2, sticky="ew", pady=8)
+        ttk.Label(
+            outputs,
+            textvariable=self.financial_status_var,
+            foreground="#667278",
+            wraplength=400,
+        ).grid(row=len(result_rows) + 1, column=0, columnspan=2, sticky="ew")
+
+        comparison = ttk.LabelFrame(
+            self.financial_tab, text="Primary and comparison tank financial performance", padding=10
+        )
+        comparison.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        comparison.columnconfigure(0, weight=1)
+        comparison.rowconfigure(0, weight=1)
+        columns = ("tank", "supplied", "gross", "net", "payback")
+        self.financial_comparison_tree = ttk.Treeview(
+            comparison, columns=columns, show="headings", height=6
+        )
+        headings = {
+            "tank": "Tank size",
+            "supplied": "Annual rainwater supplied",
+            "gross": "Gross annual savings",
+            "net": "Net annual savings",
+            "payback": "Simple payback",
+        }
+        for column, heading in headings.items():
+            self.financial_comparison_tree.heading(column, text=heading)
+            self.financial_comparison_tree.column(column, width=165, anchor="e")
+        self.financial_comparison_tree.grid(row=0, column=0, sticky="nsew")
+        financial_scroll = ttk.Scrollbar(
+            comparison, orient="vertical", command=self.financial_comparison_tree.yview
+        )
+        financial_scroll.grid(row=0, column=1, sticky="ns")
+        self.financial_comparison_tree.configure(yscrollcommand=financial_scroll.set)
+
+    def _financial_results_source(self) -> pd.DataFrame:
+        if self.config_model.demand.hourly_schedule_enabled and not self.hourly_results_df.empty:
+            return self.hourly_results_df
+        return self.results_df
+
+    def update_financial_analysis(self, *, show_errors: bool = True) -> None:
+        self._apply_financial_form_to_model()
+        source = self._financial_results_source()
+        if source.empty:
+            self.financial_status_var.set("Run a tank analysis to calculate financial results.")
+            for variable in self.financial_result_vars.values():
+                variable.set("--")
+            self.financial_comparison_tree.delete(*self.financial_comparison_tree.get_children())
+            return
+        params = self.config_model.financial_parameters
+        try:
+            results = calculate_financial_results(
+                source,
+                water_rate=params.water_rate,
+                sewer_rate=params.sewer_rate,
+                billing_unit=params.tariff_billing_unit,
+                sewer_eligible_percent=params.sewer_eligible_percent,
+                installed_cost=params.installed_cost,
+                incentives=params.incentives,
+                fixed_annual_maintenance=params.fixed_annual_maintenance,
+                maintenance_percent=params.annual_maintenance_percent,
+                analysis_period_years=params.analysis_period_years,
+            )
+        except ValueError as exc:
+            self.financial_status_var.set(str(exc))
+            for variable in self.financial_result_vars.values():
+                variable.set("--")
+            self.financial_comparison_tree.delete(*self.financial_comparison_tree.get_children())
+            if show_errors:
+                messagebox.showwarning(APP_TITLE, str(exc), parent=self)
+            return
+        currency = params.currency
+        volume_label = volume_unit(self.config_model)
+        supplied_display = volume_to_display(results.average_annual_supplied_gallons, self.config_model)
+        self.financial_result_vars["supplied"].set(f"{supplied_display:,.0f} {volume_label}/year")
+        self.financial_result_vars["gross"].set(f"{currency} {results.gross_annual_savings:,.2f}/year")
+        self.financial_result_vars["maintenance"].set(f"{currency} {results.annual_maintenance_cost:,.2f}/year")
+        self.financial_result_vars["net"].set(f"{currency} {results.net_annual_savings:,.2f}/year")
+        self.financial_result_vars["net_cost"].set(f"{currency} {results.net_installed_cost:,.2f}")
+        self.financial_result_vars["payback"].set(
+            f"{results.simple_payback_years:,.1f} years"
+            if results.simple_payback_years is not None
+            else "Not achieved"
+        )
+        self.financial_result_vars["period_benefit"].set(
+            f"{currency} {results.analysis_period_net_benefit:,.2f}"
+        )
+        source_label = "hourly" if source is self.hourly_results_df else "daily"
+        self.financial_status_var.set(
+            f"Based on average annual delivered rainwater from the latest {source_label} simulation. "
+            "This is a simple-rate, undiscounted estimate; tariff tiers, escalation, financing, energy, "
+            "replacement costs, NPV, and IRR are not included."
+        )
+        self._populate_financial_comparison()
+
+    def _populate_financial_comparison(self) -> None:
+        self.financial_comparison_tree.delete(*self.financial_comparison_tree.get_children())
+        params = self.config_model.financial_parameters
+        candidates: list[tuple[float, pd.DataFrame]] = [
+            (float(self.config_model.selected_tank_size_gal), self._financial_results_source())
+        ]
+        candidates.extend(sorted(self.comparison_results.items()))
+        seen: set[float] = set()
+        for tank_size, source in candidates:
+            rounded_size = round(float(tank_size), 6)
+            if rounded_size in seen or source.empty:
+                continue
+            seen.add(rounded_size)
+            try:
+                results = calculate_financial_results(
+                    source,
+                    water_rate=params.water_rate,
+                    sewer_rate=params.sewer_rate,
+                    billing_unit=params.tariff_billing_unit,
+                    sewer_eligible_percent=params.sewer_eligible_percent,
+                    installed_cost=params.installed_cost,
+                    incentives=params.incentives,
+                    fixed_annual_maintenance=params.fixed_annual_maintenance,
+                    maintenance_percent=params.annual_maintenance_percent,
+                    analysis_period_years=params.analysis_period_years,
+                )
+            except ValueError:
+                continue
+            tank_display = volume_to_display(tank_size, self.config_model)
+            supplied_display = volume_to_display(
+                results.average_annual_supplied_gallons, self.config_model
+            )
+            payback = (
+                f"{results.simple_payback_years:,.1f} years"
+                if results.simple_payback_years is not None
+                else "Not achieved"
+            )
+            self.financial_comparison_tree.insert(
+                "",
+                "end",
+                values=(
+                    f"{tank_display:,.0f} {volume_unit(self.config_model)}",
+                    f"{supplied_display:,.0f} {volume_unit(self.config_model)}/yr",
+                    f"{params.currency} {results.gross_annual_savings:,.2f}",
+                    f"{params.currency} {results.net_annual_savings:,.2f}",
+                    payback,
+                ),
+            )
 
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
@@ -3325,6 +3876,17 @@ class RainwaterTkApp(tk.Tk):
         self.booster_initial_fill_var.set(f"{cfg.system_parameters.booster_initial_fill_percent:.2f}")
         self.booster_refill_level_var.set(f"{cfg.system_parameters.booster_refill_level_percent:.2f}")
         self.municipal_backup_enabled_var.set(cfg.system_parameters.municipal_backup_enabled)
+        financial = cfg.financial_parameters
+        self.financial_currency_var.set(financial.currency)
+        self.financial_water_rate_var.set(f"{financial.water_rate:g}")
+        self.financial_sewer_rate_var.set(f"{financial.sewer_rate:g}")
+        self.financial_tariff_unit_var.set(financial.tariff_billing_unit)
+        self.financial_sewer_eligible_var.set(f"{financial.sewer_eligible_percent:g}")
+        self.financial_installed_cost_var.set(f"{financial.installed_cost:g}")
+        self.financial_incentives_var.set(f"{financial.incentives:g}")
+        self.financial_fixed_maintenance_var.set(f"{financial.fixed_annual_maintenance:g}")
+        self.financial_maintenance_percent_var.set(f"{financial.annual_maintenance_percent:g}")
+        self.financial_analysis_period_var.set(str(financial.analysis_period_years))
         self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -3418,6 +3980,7 @@ class RainwaterTkApp(tk.Tk):
             max(_float(self.booster_refill_level_var.get(), 50.0), 0.0), 100.0
         )
         cfg.system_parameters.municipal_backup_enabled = bool(self.municipal_backup_enabled_var.get())
+        self._apply_financial_form_to_model()
         cfg.demand.avg_flush_per_person = _float(self.flushes_var.get())
         cfg.demand.gallons_per_flush_toilet = volume_to_internal(_float(self.toilet_flush_var.get()), cfg)
         cfg.demand.gallons_per_flush_urinal = volume_to_internal(_float(self.urinal_flush_var.get()), cfg)
@@ -3430,6 +3993,21 @@ class RainwaterTkApp(tk.Tk):
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.reliable_fill_percent = min(max(_float(self.reserve_var.get(), 25), 0), 100)
         return True
+
+    def _apply_financial_form_to_model(self) -> None:
+        params = self.config_model.financial_parameters
+        params.currency = self.financial_currency_var.get().strip() or "USD"
+        params.water_rate = _float(self.financial_water_rate_var.get(), 0.0)
+        params.sewer_rate = _float(self.financial_sewer_rate_var.get(), 0.0)
+        params.tariff_billing_unit = self.financial_tariff_unit_var.get().strip() or "per 1,000 gal"
+        params.sewer_eligible_percent = _float(self.financial_sewer_eligible_var.get(), 100.0)
+        params.installed_cost = _float(self.financial_installed_cost_var.get(), 0.0)
+        params.incentives = _float(self.financial_incentives_var.get(), 0.0)
+        params.fixed_annual_maintenance = _float(self.financial_fixed_maintenance_var.get(), 0.0)
+        params.annual_maintenance_percent = _float(
+            self.financial_maintenance_percent_var.get(), 0.0
+        )
+        params.analysis_period_years = int(_float(self.financial_analysis_period_var.get(), 20.0))
 
     def _populate_surfaces(self) -> None:
         self.surface_tree.heading("area", text=f"Area ({area_unit(self.config_model)})")
@@ -5188,6 +5766,7 @@ class RainwaterTkApp(tk.Tk):
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
             self._set_selected_tank_reliability(reliability)
             self._populate_results()
+            self.update_financial_analysis(show_errors=False)
             self._draw_saved_analysis_charts()
             cfg.analysis_input_signature = analysis_input_signature(cfg, self.rainfall_df)
             cfg.analysis_unit_system = cfg.unit_system
@@ -5940,6 +6519,10 @@ coordinates {{{yearly_marker_coordinates}}};
         report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
         multitank_html = RainwaterTkApp._build_multitank_report_html(report)
         system_visualization_html = RainwaterTkApp._build_system_visualization_html(report)
+        multitank_toc_html = "".join(
+            f'<li><a href="#multitank-chart-{index}">{escape(chart.get("title", f"Multitank chart {index}"))}</a></li>'
+            for index, chart in enumerate(report.get("multitank_charts", []), start=1)
+        ) if report.get("include_multitank_charts") else ""
         surface_rows = "".join(
             f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
             f"<td>{surface['runoff_coefficient']:.2f}</td></tr>"
@@ -6126,15 +6709,16 @@ coordinates {{{yearly_marker_coordinates}}};
 <title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
 <style>
 :root {{ color-scheme: light; --ink:#17242b; --muted:#64747c; --line:#dce5e8; --green:#18795b; --blue:#176b9c; --paper:#fff; --wash:#f2f6f5; }}
-* {{ box-sizing:border-box; }} body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 Arial,Helvetica,sans-serif; }}
-main {{ width:min(1040px,calc(100% - 32px)); margin:32px auto; background:var(--paper); box-shadow:0 12px 36px rgba(23,36,43,.10); }}
+* {{ box-sizing:border-box; }} html {{ scroll-behavior:smooth; }} body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 Arial,Helvetica,sans-serif; }}
+.report-shell {{ display:grid; grid-template-columns:240px minmax(0,1040px); justify-content:center; gap:24px; width:min(1336px,calc(100% - 32px)); margin:32px auto; align-items:start; }}
+main {{ width:100%; min-width:0; background:var(--paper); box-shadow:0 12px 36px rgba(23,36,43,.10); }}
 header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
 .eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
 h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
-section {{ padding:34px 52px; border-bottom:1px solid var(--line); }} h2 {{ margin:0 0 20px; font-size:20px; }}
+main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
 .fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
-.toc ul {{ margin:0; padding:0; list-style:none; columns:2; }} .toc li {{ break-inside:avoid; border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:10px 0; color:var(--blue); font-weight:700; text-decoration:none; }} .toc a:hover {{ text-decoration:underline; }} .notes-text {{ margin:0; white-space:pre-wrap; }}
+.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-inner {{ padding:20px 18px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
@@ -6145,11 +6729,13 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
-@media (max-width:700px) {{ main {{ width:100%; margin:0; }} header,section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
-@media print {{ body {{ background:#fff; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
-</style></head><body><main>
+@media (max-width:900px) {{ .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} main {{ box-shadow:none; }} }}
+@media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
+@media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
+</style></head><body><div class="report-shell">
+<nav class="toc" aria-label="Table of contents"><div class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
-<nav class="toc" aria-label="Table of contents"><section><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li></ul></section></nav>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
@@ -6173,8 +6759,18 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 </svg></div></section>
 {multitank_html}
 <footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
-</main><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
+</main></div><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
 <script>
+const tocLinks=[...document.querySelectorAll('.toc a[href^="#"]')];
+const tocTargets=tocLinks.map((link)=>document.querySelector(link.getAttribute('href'))).filter(Boolean);
+if('IntersectionObserver' in window){{
+  const tocObserver=new IntersectionObserver((entries)=>{{
+    const visible=entries.filter((entry)=>entry.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);
+    if(!visible.length)return;
+    tocLinks.forEach((link)=>link.classList.toggle('active',link.getAttribute('href')==='#'+visible[0].target.id));
+  }},{{rootMargin:'-10% 0px -75% 0px',threshold:0}});
+  tocTargets.forEach((target)=>tocObserver.observe(target));
+}}
 const chartTooltip=document.getElementById('chart-tooltip');
 document.querySelectorAll('[data-tooltip]').forEach((element)=>{{
   element.addEventListener('mouseenter',()=>{{chartTooltip.textContent=element.dataset.tooltip;chartTooltip.style.display='block';}});
