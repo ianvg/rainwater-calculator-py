@@ -13,6 +13,7 @@ from .models import (
     DemandObject,
     DemandProfile,
     FinancialParameters,
+    OptimizationParameters,
     ProjectConfig,
     Surface,
     SystemComponentParameters,
@@ -228,6 +229,7 @@ class SQLiteStore:
         )
         system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
         financial_params = FinancialParameters(**payload.get("financial_parameters", {}))
+        optimization_params = OptimizationParameters(**payload.get("optimization_parameters", {}))
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
@@ -273,6 +275,7 @@ class SQLiteStore:
             tank_parameters=tank_params,
             system_parameters=system_params,
             financial_parameters=financial_params,
+            optimization_parameters=optimization_params,
         )
 
 

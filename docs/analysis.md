@@ -40,6 +40,14 @@ When an hourly schedule is enabled, the primary-tank analysis also produces hour
 
 If analysis cannot start, check that rainfall data has been imported and that required numeric values are valid and positive.
 
+## Optimize an indirect system
+
+The **Optimization** area in **Analysis settings** evaluates a built-in planning catalog of three primary tanks, three filtration pumps, and three booster tanks. It runs all 27 combinations through the hourly indirect-system model, removes combinations below the entered minimum rainwater reliability, and ranks feasible designs by simple payback.
+
+Enter only the **Minimum rainwater reliability** and **Electricity price** before running the optimizer. The calculation reuses rainfall, collection, demand, minimum operating level, filter recovery, municipal-backup settings, and the assumptions on the **Financial analysis** tab. Catalog component costs are added to the base installed system cost. Estimated filtration-pump electricity and annual maintenance are deducted from annual water and sewer savings.
+
+The current catalog is illustrative and is not vendor data or a market quotation. Product identifiers, capacities, power, and prices are placeholders for development and early planning. A result marked **Infeasible** does not meet the selected rainwater-reliability target. **Not achieved** means net annual savings are not positive, so a finite simple payback cannot be calculated.
+
 ## Reliability curve
 
 The reliability curve compares tank size with the percentage of simulated calendar days on which the system can provide 100% of that day's water demand. For each day, the simulation compares the water available in the tank immediately before withdrawal with the full daily demand. A day is reliable when the available water is greater than or equal to that demand. Reliability is calculated as:

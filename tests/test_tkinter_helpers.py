@@ -502,3 +502,20 @@ def test_system_block_collision_includes_visual_spacing() -> None:
     assert RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 100.0, 160.0)
     assert not RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 232.0, 100.0)
     assert not RainwaterTkApp._system_blocks_overlap(100.0, 100.0, 100.0, 168.0)
+
+
+def test_node_disconnect_only_removes_connections_for_selected_direction() -> None:
+    connections = [
+        {"source_component": "a", "target_component": "b"},
+        {"source_component": "b", "target_component": "c"},
+        {"source_component": "d", "target_component": "b"},
+    ]
+
+    assert RainwaterTkApp._connections_after_node_disconnect(connections, "b", "in") == [
+        {"source_component": "b", "target_component": "c"}
+    ]
+    assert RainwaterTkApp._connections_after_node_disconnect(connections, "b", "out") == [
+        {"source_component": "a", "target_component": "b"},
+        {"source_component": "d", "target_component": "b"},
+    ]
+    assert RainwaterTkApp._connections_after_node_disconnect(connections, "b", None) == []

@@ -38,6 +38,8 @@ def test_financial_results_reconcile_savings_maintenance_and_payback() -> None:
     )
 
     assert results.average_annual_supplied_gallons == pytest.approx(162.5)
+    assert results.annual_municipal_water_savings == pytest.approx(1.625)
+    assert results.annual_sewer_savings == pytest.approx(1.625)
     assert results.gross_annual_savings == pytest.approx(3.25)
     assert results.annual_maintenance_cost == pytest.approx(2.0)
     assert results.net_annual_savings == pytest.approx(1.25)

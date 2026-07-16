@@ -101,6 +101,12 @@ class FinancialParameters:
 
 
 @dataclass
+class OptimizationParameters:
+    minimum_reliability_percent: float = 80.0
+    electricity_rate_per_kwh: float = 0.15
+
+
+@dataclass
 class ProjectConfig:
     name: str
     author_name: str = ""
@@ -133,6 +139,7 @@ class ProjectConfig:
     tank_parameters: TankParameters = field(default_factory=TankParameters)
     system_parameters: SystemComponentParameters = field(default_factory=SystemComponentParameters)
     financial_parameters: FinancialParameters = field(default_factory=FinancialParameters)
+    optimization_parameters: OptimizationParameters = field(default_factory=OptimizationParameters)
 
     def to_dict(self) -> Dict:
         return asdict(self)

@@ -68,6 +68,7 @@ from rainwater_app.units import (
     volume_to_internal,
     volume_unit,
 )
+from rainwater_app.optimization import optimize_indirect_system
 
 APP_TITLE = "Rainwater Harvesting Calculator"
 DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
@@ -850,8 +851,18 @@ class RainwaterTkApp(tk.Tk):
         self.financial_analysis_period_var = tk.StringVar(value=str(financial.analysis_period_years))
         self.financial_status_var = tk.StringVar(value="Run a tank analysis to calculate financial results.")
         self.financial_result_vars = {key: tk.StringVar(value="--") for key in (
-            "supplied", "gross", "maintenance", "net", "net_cost", "payback", "period_benefit"
+            "supplied", "water_savings", "sewer_savings", "gross", "maintenance", "net", "net_cost", "payback", "period_benefit"
         )}
+        optimization = self.config_model.optimization_parameters
+        self.optimization_minimum_reliability_var = tk.StringVar(
+            value=str(optimization.minimum_reliability_percent)
+        )
+        self.optimization_electricity_rate_var = tk.StringVar(
+            value=str(optimization.electricity_rate_per_kwh)
+        )
+        self.optimization_status_var = tk.StringVar(
+            value="Uses 27 combinations from an illustrative built-in product catalog."
+        )
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.average_annual_precipitation_var = tk.StringVar(value="Average annual precipitation: --")
@@ -1483,6 +1494,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_canvas.bind("<ButtonPress-1>", self._system_canvas_press)
         self.system_builder_canvas.bind("<B1-Motion>", self._system_canvas_drag)
         self.system_builder_canvas.bind("<ButtonRelease-1>", self._system_canvas_release)
+        self.system_builder_canvas.bind("<Button-3>", self._system_node_context_menu)
         self.system_builder_canvas.bind("<Delete>", lambda _event: self.delete_selected_system_component())
         self.system_builder_canvas.bind("<Escape>", self._cancel_system_link)
         self.system_builder_side_tabs = ttk.Notebook(self.indirect_system_diagram_frame)
@@ -1666,7 +1678,8 @@ class RainwaterTkApp(tk.Tk):
         )
         ttk.Label(
             self.indirect_system_diagram_frame,
-            text="Link objects by selecting an output node and then an input node. Select a link and press Delete to remove it.",
+            text=("Link objects by selecting either an output or input node, then the opposite node. "
+                  "You can also drag between nodes. Select a link and press Delete to remove it."),
             foreground="#667278",
         ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(
@@ -1677,6 +1690,9 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_id: str | None = None
         self.system_builder_selected_connection: dict[str, str] | None = None
         self.system_builder_pending_source: str | None = None
+        self.system_builder_pending_target: str | None = None
+        self.system_builder_port_drag: tuple[str, str] | None = None
+        self.system_builder_hover_port: tuple[str, str] | None = None
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_library_drag_type: str | None = None
         self._refresh_system_component_editor()
@@ -1752,6 +1768,8 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_ids.clear()
         self.system_builder_selected_connection = None
         self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
+        self.system_builder_port_drag = None
         self._render_system_builder()
         self.status_var.set(f"Applied {system_type.lower()} template")
 
@@ -1904,12 +1922,14 @@ class RainwaterTkApp(tk.Tk):
     def _connect_system_components(self, source_id: str, target_id: str) -> None:
         if source_id == target_id:
             self.system_builder_pending_source = None
+            self.system_builder_pending_target = None
             self._render_system_builder()
             return
         connection = {"source_component": source_id, "target_component": target_id}
         if connection not in self.config_model.system_connections:
             self.config_model.system_connections.append(connection)
         self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
         self.system_builder_selected_connection = connection
         self.system_builder_selected_id = None
         self._render_system_builder()
@@ -1920,13 +1940,26 @@ class RainwaterTkApp(tk.Tk):
         port_tag = next((tag for tag in tags if tag.startswith("port:")), None)
         if port_tag is not None:
             _prefix, component_id, direction = port_tag.split(":", 2)
-            if direction == "out":
+            if direction == "out" and self.system_builder_pending_target is not None:
+                self._connect_system_components(component_id, self.system_builder_pending_target)
+                self.system_builder_port_drag = None
+            elif direction == "in" and self.system_builder_pending_source is not None:
+                self._connect_system_components(self.system_builder_pending_source, component_id)
+                self.system_builder_port_drag = None
+            elif direction == "out":
                 self.system_builder_pending_source = component_id
+                self.system_builder_pending_target = None
                 self.system_builder_selected_id = component_id
                 self.system_builder_selected_connection = None
                 self._render_system_builder()
-            elif direction == "in" and self.system_builder_pending_source is not None:
-                self._connect_system_components(self.system_builder_pending_source, component_id)
+                self.system_builder_port_drag = (component_id, direction)
+            else:
+                self.system_builder_pending_target = component_id
+                self.system_builder_pending_source = None
+                self.system_builder_selected_id = component_id
+                self.system_builder_selected_connection = None
+                self._render_system_builder()
+                self.system_builder_port_drag = (component_id, direction)
             self.system_builder_canvas.focus_set()
             return
         connection_tag = next((tag for tag in tags if tag.startswith("connection:")), None)
@@ -1936,6 +1969,7 @@ class RainwaterTkApp(tk.Tk):
                 self.system_builder_selected_connection = self.config_model.system_connections[index]
                 self.system_builder_selected_id = None
                 self.system_builder_pending_source = None
+                self.system_builder_pending_target = None
                 self.system_builder_canvas.focus_set()
                 self._render_system_builder()
             return
@@ -1978,6 +2012,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_id = clicked_id
         self.system_builder_selected_connection = None
         self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
         if self.system_builder_selected_id:
             item = self._system_layout_item(self.system_builder_selected_id)
             if item is not None:
@@ -1987,6 +2022,22 @@ class RainwaterTkApp(tk.Tk):
         self._render_system_builder()
 
     def _system_canvas_drag(self, event: tk.Event) -> None:
+        if self.system_builder_port_drag is not None:
+            component_id, direction = self.system_builder_port_drag
+            item = self._system_layout_item(component_id)
+            if item is None:
+                return
+            x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
+            half_width = max(float(item.get("width", 124.0)), 80.0) / 2.0
+            start_x = x + half_width + 3.0 if direction == "out" else x - half_width - 3.0
+            self.system_builder_canvas.delete("pending-link-preview")
+            self.system_builder_canvas.create_line(
+                start_x, y, event.x, event.y,
+                fill="#9aa4a9", width=2, dash=(5, 3), arrow=tk.LAST,
+                tags=("pending-link-preview",),
+            )
+            self._update_system_port_drag_hover(event.x, event.y, component_id, direction)
+            return
         if self.system_builder_resize_state is not None:
             self._resize_selected_system_object(event)
             return
@@ -2019,9 +2070,65 @@ class RainwaterTkApp(tk.Tk):
             item["y"] = proposed_y
         self._render_system_builder()
 
-    def _system_canvas_release(self, _event: tk.Event) -> None:
+    def _system_canvas_release(self, event: tk.Event) -> None:
+        if self.system_builder_port_drag is not None:
+            origin_id, origin_direction = self.system_builder_port_drag
+            overlapping = self.system_builder_canvas.find_overlapping(
+                event.x - 2, event.y - 2, event.x + 2, event.y + 2
+            )
+            target_port: tuple[str, str] | None = None
+            for canvas_item in reversed(overlapping):
+                port_tag = next(
+                    (tag for tag in self.system_builder_canvas.gettags(canvas_item) if tag.startswith("port:")),
+                    None,
+                )
+                if port_tag:
+                    _prefix, component_id, direction = port_tag.split(":", 2)
+                    target_port = (component_id, direction)
+                    break
+            self.system_builder_port_drag = None
+            self._clear_system_port_drag_hover()
+            self.system_builder_canvas.delete("pending-link-preview")
+            if target_port is not None and target_port[1] != origin_direction:
+                if origin_direction == "out":
+                    self._connect_system_components(origin_id, target_port[0])
+                else:
+                    self._connect_system_components(target_port[0], origin_id)
+                return
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_builder_resize_state = None
+
+    def _clear_system_port_drag_hover(self) -> None:
+        if self.system_builder_hover_port is None:
+            return
+        component_id, direction = self.system_builder_hover_port
+        base_fill = "#1565c0" if direction == "in" else "#c62828"
+        for canvas_item in self.system_builder_canvas.find_withtag(
+            f"port:{component_id}:{direction}"
+        ):
+            self.system_builder_canvas.itemconfigure(canvas_item, fill=base_fill)
+        self.system_builder_hover_port = None
+
+    def _update_system_port_drag_hover(
+        self, x: float, y: float, origin_id: str, origin_direction: str
+    ) -> None:
+        self._clear_system_port_drag_hover()
+        expected_direction = "in" if origin_direction == "out" else "out"
+        overlapping = self.system_builder_canvas.find_overlapping(x - 2, y - 2, x + 2, y + 2)
+        for canvas_item in reversed(overlapping):
+            port_tag = next(
+                (tag for tag in self.system_builder_canvas.gettags(canvas_item) if tag.startswith("port:")),
+                None,
+            )
+            if not port_tag:
+                continue
+            _prefix, component_id, direction = port_tag.split(":", 2)
+            if direction != expected_direction or component_id == origin_id:
+                continue
+            hover_fill = "#90caf9" if direction == "in" else "#ef9a9a"
+            self.system_builder_canvas.itemconfigure(canvas_item, fill=hover_fill)
+            self.system_builder_hover_port = (component_id, direction)
+            break
 
     def _resize_selected_system_object(self, event: tk.Event) -> None:
         state = self.system_builder_resize_state
@@ -2059,6 +2166,96 @@ class RainwaterTkApp(tk.Tk):
             return
         item.update({"x": new_x, "y": new_y, "width": new_width, "height": new_height})
         self._render_system_builder()
+
+    @staticmethod
+    def _connections_after_node_disconnect(
+        connections: list[dict[str, str]], component_id: str, direction: str | None
+    ) -> list[dict[str, str]]:
+        if direction == "in":
+            return [item for item in connections if item.get("target_component") != component_id]
+        if direction == "out":
+            return [item for item in connections if item.get("source_component") != component_id]
+        return [
+            item for item in connections
+            if item.get("source_component") != component_id
+            and item.get("target_component") != component_id
+        ]
+
+    def _start_system_connection_from_node(self, component_id: str, direction: str) -> None:
+        self.system_builder_selected_id = component_id
+        self.system_builder_selected_connection = None
+        self.system_builder_port_drag = None
+        if direction == "out":
+            self.system_builder_pending_source = component_id
+            self.system_builder_pending_target = None
+        else:
+            self.system_builder_pending_target = component_id
+            self.system_builder_pending_source = None
+        self._render_system_builder()
+
+    def _disconnect_system_node(self, component_id: str, direction: str | None) -> None:
+        before = len(self.config_model.system_connections)
+        self.config_model.system_connections = self._connections_after_node_disconnect(
+            self.config_model.system_connections, component_id, direction
+        )
+        removed = before - len(self.config_model.system_connections)
+        self.system_builder_selected_connection = None
+        self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
+        self.system_builder_port_drag = None
+        self._clear_system_port_drag_hover()
+        node_label = {"in": "input node", "out": "output node", None: "object"}[direction]
+        self.status_var.set(f"Disconnected {removed} connection(s) from the {node_label}")
+        self._render_system_builder()
+
+    def _system_node_context_menu(self, event: tk.Event) -> str | None:
+        overlapping = self.system_builder_canvas.find_overlapping(
+            event.x - 2, event.y - 2, event.x + 2, event.y + 2
+        )
+        port: tuple[str, str] | None = None
+        for canvas_item in reversed(overlapping):
+            port_tag = next(
+                (tag for tag in self.system_builder_canvas.gettags(canvas_item) if tag.startswith("port:")),
+                None,
+            )
+            if port_tag:
+                _prefix, component_id, direction = port_tag.split(":", 2)
+                port = (component_id, direction)
+                break
+        if port is None:
+            return None
+        component_id, direction = port
+        node_key = "source_component" if direction == "out" else "target_component"
+        node_connections = sum(
+            connection.get(node_key) == component_id
+            for connection in self.config_model.system_connections
+        )
+        object_connections = sum(
+            connection.get("source_component") == component_id
+            or connection.get("target_component") == component_id
+            for connection in self.config_model.system_connections
+        )
+        menu = tk.Menu(self, tearoff=False)
+        menu.add_command(
+            label="Start connection from this node",
+            command=lambda: self._start_system_connection_from_node(component_id, direction),
+        )
+        menu.add_separator()
+        menu.add_command(
+            label=f"Disconnect this node ({node_connections})",
+            state=tk.NORMAL if node_connections else tk.DISABLED,
+            command=lambda: self._disconnect_system_node(component_id, direction),
+        )
+        menu.add_command(
+            label=f"Disconnect all object connections ({object_connections})",
+            state=tk.NORMAL if object_connections else tk.DISABLED,
+            command=lambda: self._disconnect_system_node(component_id, None),
+        )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
 
     def _system_multi_select_changed(self) -> None:
         if not self.system_multi_select_var.get():
@@ -2125,6 +2322,8 @@ class RainwaterTkApp(tk.Tk):
 
     def _cancel_system_link(self, _event: tk.Event | None = None) -> str:
         self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
+        self.system_builder_port_drag = None
         self._render_system_builder()
         return "break"
 
@@ -2322,6 +2521,7 @@ class RainwaterTkApp(tk.Tk):
             return
         canvas = self.system_builder_canvas
         canvas.delete("all")
+        self.system_builder_hover_port = None
         layout_by_id = {str(item.get("id")): item for item in self.config_model.system_layout}
         for index, connection in enumerate(self.config_model.system_connections):
             source = layout_by_id.get(connection.get("source_component", ""))
@@ -2384,17 +2584,19 @@ class RainwaterTkApp(tk.Tk):
             )
             has_inlet, has_outlet = self._system_component_ports(component_type)
             if has_inlet:
+                pending = component_id == self.system_builder_pending_target
                 canvas.create_oval(
                     x - half_width - 10, y - 7, x - half_width + 4, y + 7,
-                    fill="#ffffff", outline="#30363a", width=2,
+                    fill="#90caf9" if pending else "#1565c0",
+                    outline="#0d47a1", width=3 if pending else 2,
                     tags=(f"port:{component_id}:in",),
                 )
             if has_outlet:
                 pending = component_id == self.system_builder_pending_source
                 canvas.create_oval(
                     x + half_width - 4, y - 7, x + half_width + 10, y + 7,
-                    fill="#2e8b57" if pending else "#ffffff",
-                    outline="#1565c0" if pending else "#30363a",
+                    fill="#ef9a9a" if pending else "#c62828",
+                    outline="#8e0000",
                     width=3 if pending else 2,
                     tags=(f"port:{component_id}:out",),
                 )
@@ -3017,6 +3219,111 @@ class RainwaterTkApp(tk.Tk):
         )
         self._update_multitank_comparison_state()
 
+        optimization_frame = ttk.LabelFrame(self.analysis_tab, text="Optimization", padding=10)
+        optimization_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        optimization_frame.columnconfigure(4, weight=1)
+        ttk.Label(optimization_frame, text="Minimum rainwater reliability").grid(row=0, column=0, sticky="w")
+        ttk.Entry(optimization_frame, textvariable=self.optimization_minimum_reliability_var, width=9).grid(
+            row=0, column=1, sticky="w", padx=(8, 3)
+        )
+        ttk.Label(optimization_frame, text="%").grid(row=0, column=2, sticky="w", padx=(0, 16))
+        ttk.Label(optimization_frame, text="Electricity price").grid(row=0, column=3, sticky="w")
+        ttk.Entry(optimization_frame, textvariable=self.optimization_electricity_rate_var, width=9).grid(
+            row=0, column=4, sticky="w", padx=(8, 3)
+        )
+        ttk.Label(optimization_frame, text="currency/kWh").grid(row=0, column=5, sticky="w", padx=(0, 16))
+        ttk.Button(optimization_frame, text="Run optimization", command=self.run_system_optimization).grid(
+            row=0, column=6, sticky="e"
+        )
+        ttk.Label(
+            optimization_frame,
+            text=("Ranks indirect-system primary tank, filtration pump, and booster tank combinations by "
+                  "simple payback. Catalog names, prices, capacities, and pump power are illustrative."),
+            foreground="#667278", wraplength=950,
+        ).grid(row=1, column=0, columnspan=7, sticky="ew", pady=(6, 6))
+        self.optimization_tree = ttk.Treeview(
+            optimization_frame,
+            columns=("rank", "tank", "pump", "booster", "reliability", "energy", "cost", "savings", "payback"),
+            show="headings", height=6,
+        )
+        headings = (
+            ("rank", "Rank", 45), ("tank", "Primary tank", 100), ("pump", "Filter pump", 100),
+            ("booster", "Booster tank", 100), ("reliability", "Reliability", 85),
+            ("energy", "Energy/year", 90), ("cost", "Installed cost", 105),
+            ("savings", "Net savings/year", 115), ("payback", "Simple payback", 100),
+        )
+        for column, label, width in headings:
+            self.optimization_tree.heading(column, text=label)
+            self.optimization_tree.column(column, width=width, anchor="e" if column not in {"tank", "pump", "booster"} else "w")
+        self.optimization_tree.grid(row=2, column=0, columnspan=6, sticky="ew")
+        optimization_scroll = ttk.Scrollbar(optimization_frame, orient="vertical", command=self.optimization_tree.yview)
+        optimization_scroll.grid(row=2, column=6, sticky="ns")
+        self.optimization_tree.configure(yscrollcommand=optimization_scroll.set)
+        ttk.Label(optimization_frame, textvariable=self.optimization_status_var, foreground="#667278").grid(
+            row=3, column=0, columnspan=7, sticky="w", pady=(6, 0)
+        )
+
+    def run_system_optimization(self) -> None:
+        if self.analysis_running:
+            self.optimization_status_var.set("Wait for the current analysis to finish.")
+            return
+        self._apply_form_to_model()
+        self.optimization_tree.delete(*self.optimization_tree.get_children())
+        self.optimization_status_var.set("Evaluating 27 illustrative product combinations...")
+        self.config(cursor="watch")
+        self.update_idletasks()
+
+        def progress(current: int, total: int) -> None:
+            self.optimization_status_var.set(f"Evaluating combination {current} of {total}...")
+            self.update_idletasks()
+
+        try:
+            results = optimize_indirect_system(
+                self.config_model, self.rainfall_df, progress_callback=progress
+            )
+        except (ValueError, KeyError) as exc:
+            self.optimization_status_var.set(str(exc))
+            messagebox.showwarning(APP_TITLE, str(exc), parent=self)
+            return
+        finally:
+            self.config(cursor="")
+        currency = self.config_model.financial_parameters.currency
+        feasible_count = sum(result.feasible for result in results)
+        for index, result in enumerate(results):
+            payback = (
+                f"{result.simple_payback_years:.1f} years"
+                if result.simple_payback_years is not None else "Not achieved"
+            )
+            self.optimization_tree.insert(
+                "", "end", iid=str(index),
+                values=(
+                    result.rank if result.rank is not None else "Infeasible",
+                    result.primary_tank.name,
+                    result.filtration_pump.name,
+                    result.booster_tank.name,
+                    f"{result.reliability_percent:.1f}%",
+                    f"{result.average_annual_energy_kwh:,.0f} kWh",
+                    f"{currency} {result.total_installed_cost:,.0f}",
+                    f"{currency} {result.net_annual_savings:,.0f}",
+                    payback,
+                ),
+            )
+        if feasible_count:
+            best = next(result for result in results if result.feasible)
+            best_payback = (
+                f"{best.simple_payback_years:.1f} years"
+                if best.simple_payback_years is not None else "not achieved"
+            )
+            self.optimization_status_var.set(
+                f"{feasible_count} of {len(results)} combinations meet the reliability target. "
+                f"Best: {best.primary_tank.name} + {best.filtration_pump.name} + "
+                f"{best.booster_tank.name}; payback {best_payback}."
+            )
+        else:
+            self.optimization_status_var.set(
+                f"None of the {len(results)} combinations meet the reliability target."
+            )
+
     def _build_financial_tab(self) -> None:
         self.financial_tab.columnconfigure(0, weight=1)
         self.financial_tab.columnconfigure(1, weight=1)
@@ -3073,6 +3380,8 @@ class RainwaterTkApp(tk.Tk):
         outputs.columnconfigure(1, weight=1)
         result_rows = (
             ("Average annual rainwater supplied", "supplied"),
+            ("Annual municipal water savings", "water_savings"),
+            ("Annual sewer savings", "sewer_savings"),
             ("Gross annual utility savings", "gross"),
             ("Annual maintenance cost", "maintenance"),
             ("Net annual savings", "net"),
@@ -3163,6 +3472,12 @@ class RainwaterTkApp(tk.Tk):
         volume_label = volume_unit(self.config_model)
         supplied_display = volume_to_display(results.average_annual_supplied_gallons, self.config_model)
         self.financial_result_vars["supplied"].set(f"{supplied_display:,.0f} {volume_label}/year")
+        self.financial_result_vars["water_savings"].set(
+            f"{currency} {results.annual_municipal_water_savings:,.2f}/year"
+        )
+        self.financial_result_vars["sewer_savings"].set(
+            f"{currency} {results.annual_sewer_savings:,.2f}/year"
+        )
         self.financial_result_vars["gross"].set(f"{currency} {results.gross_annual_savings:,.2f}/year")
         self.financial_result_vars["maintenance"].set(f"{currency} {results.annual_maintenance_cost:,.2f}/year")
         self.financial_result_vars["net"].set(f"{currency} {results.net_annual_savings:,.2f}/year")
@@ -3922,6 +4237,9 @@ class RainwaterTkApp(tk.Tk):
         self.financial_fixed_maintenance_var.set(f"{financial.fixed_annual_maintenance:g}")
         self.financial_maintenance_percent_var.set(f"{financial.annual_maintenance_percent:g}")
         self.financial_analysis_period_var.set(str(financial.analysis_period_years))
+        optimization = cfg.optimization_parameters
+        self.optimization_minimum_reliability_var.set(f"{optimization.minimum_reliability_percent:g}")
+        self.optimization_electricity_rate_var.set(f"{optimization.electricity_rate_per_kwh:g}")
         self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -4016,6 +4334,12 @@ class RainwaterTkApp(tk.Tk):
         )
         cfg.system_parameters.municipal_backup_enabled = bool(self.municipal_backup_enabled_var.get())
         self._apply_financial_form_to_model()
+        cfg.optimization_parameters.minimum_reliability_percent = _float(
+            self.optimization_minimum_reliability_var.get(), 80.0
+        )
+        cfg.optimization_parameters.electricity_rate_per_kwh = _float(
+            self.optimization_electricity_rate_var.get(), 0.15
+        )
         cfg.demand.avg_flush_per_person = _float(self.flushes_var.get())
         cfg.demand.gallons_per_flush_toilet = volume_to_internal(_float(self.toilet_flush_var.get()), cfg)
         cfg.demand.gallons_per_flush_urinal = volume_to_internal(_float(self.urinal_flush_var.get()), cfg)

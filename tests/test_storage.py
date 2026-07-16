@@ -22,6 +22,8 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.financial_parameters.currency == "USD"
     assert config.financial_parameters.tariff_billing_unit == "per 1,000 gal"
     assert config.financial_parameters.analysis_period_years == 20
+    assert config.optimization_parameters.minimum_reliability_percent == 80.0
+    assert config.optimization_parameters.electricity_rate_per_kwh == 0.15
     assert config.tank_parameters.minimum_operating_volume_percent == 0.0
 
 
@@ -88,6 +90,21 @@ def test_financial_parameters_are_loaded() -> None:
     assert config.financial_parameters.tariff_billing_unit == "per m³"
     assert config.financial_parameters.installed_cost == 12000.0
     assert config.financial_parameters.analysis_period_years == 25
+
+
+def test_optimization_parameters_are_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Optimization project",
+            "optimization_parameters": {
+                "minimum_reliability_percent": 92.5,
+                "electricity_rate_per_kwh": 0.24,
+            },
+        }
+    )
+
+    assert config.optimization_parameters.minimum_reliability_percent == 92.5
+    assert config.optimization_parameters.electricity_rate_per_kwh == 0.24
 
 
 def test_demand_objects_are_loaded_as_model_objects() -> None:

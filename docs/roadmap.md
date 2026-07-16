@@ -25,6 +25,58 @@ Implementation requirements include:
 - [Implemented] Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that display as not achieved rather than divide by zero.
 - [Partially implemented] Deterministic tests reconcile economic outputs to delivered hydraulic totals and tariff units. End-use-specific outdoor and municipal-backup scenarios remain planned with automatic sewer eligibility.
 
+## Payback-driven indirect-system optimization
+
+Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, filtration pump, and booster tank together. These variables interact: primary storage controls available rainwater, the filtration pump controls booster refill rate, and the booster tank buffers peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
+
+**Initial implementation:** Analysis settings now includes a deterministic 27-combination search using an explicitly illustrative catalog with three choices for each component. The first release accepts a minimum rainwater-reliability constraint and electricity price, reuses the hourly indirect-system and financial inputs, estimates filtration-pump energy, and ranks feasible combinations by simple payback. Replacing placeholder products with a maintained vendor catalog and adding the constraints and performance improvements below remain roadmap work.
+
+The objective should be based on complete lifecycle drivers rather than hydraulic performance alone:
+
+```text
+simple payback
+  = (installed cost - incentives)
+    / (annual utility savings - annual maintenance - annual energy cost)
+```
+
+Before optimization is enabled, add component cost curves for primary tanks, filtration pumps, and booster tanks; pump head and efficiency; electricity tariffs; component-specific maintenance; and replacement assumptions. Without size-dependent costs and energy, an optimizer would incorrectly favor oversized equipment whenever it produces even a small increase in rainwater delivery.
+
+The optimizer should minimize payback subject to explicit engineering constraints, including:
+
+- Minimum rainwater reliability or annual rainwater supply.
+- Maximum municipal makeup.
+- Required peak end-use flow.
+- Maximum booster refill time.
+- Minimum primary-tank operating level.
+- Maximum equipment footprint or available tank volume.
+- Acceptable pump cycling and water residence time.
+- Positive net annual savings; otherwise payback is not achieved.
+
+A brute-force search can become expensive because candidate counts multiply. For example, 30 primary tank sizes, 15 filtration-pump sizes, and 15 booster-tank sizes require 6,750 full hourly simulations. Use a staged, coarse-to-fine workflow instead:
+
+1. Run the daily model across primary-tank sizes and remove clearly uneconomic or hydraulically unsuitable capacities.
+2. Retain a small group near the reliability and savings knee.
+3. Derive feasible filtration-pump ranges from peak flow and refill-time requirements.
+4. Eliminate booster sizes that cannot satisfy peak-period demand.
+5. Run aggregate-only hourly simulations for the surviving combinations.
+6. Run detailed timestep simulations only for shortlisted designs.
+7. Refine the search around the best candidates and report nearby alternatives rather than only one winner.
+
+Cache rainfall, collection, and demand series; reuse unchanged candidate results; parallelize independent evaluations; preserve background progress and cancellation; and stop candidates early when hard constraints fail. Candidate evaluation should return aggregate supply, municipal makeup, overflow, energy, reliability, cycling, costs, savings, and payback without constructing a full hourly DataFrame unless the design is shortlisted.
+
+A genetic algorithm may help after the design space expands to additional continuous and discrete variables such as pump head, efficiency, refill controls, minimum operating level, tariff structures, catalog equipment, replacement schedules, and energy costs. For only three moderately sized variables, a deterministic coarse-to-fine grid remains easier to validate, explain, and reproduce.
+
+The recommended long-term method is hybrid:
+
+1. Apply engineering rules to eliminate infeasible designs.
+2. Run a coarse deterministic grid.
+3. Seed a genetic algorithm with the best feasible grid candidates.
+4. Run detailed simulations for the best genetic candidates.
+5. Perform a deterministic local grid search around the best result.
+6. Present the shortest-payback design alongside several near-optimal alternatives and their hydraulic tradeoffs.
+
+Genetic results do not prove a global optimum. Save the random seed, population size, generation count, mutation and crossover settings, constraints, convergence history, cost-model version, and simulation-input signature so every optimization is auditable and reproducible. Add deterministic benchmark problems where the known grid optimum can be compared with the genetic and hybrid results.
+
 ## First-flush diversion and event losses
 
 Add an explicit first-flush diversion model instead of requiring users to fold this loss into the runoff coefficient. First flush should be triggered by a new rainfall event, not subtracted independently from every wet calendar day.

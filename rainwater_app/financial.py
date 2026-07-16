@@ -12,6 +12,8 @@ SUPPORTED_TARIFF_UNITS = {"per 1,000 gal", "per m³"}
 @dataclass(frozen=True)
 class FinancialResults:
     average_annual_supplied_gallons: float
+    annual_municipal_water_savings: float
+    annual_sewer_savings: float
     gross_annual_savings: float
     annual_maintenance_cost: float
     net_annual_savings: float
@@ -89,6 +91,8 @@ def calculate_financial_results(
     net_benefit = net_savings * analysis_period_years - net_installed_cost
     return FinancialResults(
         average_annual_supplied_gallons=supplied,
+        annual_municipal_water_savings=water_value,
+        annual_sewer_savings=sewer_value,
         gross_annual_savings=gross_savings,
         annual_maintenance_cost=maintenance,
         net_annual_savings=net_savings,
