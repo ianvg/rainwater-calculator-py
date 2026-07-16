@@ -217,7 +217,15 @@ class SQLiteStore:
             }
         if demand.hourly_schedule_library and demand.active_hourly_schedule_name not in demand.hourly_schedule_library:
             demand.active_hourly_schedule_name = next(iter(demand.hourly_schedule_library))
-        tank_params = TankParameters(**payload.get("tank_parameters", {}))
+        tank_payload = payload.get("tank_parameters", {})
+        tank_params = TankParameters(
+            initial_fill_percent=float(tank_payload.get("initial_fill_percent", 50.0)),
+            # The legacy reliable_fill_percent was only a reporting target, not protected
+            # storage. Migrating it to dead storage would silently change old results.
+            minimum_operating_volume_percent=float(
+                tank_payload.get("minimum_operating_volume_percent", 0.0)
+            ),
+        )
         system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
         financial_params = FinancialParameters(**payload.get("financial_parameters", {}))
 

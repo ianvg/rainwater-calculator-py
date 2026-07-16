@@ -416,7 +416,15 @@ selected_tank = r1.number_input(
 )
 config.selected_tank_size_gal = _volume_to_internal(selected_tank, config)
 config.tank_parameters.initial_fill_percent = float(r2.number_input("Initial fill %", min_value=0.0, max_value=100.0, value=float(config.tank_parameters.initial_fill_percent), step=1.0))
-config.tank_parameters.reliable_fill_percent = float(r3.number_input("Reserve threshold (% of daily demand)", min_value=0.0, max_value=100.0, value=float(config.tank_parameters.reliable_fill_percent), step=1.0))
+config.tank_parameters.minimum_operating_volume_percent = float(
+    r3.number_input(
+        "Minimum operating level (% of tank capacity)",
+        min_value=0.0,
+        max_value=100.0,
+        value=float(config.tank_parameters.minimum_operating_volume_percent),
+        step=1.0,
+    )
+)
 
 _apply_surfaces(config, surfaces_edited)
 _apply_demand(config, demand_edited)

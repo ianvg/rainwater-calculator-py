@@ -8,7 +8,7 @@ Each report includes a table of contents. HTML entries link to anchored report s
 
 Project notes appear as the second report section, immediately after Project Information. Multiline notes retain their paragraph structure. Reports display `No notes provided.` when the project notes field is blank.
 
-Report reliability is the percentage of simulated calendar days on which the tank can supply 100% of the daily demand. The reserve threshold is not included in this percentage.
+Report reliability is the percentage of simulated calendar days on which usable tank water can supply 100% of the daily demand. Water at or below the configured minimum operating level is unavailable for normal withdrawal and therefore can reduce reliability.
 
 The reliability graph marks the selected tank size and its simulated reliability with a red circle.
 

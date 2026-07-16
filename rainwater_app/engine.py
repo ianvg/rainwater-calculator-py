@@ -133,10 +133,13 @@ def simulate_tank(
     demand = demand_series(config, data)
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
-    reserve_fraction = min(max(params.reliable_fill_percent / 100.0, 0.0), 1.0)
+    minimum_operating_fraction = min(
+        max(params.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    )
+    minimum_operating_volume = tank_size_gallons * minimum_operating_fraction
     water_level: list[float] = []
     demand_met: list[bool] = []
-    reserve_target_met: list[bool] = []
+    usable_water_available: list[float] = []
     unmet_demand: list[float] = []
     overflow: list[float] = []
     reliable_days = 0
@@ -145,23 +148,24 @@ def simulate_tank(
         if cancel_callback is not None and i % 100 == 0 and cancel_callback():
             raise AnalysisCancelledError("Analysis cancelled by user.")
         if i == 0:
-            water = (tank_size_gallons * initial_fill) + collected.iloc[i]
+            water = tank_size_gallons * initial_fill
         else:
-            water = water_level[-1] + collected.iloc[i]
+            water = water_level[-1]
 
-        water = max(water, 0.0)
-        overflow_today = max(water - tank_size_gallons, 0.0)
-        water = min(water, tank_size_gallons)
+        water = min(max(water, 0.0), tank_size_gallons)
         demand_today = max(float(demand.iloc[i]), 0.0)
-        reserve_target = demand_today * (1.0 + reserve_fraction)
-        met_today = water >= demand_today
-        reserve_met_today = water >= reserve_target
-        unmet_today = max(demand_today - water, 0.0)
-        water = max(water - demand_today, 0.0)
+        available_for_withdrawal = max(water - minimum_operating_volume, 0.0)
+        supplied_today = min(available_for_withdrawal, demand_today)
+        met_today = supplied_today >= demand_today
+        unmet_today = max(demand_today - supplied_today, 0.0)
+        water = max(water - supplied_today, 0.0)
+        water += float(collected.iloc[i])
+        overflow_today = max(water - tank_size_gallons, 0.0)
+        water = min(max(water, 0.0), tank_size_gallons)
 
         water_level.append(float(water))
         demand_met.append(bool(met_today))
-        reserve_target_met.append(bool(reserve_met_today))
+        usable_water_available.append(float(max(water - minimum_operating_volume, 0.0)))
         unmet_demand.append(float(unmet_today))
         overflow.append(float(overflow_today))
 
@@ -177,7 +181,8 @@ def simulate_tank(
             "CollectedGallons": collected,
             "DemandGallons": demand,
             "DemandMet": demand_met,
-            "ReserveTargetMet": reserve_target_met,
+            "MinimumOperatingVolumeGallons": minimum_operating_volume,
+            "UsableWaterAvailableGallons": usable_water_available,
             "UnmetDemandGallons": unmet_demand,
             "OverflowGallons": overflow,
             "WaterInTankGallons": water_level,
@@ -219,6 +224,10 @@ def simulate_hourly_tank(
         index=data.index,
     )
     initial_fill = min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
+    minimum_operating_fraction = min(
+        max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    )
+    minimum_operating_volume = tank_size_gallons * minimum_operating_fraction
     water = tank_size_gallons * initial_fill
     rows: list[dict[str, object]] = []
     met_hours = 0
@@ -270,7 +279,8 @@ def simulate_hourly_tank(
                         requested_input = (
                             requested_delivery / filter_recovery if filter_recovery > 0.0 else 0.0
                         )
-                        pump_flow = min(max(water, 0.0), requested_input)
+                        available_primary_water = max(water - minimum_operating_volume, 0.0)
+                        pump_flow = min(available_primary_water, requested_input)
                         if filtration_pump_capacity > 0.0:
                             pump_flow = min(pump_flow, filtration_pump_capacity)
                         filter_throughput = pump_flow * filter_recovery
@@ -297,7 +307,8 @@ def simulate_hourly_tank(
                         refill_active = True
                 else:
                     requested_input = demand_hour / filter_recovery if filter_recovery > 0.0 else 0.0
-                    pump_flow = min(max(water, 0.0), requested_input)
+                    available_primary_water = max(water - minimum_operating_volume, 0.0)
+                    pump_flow = min(available_primary_water, requested_input)
                     if filtration_pump_capacity > 0.0:
                         pump_flow = min(pump_flow, filtration_pump_capacity)
                     filter_throughput = pump_flow * filter_recovery
@@ -305,7 +316,8 @@ def simulate_hourly_tank(
                     water = max(water - pump_flow, 0.0)
                     rainwater_supplied = min(filter_throughput, demand_hour)
             else:
-                rainwater_supplied = min(max(water, 0.0), demand_hour)
+                available_primary_water = max(water - minimum_operating_volume, 0.0)
+                rainwater_supplied = min(available_primary_water, demand_hour)
                 if pump_capacity > 0.0:
                     rainwater_supplied = min(rainwater_supplied, pump_capacity)
                 pump_flow = rainwater_supplied
@@ -341,6 +353,8 @@ def simulate_hourly_tank(
                     "BoosterRefillActive": refill_active,
                     "OverflowGallons": overflow,
                     "WaterInTankGallons": water,
+                    "MinimumOperatingVolumeGallons": minimum_operating_volume,
+                    "UsableWaterAvailableGallons": max(water - minimum_operating_volume, 0.0),
                 }
             )
     reliability = met_hours / len(rows) * 100.0 if rows else 0.0

@@ -825,7 +825,9 @@ class RainwaterTkApp(tk.Tk):
         self.multitank_comparison_var = tk.BooleanVar(value=self.config_model.multitank_comparison_enabled)
         self.selected_tank_warning_var = tk.StringVar()
         self.initial_fill_var = tk.StringVar(value=str(self.config_model.tank_parameters.initial_fill_percent))
-        self.reserve_var = tk.StringVar(value=str(self.config_model.tank_parameters.reliable_fill_percent))
+        self.reserve_var = tk.StringVar(
+            value=str(self.config_model.tank_parameters.minimum_operating_volume_percent)
+        )
         self.hourly_schedule_enabled_var = tk.BooleanVar(value=self.config_model.demand.hourly_schedule_enabled)
         self.hourly_schedule_summary_var = tk.StringVar(value="Even 24-hour demand profile")
         self.hourly_results_year_var = tk.StringVar(value="--")
@@ -834,7 +836,7 @@ class RainwaterTkApp(tk.Tk):
         self.flush_volume_unit_var = tk.StringVar()
         self.tank_size_unit_var = tk.StringVar()
         self.percent_unit_var = tk.StringVar(value="%")
-        self.reserve_unit_var = tk.StringVar(value="% of daily demand")
+        self.reserve_unit_var = tk.StringVar(value="% of tank capacity")
         financial = self.config_model.financial_parameters
         self.financial_currency_var = tk.StringVar(value=financial.currency)
         self.financial_water_rate_var = tk.StringVar(value=str(financial.water_rate))
@@ -1378,6 +1380,47 @@ class RainwaterTkApp(tk.Tk):
             parent=self,
         )
 
+    def _create_info_icon(self, size: int = 20) -> tk.PhotoImage:
+        image = tk.PhotoImage(master=self, width=size, height=size)
+        center = (size - 1) / 2.0
+        radius = size / 2.0 - 1.0
+        for y in range(size):
+            for x in range(size):
+                if (x - center) ** 2 + (y - center) ** 2 <= radius ** 2:
+                    image.put("#176b9c", (x, y))
+        center_x = int(round(center))
+        for y in range(8, 15):
+            image.put("#ffffff", (center_x, y))
+            image.put("#ffffff", (center_x - 1, y))
+        for x in range(center_x - 2, center_x + 2):
+            image.put("#ffffff", (x, 14))
+        for y in (5, 6):
+            image.put("#ffffff", (center_x, y))
+            image.put("#ffffff", (center_x - 1, y))
+        return image
+
+    def _info_button(self, parent: tk.Misc, command) -> tk.Button:
+        if not hasattr(self, "info_icon_image"):
+            self.info_icon_image = self._create_info_icon()
+        background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        button = tk.Button(
+            parent,
+            image=self.info_icon_image,
+            command=command,
+            background=background,
+            activebackground=background,
+            relief=tk.FLAT,
+            overrelief=tk.FLAT,
+            borderwidth=0,
+            highlightthickness=0,
+            takefocus=0,
+            cursor="hand2",
+            padx=0,
+            pady=0,
+        )
+        button.bind("<ButtonRelease-1>", lambda _event: self.after_idle(self.focus_set), add="+")
+        return button
+
     def _open_weather_source(self, _event: tk.Event | None = None) -> None:
         webbrowser.open(self.weather_source_url)
 
@@ -1538,7 +1581,7 @@ class RainwaterTkApp(tk.Tk):
             "primary_tank": [
                 ("Primary tank size", self.selected_tank_var, self.tank_size_unit_var),
                 ("Initial fill", self.initial_fill_var, self.percent_unit_var),
-                ("Reserve threshold", self.reserve_var, self.reserve_unit_var),
+                ("Minimum operating level", self.reserve_var, self.reserve_unit_var),
                 ("Graph start tank size", self.graph_start_var, self.tank_size_unit_var),
                 ("Graph end tank size", self.graph_end_var, self.tank_size_unit_var),
                 ("Graph step", self.graph_step_var, self.tank_size_unit_var),
@@ -2484,13 +2527,9 @@ class RainwaterTkApp(tk.Tk):
 
         csv_title = ttk.Frame(import_content)
         ttk.Label(csv_title, text="Rainfall CSV").grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            csv_title,
-            text="i",
-            width=2,
-            command=self._show_rainfall_csv_format_tip,
-            takefocus=True,
-        ).grid(row=0, column=1, padx=(5, 0))
+        self._info_button(csv_title, self._show_rainfall_csv_format_tip).grid(
+            row=0, column=1, padx=(5, 0)
+        )
         csv_frame = ttk.LabelFrame(import_content, labelwidget=csv_title, padding=10)
         csv_frame.grid(row=0, column=0, sticky="ew")
         csv_frame.columnconfigure(0, weight=1)
@@ -2503,7 +2542,7 @@ class RainwaterTkApp(tk.Tk):
         source_row = ttk.Frame(self.weather_frame)
         source_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
         source_row.columnconfigure(1, weight=1)
-        ttk.Button(source_row, text="i", width=2, command=self._show_weather_source_tip, takefocus=True).grid(
+        self._info_button(source_row, self._show_weather_source_tip).grid(
             row=0, column=0, sticky="nw", padx=(0, 6)
         )
         ttk.Label(
@@ -2589,13 +2628,9 @@ class RainwaterTkApp(tk.Tk):
         self.collection_tab.rowconfigure(0, weight=1)
         surface_title = ttk.Frame(self.collection_tab)
         ttk.Label(surface_title, text="Collection surfaces").grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            surface_title,
-            text="ⓘ",
-            width=2,
-            command=self._show_collection_surface_tip,
-            takefocus=True,
-        ).grid(row=0, column=1, padx=(4, 0))
+        self._info_button(surface_title, self._show_collection_surface_tip).grid(
+            row=0, column=1, padx=(4, 0)
+        )
         surfaces_frame = ttk.LabelFrame(self.collection_tab, labelwidget=surface_title, padding=10)
         surfaces_frame.grid(row=0, column=0, sticky="nsew")
         surfaces_frame.rowconfigure(0, weight=1)
@@ -3914,7 +3949,7 @@ class RainwaterTkApp(tk.Tk):
         self.selected_tank_var.set(f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}")
         self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
-        self.reserve_var.set(f"{cfg.tank_parameters.reliable_fill_percent:.0f}")
+        self.reserve_var.set(f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}")
         self._update_setting_unit_labels()
         self._populate_surfaces()
         self._populate_demand()
@@ -3991,7 +4026,9 @@ class RainwaterTkApp(tk.Tk):
         cfg.selected_tank_size_gal = max(0.0, volume_to_internal(_float(self.selected_tank_var.get(), 5000), cfg))
         cfg.multitank_comparison_enabled = bool(self.multitank_comparison_var.get())
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
-        cfg.tank_parameters.reliable_fill_percent = min(max(_float(self.reserve_var.get(), 25), 0), 100)
+        cfg.tank_parameters.minimum_operating_volume_percent = min(
+            max(_float(self.reserve_var.get(), 0), 0), 100
+        )
         return True
 
     def _apply_financial_form_to_model(self) -> None:
@@ -6025,6 +6062,13 @@ class RainwaterTkApp(tk.Tk):
                 for row in self.curve_df.itertuples(index=False)
             ],
             "selected_tank_size": volume_to_display(cfg.selected_tank_size_gal, cfg),
+            "minimum_operating_level_percent": cfg.tank_parameters.minimum_operating_volume_percent,
+            "minimum_operating_volume": volume_to_display(
+                cfg.selected_tank_size_gal
+                * cfg.tank_parameters.minimum_operating_volume_percent
+                / 100.0,
+                cfg,
+            ),
             "selected_reliability": selected_reliability,
             "include_multitank_charts": bool(metadata.get("include_multitank_charts", False)),
             "include_system_visualization": bool(metadata.get("include_system_visualization", False)),
@@ -6718,7 +6762,7 @@ h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:
 main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
 .fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
-.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-inner {{ padding:20px 18px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .notes-text {{ margin:0; white-space:pre-wrap; }}
+.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
@@ -6729,17 +6773,17 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
-@media (max-width:900px) {{ .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} main {{ box-shadow:none; }} }}
+@media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} .toc-collapsed .toc-toggle {{ height:auto; writing-mode:horizontal-tb; transform:none; text-align:left; }} main {{ box-shadow:none; }} }}
 @media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
 @media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><div class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
-<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 {system_visualization_html}
 <section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{float(report['total_annual_demand']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
@@ -6761,6 +6805,17 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
 </main></div><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
 <script>
+const reportShell=document.querySelector('.report-shell');
+const tocToggle=document.getElementById('toc-toggle');
+function setTocCollapsed(collapsed){{
+  reportShell.classList.toggle('toc-collapsed',collapsed);
+  tocToggle.setAttribute('aria-expanded',String(!collapsed));
+  tocToggle.textContent=collapsed?'Show contents':'Hide contents';
+  try{{sessionStorage.setItem('rwh-report-toc-collapsed',collapsed?'1':'0');}}catch(_error){{}}
+}}
+let storedTocState='0';try{{storedTocState=sessionStorage.getItem('rwh-report-toc-collapsed')||'0';}}catch(_error){{}}
+setTocCollapsed(storedTocState==='1');
+tocToggle.addEventListener('click',()=>setTocCollapsed(!reportShell.classList.contains('toc-collapsed')));
 const tocLinks=[...document.querySelectorAll('.toc a[href^="#"]')];
 const tocTargets=tocLinks.map((link)=>document.querySelector(link.getAttribute('href'))).filter(Boolean);
 if('IntersectionObserver' in window){{

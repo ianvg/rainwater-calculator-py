@@ -88,6 +88,30 @@ def test_simulate_tank_records_water_above_capacity_as_overflow() -> None:
     assert out.loc[1, "OverflowGallons"] == 0.0
 
 
+def test_daily_rainfall_is_available_after_that_days_demand() -> None:
+    cfg = default_project_config()
+    for surface in cfg.surfaces:
+        surface.area = 0.0
+    cfg.surfaces[0].area = 1000.0
+    cfg.surfaces[0].runoff_coefficient = 1.0
+    cfg.demand.simple_daily_demand_gallons = 50.0
+    cfg.tank_parameters.initial_fill_percent = 0.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+            "Precipitation": [1.0, 0.0],
+        }
+    )
+
+    result = simulate_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert not bool(result.loc[0, "DemandMet"])
+    assert result.loc[0, "UnmetDemandGallons"] == 50.0
+    assert result.loc[0, "WaterInTankGallons"] == 100.0
+    assert bool(result.loc[1, "DemandMet"])
+    assert result.loc[1, "WaterInTankGallons"] == 50.0
+
+
 def test_default_acis_range_uses_complete_calendar_years() -> None:
     start, end = default_complete_calendar_range(years=30, today=pd.Timestamp("2026-07-03").date())
 
@@ -117,11 +141,11 @@ def test_reliability_curve_bounds() -> None:
     assert curve["ReliabilityPercent"].between(0, 100).all()
 
 
-def test_reliability_is_percentage_of_days_full_daily_demand_is_met() -> None:
+def test_minimum_operating_level_protects_primary_tank_storage() -> None:
     cfg = default_project_config()
     cfg.demand.simple_daily_demand_gallons = 100.0
     cfg.tank_parameters.initial_fill_percent = 100.0
-    cfg.tank_parameters.reliable_fill_percent = 50.0
+    cfg.tank_parameters.minimum_operating_volume_percent = 50.0
     rainfall = pd.DataFrame(
         {
             "Date": pd.date_range("2025-01-01", periods=1, freq="D"),
@@ -131,9 +155,29 @@ def test_reliability_is_percentage_of_days_full_daily_demand_is_met() -> None:
 
     result = simulate_tank(cfg, rainfall, tank_size_gallons=100.0)
 
-    assert bool(result.loc[0, "DemandMet"])
-    assert not bool(result.loc[0, "ReserveTargetMet"])
-    assert result.loc[0, "ReliabilityPercent"] == 100.0
+    assert not bool(result.loc[0, "DemandMet"])
+    assert result.loc[0, "UnmetDemandGallons"] == 50.0
+    assert result.loc[0, "WaterInTankGallons"] == 50.0
+    assert result.loc[0, "MinimumOperatingVolumeGallons"] == 50.0
+    assert result.loc[0, "UsableWaterAvailableGallons"] == 0.0
+    assert result.loc[0, "ReliabilityPercent"] == 0.0
+
+
+def test_hourly_simulation_respects_primary_tank_minimum_operating_level() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 2400.0
+    cfg.demand.hourly_schedule_enabled = True
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.tank_parameters.minimum_operating_volume_percent = 50.0
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [0.0]}
+    )
+
+    result = simulate_hourly_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert result["WaterInTankGallons"].min() == 50.0
+    assert result["MinimumOperatingVolumeGallons"].eq(50.0).all()
+    assert result["UnmetDemandGallons"].sum() == pytest.approx(2350.0)
 
 
 def test_simple_daily_demand_is_added_to_daily_demand() -> None:

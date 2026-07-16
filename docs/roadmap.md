@@ -41,12 +41,12 @@ Implementation requirements include:
 
 ## Unusable tank volume and operating levels
 
-Add explicit unusable storage, sometimes called dead space, so the simulation can distinguish physical tank capacity from water available for withdrawal. This must remain separate from initial fill and reliability-reserve settings.
+The first minimum-operating-level implementation is complete for primary tanks. The simulation distinguishes physical tank capacity from water available for normal withdrawal, and the setting remains separate from initial fill.
 
 Implementation requirements include:
 
-- Add a minimum operating volume that can be entered as an absolute volume or percentage of capacity and normalized internally to volume.
-- Prevent normal demand and pump withdrawals from reducing tank level below the minimum operating volume while still including that water in the displayed physical tank level.
+- [Implemented as percentage of capacity] Add a minimum operating level normalized internally to volume. Absolute-volume entry remains planned.
+- [Implemented] Prevent normal demand and pump withdrawals from reducing tank level below the minimum operating volume while still including that water in the displayed physical tank level.
 - Define whether emergency withdrawal, maintenance drain-down, and overflow calculations use total or usable capacity.
 - Apply the same concept consistently to primary and booster tanks where configured.
 - Report total capacity, unusable volume, usable capacity, physical water level, usable water available, and unmet demand attributable to the operating limit.

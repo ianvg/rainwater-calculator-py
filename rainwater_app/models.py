@@ -72,7 +72,7 @@ class DemandProfile:
 @dataclass
 class TankParameters:
     initial_fill_percent: float = 50.0
-    reliable_fill_percent: float = 25.0
+    minimum_operating_volume_percent: float = 0.0
 
 
 @dataclass

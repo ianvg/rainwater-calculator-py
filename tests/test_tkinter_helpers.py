@@ -291,6 +291,10 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert 'class="report-shell"' in html
     assert ".toc { position:sticky" in html
     assert "IntersectionObserver" in html
+    assert 'id="toc-toggle"' in html
+    assert "Hide contents" in html
+    assert "toc-collapsed" in html
+    assert "rwh-report-toc-collapsed" in html
     assert 'href="#demand-summary"' in html
     assert 'href="#notes"' in html
     assert 'href="#yearly-demand-reliability"' in html

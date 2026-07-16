@@ -22,6 +22,22 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.financial_parameters.currency == "USD"
     assert config.financial_parameters.tariff_billing_unit == "per 1,000 gal"
     assert config.financial_parameters.analysis_period_years == 20
+    assert config.tank_parameters.minimum_operating_volume_percent == 0.0
+
+
+def test_legacy_reserve_target_migrates_to_zero_minimum_operating_level() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Legacy reserve project",
+            "tank_parameters": {
+                "initial_fill_percent": 40.0,
+                "reliable_fill_percent": 25.0,
+            },
+        }
+    )
+
+    assert config.tank_parameters.initial_fill_percent == 40.0
+    assert config.tank_parameters.minimum_operating_volume_percent == 0.0
 
 
 def test_system_component_parameters_are_loaded() -> None:

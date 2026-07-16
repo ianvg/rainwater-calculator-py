@@ -4,7 +4,7 @@ When an analysis has already been run, the calculator records a fingerprint of t
 
 ## Compare tank sizes
 
-Open **Analysis settings**, immediately to the left of **Results**, to configure the reliability-curve range, primary tank, initial fill, and reserve threshold. Add one or more sizes to **Tank size comparison** and run the analysis. The table reports demand reliability for every comparison size, including sizes that do not fall on the regular graph step. Comparison sizes are saved with the project.
+Open **Analysis settings**, immediately to the left of **Results**, to configure the reliability-curve range, primary tank, initial fill, and minimum operating level. Add one or more sizes to **Tank size comparison** and run the analysis. The table reports demand reliability for every comparison size, including sizes that do not fall on the regular graph step. Comparison sizes are saved with the project.
 
 Select **Multi-tank comparison** to enable the tank-size comparison controls. The controls remain disabled when this option is clear. Existing comparison sizes remain saved while disabled but are excluded from multi-tank analysis and output.
 
@@ -46,15 +46,9 @@ The reliability curve compares tank size with the percentage of simulated calend
 
 `reliability (%) = days with 100% of daily demand met / total simulated days x 100`
 
-Days with zero demand count as days whose complete demand was met. The reserve threshold is evaluated separately and does not change the reliability percentage. Hover near chart points to inspect values. Tick marks help compare neighboring tank sizes.
+Days with zero demand count as days whose complete demand was met. The minimum operating level reduces the water available for normal withdrawal and therefore can affect reliability. Hover near chart points to inspect values. Tick marks help compare neighboring tank sizes.
 
-### Alternative reserve-adjusted interpretation
-
-An alternative method defines a reliable day as one on which the tank contains enough water to meet the full daily demand and retain an additional reserve equal to the configured reserve-threshold percentage. Under that interpretation, the daily target is:
-
-`reserve-adjusted target = daily demand x (1 + reserve threshold / 100)`
-
-Reliability would then be the percentage of simulated days on which the available tank water meets or exceeds that reserve-adjusted target. This was the calculator's previous reliability definition. **It is documented only as an alternative interpretation and is not used in the current simulation or reliability curve.** The current calculation uses the 100%-of-daily-demand definition above.
+The complete collection, demand, storage, overflow, withdrawal, and conservation procedure is documented in [Daily analysis formulas and mass balance](daily-analysis-method.md).
 
 Increasing tank size generally improves reliability until collection or demand becomes the limiting factor. The curve should be interpreted together with project cost, available space, overflow, required backup supply, and design criteria.
 
