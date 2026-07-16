@@ -101,6 +101,7 @@ class ProjectConfig:
     country_code: str = "USA"
     system_type: str = "Direct system"
     system_layout: List[Dict[str, object]] = field(default_factory=list)
+    system_connections: List[Dict[str, str]] = field(default_factory=list)
     acis_precipitation_field: str = "TOTAL_PRECIPITATION"
     canadian_precipitation_field: str = "TOTAL_PRECIPITATION"
     surfaces: List[Surface] = field(default_factory=list)

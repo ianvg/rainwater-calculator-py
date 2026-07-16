@@ -1399,6 +1399,13 @@ class RainwaterTkApp(tk.Tk):
             variable=self.system_type_var,
             value="Indirect system",
         ).grid(row=0, column=1, sticky="w")
+        ttk.Button(
+            system_type_frame,
+            text="i",
+            width=2,
+            command=self._show_indirect_system_schematic,
+            takefocus=True,
+        ).grid(row=0, column=2, sticky="w", padx=(5, 0))
         ttk.Button(system_type_frame, text="Apply", command=self.apply_system_type).grid(
             row=1, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
@@ -1474,8 +1481,15 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_canvas.bind("<B1-Motion>", self._system_canvas_drag)
         self.system_builder_canvas.bind("<ButtonRelease-1>", self._system_canvas_release)
         self.system_builder_canvas.bind("<Delete>", lambda _event: self.delete_selected_system_component())
-        system_library = ttk.LabelFrame(self.indirect_system_diagram_frame, text="System object library", padding=8)
-        system_library.grid(row=0, column=1, sticky="ns")
+        self.system_builder_canvas.bind("<Escape>", self._cancel_system_link)
+        self.system_builder_side_tabs = ttk.Notebook(self.indirect_system_diagram_frame)
+        self.system_builder_side_tabs.grid(row=0, column=1, sticky="nsew")
+        system_library = ttk.Frame(self.system_builder_side_tabs, padding=8)
+        system_edit = ttk.Frame(self.system_builder_side_tabs, padding=8)
+        self.system_builder_side_tabs.add(system_library, text="System object library")
+        self.system_builder_side_tabs.add(system_edit, text="Edit")
+        system_library.columnconfigure(0, weight=1)
+        system_library.rowconfigure(0, weight=1)
         self.system_component_library = ttk.Treeview(system_library, show="tree", height=15, selectmode="browse")
         self.system_component_library.grid(row=0, column=0, sticky="nsew")
         for component_type, label in self._system_component_templates().items():
@@ -1490,14 +1504,39 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(system_library, text="Delete selected", command=self.delete_selected_system_component).grid(
             row=2, column=0, sticky="ew", pady=(6, 0)
         )
+        system_edit.columnconfigure(1, weight=1)
+        self.system_component_name_var = tk.StringVar()
+        ttk.Label(system_edit, text="Name").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
+        self.system_component_name_entry = ttk.Entry(system_edit, textvariable=self.system_component_name_var)
+        self.system_component_name_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        self.system_component_name_entry.bind("<Return>", self._apply_system_component_name_from_event)
+        self.apply_system_component_name_button = ttk.Button(
+            system_edit, text="Apply", command=self.apply_system_component_name
+        )
+        self.apply_system_component_name_button.grid(row=1, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        self.system_component_edit_status_var = tk.StringVar(value="Select a system object to edit.")
+        ttk.Label(
+            system_edit,
+            textvariable=self.system_component_edit_status_var,
+            foreground="#667278",
+            wraplength=220,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            self.indirect_system_diagram_frame,
+            text="Link objects by selecting an output node and then an input node. Select a link and press Delete to remove it.",
+            foreground="#667278",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Label(
             self.indirect_system_diagram_frame,
             text="The previous indirect-system schematic is preserved in assets/indirect_system.svg.",
             foreground="#667278",
-        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(3, 0))
         self.system_builder_selected_id: str | None = None
+        self.system_builder_selected_connection: dict[str, str] | None = None
+        self.system_builder_pending_source: str | None = None
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_library_drag_type: str | None = None
+        self._refresh_system_component_editor()
         self._render_system_builder()
         self._update_system_type_display()
 
@@ -1566,11 +1605,54 @@ class RainwaterTkApp(tk.Tk):
             None,
         )
 
+    @staticmethod
+    def _system_component_ports(component_type: str) -> tuple[bool, bool]:
+        has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
+        has_outlet = component_type != "end_uses"
+        return has_inlet, has_outlet
+
+    def _connect_system_components(self, source_id: str, target_id: str) -> None:
+        if source_id == target_id:
+            self.system_builder_pending_source = None
+            self._render_system_builder()
+            return
+        connection = {"source_component": source_id, "target_component": target_id}
+        if connection not in self.config_model.system_connections:
+            self.config_model.system_connections.append(connection)
+        self.system_builder_pending_source = None
+        self.system_builder_selected_connection = connection
+        self.system_builder_selected_id = None
+        self._render_system_builder()
+
     def _system_canvas_press(self, event: tk.Event) -> None:
         current = self.system_builder_canvas.find_withtag("current")
         tags = self.system_builder_canvas.gettags(current[0]) if current else ()
+        port_tag = next((tag for tag in tags if tag.startswith("port:")), None)
+        if port_tag is not None:
+            _prefix, component_id, direction = port_tag.split(":", 2)
+            if direction == "out":
+                self.system_builder_pending_source = component_id
+                self.system_builder_selected_id = component_id
+                self.system_builder_selected_connection = None
+                self._render_system_builder()
+            elif direction == "in" and self.system_builder_pending_source is not None:
+                self._connect_system_components(self.system_builder_pending_source, component_id)
+            self.system_builder_canvas.focus_set()
+            return
+        connection_tag = next((tag for tag in tags if tag.startswith("connection:")), None)
+        if connection_tag is not None:
+            index = int(connection_tag.split(":", 1)[1])
+            if 0 <= index < len(self.config_model.system_connections):
+                self.system_builder_selected_connection = self.config_model.system_connections[index]
+                self.system_builder_selected_id = None
+                self.system_builder_pending_source = None
+                self.system_builder_canvas.focus_set()
+                self._render_system_builder()
+            return
         component_tag = next((tag for tag in tags if tag.startswith("component:")), None)
         self.system_builder_selected_id = component_tag.split(":", 1)[1] if component_tag else None
+        self.system_builder_selected_connection = None
+        self.system_builder_pending_source = None
         if self.system_builder_selected_id:
             item = self._system_layout_item(self.system_builder_selected_id)
             if item is not None:
@@ -1592,21 +1674,107 @@ class RainwaterTkApp(tk.Tk):
     def _system_canvas_release(self, _event: tk.Event) -> None:
         self.system_builder_drag_offset = (0.0, 0.0)
 
+    def _cancel_system_link(self, _event: tk.Event | None = None) -> str:
+        self.system_builder_pending_source = None
+        self._render_system_builder()
+        return "break"
+
     def delete_selected_system_component(self) -> None:
+        if self.system_builder_selected_connection is not None:
+            selected = self.system_builder_selected_connection
+            self.config_model.system_connections = [
+                connection for connection in self.config_model.system_connections if connection is not selected
+            ]
+            self.system_builder_selected_connection = None
+            self._render_system_builder()
+            return
         if self.system_builder_selected_id is None:
             return
+        removed_id = self.system_builder_selected_id
         self.config_model.system_layout = [
             item for item in self.config_model.system_layout
-            if str(item.get("id")) != self.system_builder_selected_id
+            if str(item.get("id")) != removed_id
+        ]
+        self.config_model.system_connections = [
+            connection for connection in self.config_model.system_connections
+            if connection.get("source_component") != removed_id
+            and connection.get("target_component") != removed_id
         ]
         self.system_builder_selected_id = None
         self._render_system_builder()
+
+    def _refresh_system_component_editor(self) -> None:
+        if not hasattr(self, "system_component_name_entry"):
+            return
+        item = (
+            self._system_layout_item(self.system_builder_selected_id)
+            if self.system_builder_selected_id is not None
+            else None
+        )
+        if item is None:
+            self.system_component_name_var.set("")
+            self.system_component_name_entry.state(["disabled"])
+            self.apply_system_component_name_button.state(["disabled"])
+            self.system_component_edit_status_var.set("Select a system object to edit.")
+            return
+        self.system_component_name_var.set(str(item.get("name", "")))
+        self.system_component_name_entry.state(["!disabled"])
+        self.apply_system_component_name_button.state(["!disabled"])
+        component_type = self._system_component_templates().get(
+            str(item.get("component_type", "")), str(item.get("component_type", "System object"))
+        )
+        self.system_component_edit_status_var.set(f"Editing: {component_type}")
+
+    def apply_system_component_name(self) -> None:
+        if self.system_builder_selected_id is None:
+            return
+        item = self._system_layout_item(self.system_builder_selected_id)
+        if item is None:
+            return
+        name = self.system_component_name_var.get().strip()
+        if not name:
+            messagebox.showwarning(APP_TITLE, "System object name cannot be blank.", parent=self)
+            self.system_component_name_entry.focus_set()
+            return
+        item["name"] = name
+        self._render_system_builder()
+        self.system_component_name_entry.focus_set()
+        self.system_component_name_entry.selection_range(0, tk.END)
+
+    def _apply_system_component_name_from_event(self, _event: tk.Event) -> str:
+        self.apply_system_component_name()
+        return "break"
 
     def _render_system_builder(self) -> None:
         if not hasattr(self, "system_builder_canvas"):
             return
         canvas = self.system_builder_canvas
         canvas.delete("all")
+        layout_by_id = {str(item.get("id")): item for item in self.config_model.system_layout}
+        for index, connection in enumerate(self.config_model.system_connections):
+            source = layout_by_id.get(connection.get("source_component", ""))
+            target = layout_by_id.get(connection.get("target_component", ""))
+            if source is None or target is None:
+                continue
+            source_x, source_y = float(source.get("x", 0.0)), float(source.get("y", 0.0))
+            target_x, target_y = float(target.get("x", 0.0)), float(target.get("y", 0.0))
+            selected = connection is self.system_builder_selected_connection
+            midpoint = (source_x + target_x) / 2.0
+            canvas.create_line(
+                source_x + 68,
+                source_y,
+                midpoint,
+                source_y,
+                midpoint,
+                target_y,
+                target_x - 68,
+                target_y,
+                fill="#1565c0" if selected else "#58656b",
+                width=4 if selected else 3,
+                arrow=tk.LAST,
+                arrowshape=(10, 12, 5),
+                tags=(f"connection:{index}",),
+            )
         for item in self.config_model.system_layout:
             try:
                 component_id = str(item["id"])
@@ -1621,9 +1789,59 @@ class RainwaterTkApp(tk.Tk):
             tag = f"component:{component_id}"
             canvas.create_rectangle(x - 62, y - 30, x + 62, y + 30, fill=fill, outline=outline, width=3 if selected else 2, tags=(tag,))
             canvas.create_text(x, y, text=label, width=112, justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,))
+            has_inlet, has_outlet = self._system_component_ports(component_type)
+            if has_inlet:
+                canvas.create_oval(
+                    x - 72, y - 7, x - 58, y + 7,
+                    fill="#ffffff", outline="#30363a", width=2,
+                    tags=(f"port:{component_id}:in",),
+                )
+            if has_outlet:
+                pending = component_id == self.system_builder_pending_source
+                canvas.create_oval(
+                    x + 58, y - 7, x + 72, y + 7,
+                    fill="#2e8b57" if pending else "#ffffff",
+                    outline="#1565c0" if pending else "#30363a",
+                    width=3 if pending else 2,
+                    tags=(f"port:{component_id}:out",),
+                )
+        self._refresh_system_component_editor()
 
-    def _draw_indirect_system_diagram(self) -> None:
-        canvas = self.indirect_system_canvas
+    def _show_indirect_system_schematic(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Indirect system schematic")
+        dialog.transient(self)
+        dialog.resizable(True, False)
+        body = ttk.Frame(dialog, padding=12)
+        body.grid(sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        canvas = tk.Canvas(
+            body,
+            width=1060,
+            height=250,
+            background="white",
+            highlightthickness=1,
+            highlightbackground="#b7b7b7",
+        )
+        canvas.grid(row=0, column=0, sticky="ew")
+        self._draw_indirect_system_diagram(canvas)
+        ttk.Label(
+            body,
+            text="Preserved source: assets/indirect_system.svg",
+            foreground="#667278",
+        ).grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Button(body, text="Close", command=dialog.destroy).grid(row=2, column=0, sticky="e", pady=(10, 0))
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+        dialog.update_idletasks()
+        self.update_idletasks()
+        x = self.winfo_rootx() + max((self.winfo_width() - dialog.winfo_reqwidth()) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - dialog.winfo_reqheight()) // 2, 0)
+        dialog.geometry(f"+{x}+{y}")
+        dialog.lift()
+        dialog.focus_force()
+
+    def _draw_indirect_system_diagram(self, target_canvas: tk.Canvas | None = None) -> None:
+        canvas = target_canvas or self.indirect_system_canvas
         canvas.delete("all")
         canvas.create_rectangle(40, 30, 260, 190, outline="black", width=4)
         canvas.create_text(150, 57, text="Primary tank", font=("Segoe UI", 13, "bold"))

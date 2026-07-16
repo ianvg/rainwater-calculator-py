@@ -232,6 +232,11 @@ class SQLiteStore:
             system_layout=[
                 dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
             ],
+            system_connections=[
+                {str(key): str(value) for key, value in item.items()}
+                for item in payload.get("system_connections", [])
+                if isinstance(item, dict)
+            ],
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,

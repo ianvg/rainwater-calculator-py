@@ -95,9 +95,13 @@ def test_system_builder_layout_is_loaded() -> None:
         {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80}
     ]
 
-    config = SQLiteStore._config_from_dict({"name": "Builder", "system_layout": layout})
+    connections = [{"source_component": "rainwater_input_1", "target_component": "primary_tank_1"}]
+    config = SQLiteStore._config_from_dict(
+        {"name": "Builder", "system_layout": layout, "system_connections": connections}
+    )
 
     assert config.system_layout == layout
+    assert config.system_connections == connections
 
 
 def test_graph_auto_step_count_is_loaded() -> None:
