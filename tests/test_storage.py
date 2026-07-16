@@ -99,12 +99,22 @@ def test_optimization_parameters_are_loaded() -> None:
             "optimization_parameters": {
                 "minimum_reliability_percent": 92.5,
                 "electricity_rate_per_kwh": 0.24,
+                "objective": "Net annual savings",
+                "maximum_annual_municipal_makeup_gallons": 5000.0,
+                "maximum_installed_cost": 18000.0,
+                "require_positive_net_savings": True,
+                "catalog": [{"category": "Primary tank", "name": "T1", "capacity": 1000.0, "cost": 500.0, "power_kw": 0.0}],
             },
         }
     )
 
     assert config.optimization_parameters.minimum_reliability_percent == 92.5
     assert config.optimization_parameters.electricity_rate_per_kwh == 0.24
+    assert config.optimization_parameters.objective == "Net annual savings"
+    assert config.optimization_parameters.maximum_annual_municipal_makeup_gallons == 5000.0
+    assert config.optimization_parameters.maximum_installed_cost == 18000.0
+    assert config.optimization_parameters.require_positive_net_savings is True
+    assert config.optimization_parameters.catalog[0]["name"] == "T1"
 
 
 def test_demand_objects_are_loaded_as_model_objects() -> None:

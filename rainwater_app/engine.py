@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from calendar import monthrange
+from dataclasses import dataclass
 from typing import Callable, Iterable
 
 import numpy as np
@@ -115,6 +116,155 @@ def demand_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series
     data = _validate_rainfall(rainfall_df)
     values = [_daily_demand_for_date(config.demand, d) for d in data["Date"]]
     return pd.Series(values, index=data.index, name="demand_gallons")
+
+
+@dataclass(frozen=True)
+class PreparedHourlyInputs:
+    demand_gallons: np.ndarray
+    collected_gallons: np.ndarray
+    year_indices: np.ndarray
+    year_count: int
+
+
+@dataclass(frozen=True)
+class HourlySimulationAggregates:
+    reliability_percent: float
+    average_annual_supplied_gallons: float
+    average_annual_municipal_makeup_gallons: float
+    average_annual_overflow_gallons: float
+    average_annual_pump_flow_gallons: float
+
+
+def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> PreparedHourlyInputs:
+    """Precompute candidate-independent hourly demand, collection, and year arrays."""
+    data = _validate_rainfall(rainfall_df)
+    daily_collected = collected_water_series(config, data).to_numpy(dtype=float)
+    demand_values = np.zeros(len(data) * 24, dtype=np.float64)
+    collected_values = np.zeros(len(data) * 24, dtype=np.float64)
+    years = np.zeros(len(data) * 24, dtype=np.int32)
+    schedule = config.demand.hourly_schedule_library.get(
+        config.demand.active_hourly_schedule_name,
+        config.demand.hourly_weekly_fractions,
+    )
+    for day_index, date in enumerate(data["Date"]):
+        timestamp = pd.Timestamp(date)
+        fractions = _schedule_fractions_for_date(schedule, timestamp)
+        if not any(fractions):
+            fractions = [1.0 / 24.0] * 24
+        object_demands = np.zeros(24, dtype=np.float64)
+        for demand_object in config.demand.demand_objects:
+            object_schedule = config.demand.hourly_schedule_library.get(demand_object.schedule_name)
+            if object_schedule is None:
+                continue
+            day_key = WEEKDAY_KEYS[timestamp.weekday()]
+            multipliers = [
+                min(max(float(value), 0.0), 1.0)
+                for value in object_schedule.get(day_key, [])[:24]
+            ]
+            multipliers.extend([0.0] * (24 - len(multipliers)))
+            object_flow = max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
+            object_demands += np.asarray(multipliers) * object_flow * 60.0
+        start = day_index * 24
+        demand_values[start:start + 24] = (
+            max(_base_daily_demand_for_date(config.demand, timestamp), 0.0)
+            * np.asarray(fractions)
+            + object_demands
+        )
+        collected_values[start + 23] = daily_collected[day_index]
+        years[start:start + 24] = timestamp.year
+    _unique_years, year_indices = np.unique(years, return_inverse=True)
+    return PreparedHourlyInputs(
+        demand_gallons=demand_values,
+        collected_gallons=collected_values,
+        year_indices=year_indices.astype(np.int32, copy=False),
+        year_count=max(len(_unique_years), 1),
+    )
+
+
+def simulate_hourly_indirect_aggregates(
+    config: ProjectConfig,
+    prepared: PreparedHourlyInputs,
+    tank_size_gallons: float,
+) -> HourlySimulationAggregates:
+    """Run the indirect hourly mass balance without constructing timestep result rows."""
+    if tank_size_gallons <= 0.0:
+        raise ValueError("Tank size must be greater than zero.")
+    params = config.system_parameters
+    pump_capacity = max(float(params.filtration_pump_capacity_gallons_per_hour), 0.0)
+    recovery = min(max(float(params.filter_recovery_percent) / 100.0, 0.0), 1.0)
+    booster_capacity = max(float(params.booster_tank_size_gallons), 0.0)
+    booster_water = booster_capacity * min(max(float(params.booster_initial_fill_percent) / 100.0, 0.0), 1.0)
+    booster_rainwater = booster_water
+    booster_municipal = 0.0
+    refill_target = booster_capacity * min(max(float(params.booster_refill_level_percent) / 100.0, 0.0), 1.0)
+    refill_active = booster_capacity > 0.0 and booster_water < refill_target
+    water = tank_size_gallons * min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
+    minimum_volume = tank_size_gallons * min(
+        max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    )
+    annual_supplied = np.zeros(prepared.year_count, dtype=np.float64)
+    annual_makeup = np.zeros(prepared.year_count, dtype=np.float64)
+    annual_overflow = np.zeros(prepared.year_count, dtype=np.float64)
+    annual_pump = np.zeros(prepared.year_count, dtype=np.float64)
+    met_hours = 0
+    for index in range(prepared.demand_gallons.size):
+        demand = max(float(prepared.demand_gallons[index]), 0.0)
+        pump_flow = 0.0
+        mains_makeup = 0.0
+        if booster_capacity > 0.0:
+            if refill_active:
+                booster_space = max(booster_capacity - booster_water, 0.0)
+                delivered_capacity = pump_capacity * recovery if pump_capacity > 0.0 else booster_space
+                requested_delivery = min(booster_space, delivered_capacity)
+                requested_input = requested_delivery / recovery if recovery > 0.0 else 0.0
+                pump_flow = min(max(water - minimum_volume, 0.0), requested_input)
+                if pump_capacity > 0.0:
+                    pump_flow = min(pump_flow, pump_capacity)
+                filtered = pump_flow * recovery
+                water = max(water - pump_flow, 0.0)
+                if params.municipal_backup_enabled:
+                    mains_makeup = max(requested_delivery - filtered, 0.0)
+                booster_rainwater += filtered
+                booster_municipal += mains_makeup
+                booster_water = min(booster_rainwater + booster_municipal, booster_capacity)
+                if booster_water >= booster_capacity - 1e-9:
+                    refill_active = False
+            total_before_demand = booster_water
+            total_supplied = min(total_before_demand, demand)
+            rainwater_fraction = booster_rainwater / total_before_demand if total_before_demand > 0.0 else 0.0
+            rainwater_supplied = total_supplied * rainwater_fraction
+            mains_supplied = total_supplied - rainwater_supplied
+            booster_rainwater = max(booster_rainwater - rainwater_supplied, 0.0)
+            booster_municipal = max(booster_municipal - mains_supplied, 0.0)
+            booster_water = booster_rainwater + booster_municipal
+            if booster_water < refill_target:
+                refill_active = True
+        else:
+            requested_input = demand / recovery if recovery > 0.0 else 0.0
+            pump_flow = min(max(water - minimum_volume, 0.0), requested_input)
+            if pump_capacity > 0.0:
+                pump_flow = min(pump_flow, pump_capacity)
+            rainwater_supplied = min(pump_flow * recovery, demand)
+            water = max(water - pump_flow, 0.0)
+            if params.municipal_backup_enabled:
+                mains_makeup = max(demand - rainwater_supplied, 0.0)
+        met_hours += int(rainwater_supplied >= demand)
+        water += float(prepared.collected_gallons[index])
+        overflow = max(water - tank_size_gallons, 0.0)
+        water = min(max(water, 0.0), tank_size_gallons)
+        year_index = int(prepared.year_indices[index])
+        annual_supplied[year_index] += rainwater_supplied
+        annual_makeup[year_index] += mains_makeup
+        annual_overflow[year_index] += overflow
+        annual_pump[year_index] += pump_flow
+    count = prepared.demand_gallons.size
+    return HourlySimulationAggregates(
+        reliability_percent=met_hours / count * 100.0 if count else 0.0,
+        average_annual_supplied_gallons=float(annual_supplied.mean()) if annual_supplied.size else 0.0,
+        average_annual_municipal_makeup_gallons=float(annual_makeup.mean()) if annual_makeup.size else 0.0,
+        average_annual_overflow_gallons=float(annual_overflow.mean()) if annual_overflow.size else 0.0,
+        average_annual_pump_flow_gallons=float(annual_pump.mean()) if annual_pump.size else 0.0,
+    )
 
 
 def simulate_tank(

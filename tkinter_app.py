@@ -6,6 +6,7 @@ import datetime as dt
 import html
 import http.server
 import json
+import math
 import os
 import queue
 import shutil
@@ -68,7 +69,12 @@ from rainwater_app.units import (
     volume_to_internal,
     volume_unit,
 )
-from rainwater_app.optimization import optimize_indirect_system
+from rainwater_app.optimization import (
+    BOOSTER_TANK_CATALOG,
+    FILTRATION_PUMP_CATALOG,
+    PRIMARY_TANK_CATALOG,
+    optimize_indirect_system,
+)
 
 APP_TITLE = "Rainwater Harvesting Calculator"
 DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
@@ -860,6 +866,15 @@ class RainwaterTkApp(tk.Tk):
         self.optimization_electricity_rate_var = tk.StringVar(
             value=str(optimization.electricity_rate_per_kwh)
         )
+        self.optimization_objective_var = tk.StringVar(value=optimization.objective)
+        self.optimization_maximum_makeup_var = tk.StringVar(
+            value="" if optimization.maximum_annual_municipal_makeup_gallons is None
+            else str(optimization.maximum_annual_municipal_makeup_gallons)
+        )
+        self.optimization_maximum_cost_var = tk.StringVar(
+            value="" if optimization.maximum_installed_cost is None else str(optimization.maximum_installed_cost)
+        )
+        self.optimization_positive_savings_var = tk.BooleanVar(value=optimization.require_positive_net_savings)
         self.optimization_status_var = tk.StringVar(
             value="Uses 27 combinations from an illustrative built-in product catalog."
         )
@@ -906,6 +921,8 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_queue: queue.Queue = queue.Queue()
         self.station_lookup_poll_after_id: str | None = None
         self.station_lookup_in_progress = False
+        self.optimization_result_queue: queue.Queue = queue.Queue()
+        self.optimization_poll_after_id: str | None = None
 
         self._build_ui()
         self.selected_tank_var.trace_add("write", self._update_selected_tank_warning)
@@ -947,7 +964,7 @@ class RainwaterTkApp(tk.Tk):
         self.rowconfigure(0, weight=1)
         self._build_menu()
 
-        self.notebook = ttk.Notebook(self)
+        self.notebook = ttk.Notebook(self, takefocus=False)
         self.notebook.grid(row=0, column=0, sticky="nsew", padx=10, pady=(8, 6))
 
         self.inputs_tab = ttk.Frame(self.notebook, padding=10)
@@ -957,6 +974,7 @@ class RainwaterTkApp(tk.Tk):
         self.collection_tab = ttk.Frame(self.notebook, padding=10)
         self.demand_tab = ttk.Frame(self.notebook, padding=10)
         self.analysis_tab = ttk.Frame(self.notebook, padding=10)
+        self.optimization_tab = ttk.Frame(self.notebook, padding=10)
         self.results_tab = ttk.Frame(self.notebook, padding=10)
         self.financial_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.inputs_tab, text="Project Inputs")
@@ -966,9 +984,15 @@ class RainwaterTkApp(tk.Tk):
         self.notebook.add(self.demand_tab, text="Demand parameters")
         self.notebook.add(self.system_parameters_tab, text="System parameters")
         self.notebook.add(self.analysis_tab, text="Analysis settings")
+        self.notebook.add(self.optimization_tab, text="Optimization")
         self.notebook.add(self.financial_tab, text="Financial analysis")
         self.notebook.add(self.results_tab, text="Results")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
+        self.notebook.bind("<ButtonRelease-1>", self._clear_top_level_tab_focus, add="+")
+        self.bind("<Left>", lambda event: self._navigate_top_level_tabs(event, -1), add="+")
+        self.bind("<Right>", lambda event: self._navigate_top_level_tabs(event, 1), add="+")
+        self.bind("<Control-Tab>", lambda event: self._navigate_top_level_tabs(event, 1, anywhere=True), add="+")
+        self.bind("<Control-Shift-Tab>", lambda event: self._navigate_top_level_tabs(event, -1, anywhere=True), add="+")
 
         self._build_inputs_tab()
         self._build_schedules_tab()
@@ -996,6 +1020,23 @@ class RainwaterTkApp(tk.Tk):
             status_frame, text="Cancel analysis", command=self.cancel_analysis, state="disabled"
         )
         self.cancel_analysis_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+
+    def _clear_top_level_tab_focus(self, _event: tk.Event) -> None:
+        """Keep mouse-selected main tabs from retaining the native dotted focus ring."""
+        self.after_idle(self.focus_set)
+
+    def _navigate_top_level_tabs(
+        self, _event: tk.Event, direction: int, *, anywhere: bool = False
+    ) -> str | None:
+        if not anywhere and self.focus_get() is not self:
+            return None
+        tabs = self.notebook.tabs()
+        if not tabs:
+            return "break"
+        current = self.notebook.index(self.notebook.select())
+        self.notebook.select(tabs[(current + direction) % len(tabs)])
+        self.focus_set()
+        return "break"
 
     def _build_menu(self) -> None:
         menubar = tk.Menu(self)
@@ -1063,6 +1104,12 @@ class RainwaterTkApp(tk.Tk):
         self.bind_all("<Control-q>", self._shortcut_exit)
 
     def _on_notebook_tab_changed(self, _event: tk.Event) -> None:
+        if self.notebook.select() == str(self.optimization_tab):
+            self._apply_form_to_model()
+            self._refresh_optimization_assumptions()
+            self.last_analysis_warning_key = None
+            self.last_unit_conversion_notice = None
+            return
         if self.notebook.select() == str(self.financial_tab):
             self.update_financial_analysis(show_errors=False)
             self.last_analysis_warning_key = None
@@ -3219,8 +3266,33 @@ class RainwaterTkApp(tk.Tk):
         )
         self._update_multitank_comparison_state()
 
-        optimization_frame = ttk.LabelFrame(self.analysis_tab, text="Optimization", padding=10)
-        optimization_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.optimization_tab.columnconfigure(0, weight=1)
+        self.optimization_tab.rowconfigure(1, weight=1)
+        assumptions = ttk.LabelFrame(self.optimization_tab, text="Optimization problem definition and assumptions", padding=10)
+        assumptions.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        assumptions.columnconfigure(0, weight=1)
+        ttk.Label(
+            assumptions,
+            text=("Design variables remain open to the optimizer. Fixed project inputs are read directly from "
+                  "their source tabs so duplicate values cannot drift out of sync."),
+            foreground="#667278", wraplength=1000,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.optimization_assumptions_tree = ttk.Treeview(
+            assumptions, columns=("classification", "item", "value", "source"), show="headings", height=8
+        )
+        for column, heading, width in (
+            ("classification", "Classification", 125), ("item", "Variable / assumption", 235),
+            ("value", "Value used", 360), ("source", "Source / edit location", 190),
+        ):
+            self.optimization_assumptions_tree.heading(column, text=heading)
+            self.optimization_assumptions_tree.column(column, width=width, anchor="w")
+        self.optimization_assumptions_tree.grid(row=1, column=0, sticky="ew")
+        assumptions_scroll = ttk.Scrollbar(assumptions, orient="vertical", command=self.optimization_assumptions_tree.yview)
+        assumptions_scroll.grid(row=1, column=1, sticky="ns")
+        self.optimization_assumptions_tree.configure(yscrollcommand=assumptions_scroll.set)
+
+        optimization_frame = ttk.LabelFrame(self.optimization_tab, text="Objectives, constraints, catalog, and results", padding=10)
+        optimization_frame.grid(row=1, column=0, sticky="nsew")
         optimization_frame.columnconfigure(4, weight=1)
         ttk.Label(optimization_frame, text="Minimum rainwater reliability").grid(row=0, column=0, sticky="w")
         ttk.Entry(optimization_frame, textvariable=self.optimization_minimum_reliability_var, width=9).grid(
@@ -3232,62 +3304,286 @@ class RainwaterTkApp(tk.Tk):
             row=0, column=4, sticky="w", padx=(8, 3)
         )
         ttk.Label(optimization_frame, text="currency/kWh").grid(row=0, column=5, sticky="w", padx=(0, 16))
-        ttk.Button(optimization_frame, text="Run optimization", command=self.run_system_optimization).grid(
-            row=0, column=6, sticky="e"
+        ttk.Label(optimization_frame, text="Optimize for").grid(row=0, column=6, sticky="w")
+        ttk.Combobox(
+            optimization_frame, textvariable=self.optimization_objective_var,
+            values=("Simple payback", "Net annual savings", "Rainwater reliability", "Analysis-period net benefit"),
+            state="readonly", width=23,
+        ).grid(row=0, column=7, sticky="w", padx=(8, 0))
+        ttk.Label(optimization_frame, text="Maximum annual municipal makeup").grid(row=1, column=0, sticky="w")
+        ttk.Entry(optimization_frame, textvariable=self.optimization_maximum_makeup_var, width=9).grid(
+            row=1, column=1, sticky="w", padx=(8, 3)
         )
+        ttk.Label(optimization_frame, textvariable=self.tank_size_unit_var).grid(row=1, column=2, sticky="w", padx=(0, 16))
+        ttk.Label(optimization_frame, text="Maximum installed cost").grid(row=1, column=3, sticky="w")
+        ttk.Entry(optimization_frame, textvariable=self.optimization_maximum_cost_var, width=9).grid(
+            row=1, column=4, sticky="w", padx=(8, 3)
+        )
+        ttk.Label(optimization_frame, textvariable=self.financial_currency_var).grid(row=1, column=5, sticky="w", padx=(0, 16))
+        ttk.Checkbutton(
+            optimization_frame, text="Require positive net annual savings",
+            variable=self.optimization_positive_savings_var,
+        ).grid(row=1, column=6, columnspan=2, sticky="w")
+        button_row = ttk.Frame(optimization_frame)
+        button_row.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(6, 0))
+        ttk.Button(button_row, text="Edit sample catalog...", command=self.open_optimization_catalog).pack(side="left")
+        ttk.Button(button_row, text="Run optimization", command=self.run_system_optimization).pack(side="right")
+        ttk.Label(
+            button_row, text="Leave maximum constraints blank for no limit.", foreground="#667278"
+        ).pack(side="left", padx=(12, 0))
         ttk.Label(
             optimization_frame,
-            text=("Ranks indirect-system primary tank, filtration pump, and booster tank combinations by "
-                  "simple payback. Catalog names, prices, capacities, and pump power are illustrative."),
+            text=("Evaluates the editable primary tank, filtration pump, and booster tank catalog. "
+                  "Catalog values are illustrative planning inputs, not vendor quotations."),
             foreground="#667278", wraplength=950,
-        ).grid(row=1, column=0, columnspan=7, sticky="ew", pady=(6, 6))
+        ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(6, 6))
         self.optimization_tree = ttk.Treeview(
             optimization_frame,
-            columns=("rank", "tank", "pump", "booster", "reliability", "energy", "cost", "savings", "payback"),
+            columns=("rank", "tank", "pump", "booster", "reliability", "makeup", "energy", "cost", "savings", "payback"),
             show="headings", height=6,
         )
         headings = (
             ("rank", "Rank", 45), ("tank", "Primary tank", 100), ("pump", "Filter pump", 100),
             ("booster", "Booster tank", 100), ("reliability", "Reliability", 85),
+            ("makeup", "Municipal/year", 100),
             ("energy", "Energy/year", 90), ("cost", "Installed cost", 105),
             ("savings", "Net savings/year", 115), ("payback", "Simple payback", 100),
         )
         for column, label, width in headings:
             self.optimization_tree.heading(column, text=label)
             self.optimization_tree.column(column, width=width, anchor="e" if column not in {"tank", "pump", "booster"} else "w")
-        self.optimization_tree.grid(row=2, column=0, columnspan=6, sticky="ew")
+        self.optimization_tree.grid(row=4, column=0, columnspan=7, sticky="ew")
         optimization_scroll = ttk.Scrollbar(optimization_frame, orient="vertical", command=self.optimization_tree.yview)
-        optimization_scroll.grid(row=2, column=6, sticky="ns")
+        optimization_scroll.grid(row=4, column=7, sticky="ns")
         self.optimization_tree.configure(yscrollcommand=optimization_scroll.set)
         ttk.Label(optimization_frame, textvariable=self.optimization_status_var, foreground="#667278").grid(
-            row=3, column=0, columnspan=7, sticky="w", pady=(6, 0)
+            row=5, column=0, columnspan=8, sticky="w", pady=(6, 0)
         )
+
+    @staticmethod
+    def _default_optimization_catalog_rows() -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        rows.extend(
+            {"category": "Primary tank", "name": item.name, "capacity": item.capacity_gallons,
+             "cost": item.installed_cost, "power_kw": 0.0}
+            for item in PRIMARY_TANK_CATALOG
+        )
+        rows.extend(
+            {"category": "Filtration pump", "name": item.name,
+             "capacity": item.capacity_gallons_per_hour, "cost": item.installed_cost,
+             "power_kw": item.power_kw}
+            for item in FILTRATION_PUMP_CATALOG
+        )
+        rows.extend(
+            {"category": "Booster tank", "name": item.name, "capacity": item.capacity_gallons,
+             "cost": item.installed_cost, "power_kw": 0.0}
+            for item in BOOSTER_TANK_CATALOG
+        )
+        return rows
+
+    def _refresh_optimization_assumptions(self) -> None:
+        if not hasattr(self, "optimization_assumptions_tree"):
+            return
+        cfg = self.config_model
+        optimization = cfg.optimization_parameters
+        financial = cfg.financial_parameters
+        system = cfg.system_parameters
+        unit = volume_unit(cfg)
+        catalog = optimization.catalog or self._default_optimization_catalog_rows()
+        counts = {
+            category: sum(row.get("category") == category for row in catalog)
+            for category in ("Primary tank", "Filtration pump", "Booster tank")
+        }
+        if self.rainfall_df.empty:
+            rainfall_value = "Not loaded"
+        else:
+            rainfall_value = (
+                f"{len(self.rainfall_df):,} daily rows, "
+                f"{pd.Timestamp(self.rainfall_df['Date'].min()).date()} to "
+                f"{pd.Timestamp(self.rainfall_df['Date'].max()).date()}"
+            )
+        collection_area = sum(max(float(surface.area), 0.0) for surface in cfg.surfaces)
+        maximum_makeup = (
+            "No limit" if optimization.maximum_annual_municipal_makeup_gallons is None
+            else f"{volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg):,.0f} {unit}/year"
+        )
+        maximum_cost = (
+            "No limit" if optimization.maximum_installed_cost is None
+            else f"{financial.currency} {optimization.maximum_installed_cost:,.2f}"
+        )
+        rows = [
+            ("Design variable", "Primary tank product", f"{counts['Primary tank']} catalog choices", "Optimization catalog"),
+            ("Design variable", "Filtration pump product", f"{counts['Filtration pump']} catalog choices", "Optimization catalog"),
+            ("Design variable", "Booster tank product", f"{counts['Booster tank']} catalog choices", "Optimization catalog"),
+            ("Fixed input", "Rainfall record", rainfall_value, "Rainwater Data"),
+            ("Fixed input", "Collection surfaces", f"{len(cfg.surfaces)} surfaces; {area_to_display(collection_area, cfg):,.0f} {area_unit(cfg)}", "Collection surfaces"),
+            ("Fixed input", "Simple recurring demand", f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):,.1f} {unit}/day; {cfg.demand.daily_demand_days_per_week} days/week", "Demand parameters"),
+            ("Fixed input", "Demand objects", f"{len(cfg.demand.demand_objects)} objects", "Demand parameters / Schedules"),
+            ("Model constant", "Simulation resolution", "Hourly; historical rainfall repeated only as supplied", "Hourly engine"),
+            ("Model constant", "Daily rainfall timing", "Collected rainfall enters after that day's demand", "Hourly engine"),
+            ("Fixed input", "Primary tank initial fill", f"{cfg.tank_parameters.initial_fill_percent:g}%", "System parameters / Edit"),
+            ("Hard operating constraint", "Primary minimum operating level", f"{cfg.tank_parameters.minimum_operating_volume_percent:g}% of capacity", "System parameters / Edit"),
+            ("Fixed input", "Filter recovery", f"{system.filter_recovery_percent:g}%", "System parameters / Edit"),
+            ("Fixed input", "Booster initial fill / refill level", f"{system.booster_initial_fill_percent:g}% / {system.booster_refill_level_percent:g}%", "System parameters / Edit"),
+            ("Fixed input", "Municipal backup", "Enabled" if system.municipal_backup_enabled else "Disabled", "System parameters / Edit"),
+            ("Objective", "Ranking objective", optimization.objective, "Optimization"),
+            ("Constraint", "Minimum rainwater reliability", f"{optimization.minimum_reliability_percent:g}%", "Optimization"),
+            ("Constraint", "Maximum annual municipal makeup", maximum_makeup, "Optimization"),
+            ("Constraint", "Maximum installed cost", maximum_cost, "Optimization"),
+            ("Constraint", "Positive net annual savings", "Required" if optimization.require_positive_net_savings else "Not required", "Optimization"),
+            ("Economic input", "Water / sewer tariff", f"{financial.currency} {financial.water_rate:g} / {financial.sewer_rate:g} {financial.tariff_billing_unit}", "Financial analysis"),
+            ("Economic input", "Sewer-eligible rainwater", f"{financial.sewer_eligible_percent:g}%", "Financial analysis"),
+            ("Economic input", "Base cost / incentives", f"{financial.currency} {financial.installed_cost:,.2f} / {financial.incentives:,.2f}", "Financial analysis"),
+            ("Economic input", "Annual maintenance", f"{financial.currency} {financial.fixed_annual_maintenance:,.2f} + {financial.annual_maintenance_percent:g}% of installed cost", "Financial analysis"),
+            ("Economic input", "Electricity price", f"{financial.currency} {optimization.electricity_rate_per_kwh:g}/kWh", "Optimization"),
+            ("Economic input", "Analysis period", f"{financial.analysis_period_years} years; undiscounted", "Financial analysis"),
+            ("Search method", "Candidate enumeration", f"Exhaustive deterministic search; {math.prod(counts.values())} combinations", "Optimization backend"),
+            ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs cached for 4 unchanged runs", "Optimization backend"),
+        ]
+        self.optimization_assumptions_tree.delete(*self.optimization_assumptions_tree.get_children())
+        for row in rows:
+            self.optimization_assumptions_tree.insert("", "end", values=row)
+
+    def open_optimization_catalog(self) -> None:
+        dialog = tk.Toplevel(self)
+        dialog.title("Optimization equipment catalog")
+        dialog.transient(self)
+        dialog.geometry("820x480")
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+        ttk.Label(
+            dialog,
+            text=("Edit or paste comma-separated rows. Tank capacity is gallons; filtration-pump capacity "
+                  "is gallons/hour. Power is used for filtration pumps. Prices use the selected currency."),
+            wraplength=780, foreground="#667278", padding=10,
+        ).grid(row=0, column=0, sticky="ew")
+        editor = tk.Text(dialog, wrap="none", font=("Consolas", 10), undo=True)
+        editor.grid(row=1, column=0, sticky="nsew", padx=10)
+        scroll_y = ttk.Scrollbar(dialog, orient="vertical", command=editor.yview)
+        scroll_y.grid(row=1, column=1, sticky="ns")
+        editor.configure(yscrollcommand=scroll_y.set)
+
+        def load_rows(rows: list[dict[str, object]]) -> None:
+            editor.delete("1.0", tk.END)
+            editor.insert("1.0", "Category,Name,Capacity,Installed cost,Power kW\n")
+            for row in rows:
+                editor.insert(
+                    tk.END,
+                    f"{row['category']},{row['name']},{float(row['capacity']):g},"
+                    f"{float(row['cost']):g},{float(row.get('power_kw', 0.0)):g}\n",
+                )
+
+        load_rows(self.config_model.optimization_parameters.catalog or self._default_optimization_catalog_rows())
+
+        def apply_catalog() -> None:
+            lines = editor.get("1.0", "end-1c").splitlines()
+            parsed: list[dict[str, object]] = []
+            allowed = {"Primary tank", "Filtration pump", "Booster tank"}
+            try:
+                for row_number, values in enumerate(csv.reader(lines[1:]), start=2):
+                    if not values or not any(value.strip() for value in values):
+                        continue
+                    if len(values) != 5:
+                        raise ValueError(f"Row {row_number} must contain exactly five columns.")
+                    category, name = values[0].strip(), values[1].strip()
+                    capacity, cost, power = map(float, (values[2], values[3], values[4]))
+                    if category not in allowed:
+                        raise ValueError(f"Row {row_number} has an unsupported category.")
+                    if not name or capacity <= 0.0 or cost < 0.0 or power < 0.0:
+                        raise ValueError(f"Row {row_number} requires a name, positive capacity, and non-negative cost and power.")
+                    parsed.append({"category": category, "name": name, "capacity": capacity,
+                                   "cost": cost, "power_kw": power})
+                missing = allowed - {str(row["category"]) for row in parsed}
+                if missing:
+                    raise ValueError("Catalog requires at least one product in each category.")
+            except ValueError as exc:
+                messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
+                return
+            self.config_model.optimization_parameters.catalog = parsed
+            combinations = math.prod(
+                sum(row["category"] == category for row in parsed) for category in sorted(allowed)
+            )
+            self.optimization_status_var.set(
+                f"Catalog saved with {len(parsed)} products and {combinations} combinations."
+            )
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog, padding=10)
+        buttons.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Button(buttons, text="Reset sample catalog", command=lambda: load_rows(self._default_optimization_catalog_rows())).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
+        ttk.Button(buttons, text="Apply catalog", command=apply_catalog).pack(side="right", padx=(0, 8))
 
     def run_system_optimization(self) -> None:
         if self.analysis_running:
             self.optimization_status_var.set("Wait for the current analysis to finish.")
             return
         self._apply_form_to_model()
+        self._refresh_optimization_assumptions()
         self.optimization_tree.delete(*self.optimization_tree.get_children())
-        self.optimization_status_var.set("Evaluating 27 illustrative product combinations...")
+        catalog = self.config_model.optimization_parameters.catalog or self._default_optimization_catalog_rows()
+        category_counts = [
+            sum(row.get("category") == category for row in catalog)
+            for category in ("Primary tank", "Filtration pump", "Booster tank")
+        ]
+        combination_count = math.prod(category_counts)
+        self.optimization_status_var.set(f"Evaluating {combination_count} product combinations...")
+        self.analysis_progress_var.set(0.0)
+        self.status_var.set("Optimization running: evaluating product combinations")
         self.config(cursor="watch")
-        self.update_idletasks()
+        self.analysis_running = True
+        config_snapshot = copy.deepcopy(self.config_model)
+        rainfall_snapshot = self.rainfall_df.copy(deep=True)
 
-        def progress(current: int, total: int) -> None:
-            self.optimization_status_var.set(f"Evaluating combination {current} of {total}...")
-            self.update_idletasks()
+        def worker() -> None:
+            try:
+                results = optimize_indirect_system(
+                    config_snapshot,
+                    rainfall_snapshot,
+                    progress_callback=lambda current, total: self.optimization_result_queue.put(
+                        ("progress", current, total)
+                    ),
+                )
+                self.optimization_result_queue.put(("result", results, config_snapshot))
+            except Exception as exc:
+                self.optimization_result_queue.put(("error", str(exc)))
 
-        try:
-            results = optimize_indirect_system(
-                self.config_model, self.rainfall_df, progress_callback=progress
-            )
-        except (ValueError, KeyError) as exc:
-            self.optimization_status_var.set(str(exc))
-            messagebox.showwarning(APP_TITLE, str(exc), parent=self)
-            return
-        finally:
+        threading.Thread(target=worker, daemon=True, name="optimization-worker").start()
+        self.optimization_poll_after_id = self.after(50, self._poll_optimization_results)
+
+    def _poll_optimization_results(self) -> None:
+        terminal_message = False
+        while True:
+            try:
+                message = self.optimization_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            kind = message[0]
+            if kind == "progress":
+                _kind, current, total = message
+                self.optimization_status_var.set(f"Evaluating combination {current} of {total}...")
+                self.analysis_progress_var.set(current / max(total, 1) * 100.0)
+                self.status_var.set(f"Optimization running: combination {current} of {total}")
+            elif kind == "result":
+                _kind, results, config_snapshot = message
+                self._display_optimization_results(results, config_snapshot)
+                terminal_message = True
+            else:
+                _kind, error_message = message
+                self.analysis_progress_var.set(0.0)
+                self.status_var.set("Optimization failed")
+                self.optimization_status_var.set(error_message)
+                messagebox.showwarning(APP_TITLE, error_message, parent=self)
+                terminal_message = True
+        if terminal_message:
+            self.analysis_running = False
             self.config(cursor="")
-        currency = self.config_model.financial_parameters.currency
+            self.optimization_poll_after_id = None
+        elif self.analysis_running:
+            self.optimization_poll_after_id = self.after(50, self._poll_optimization_results)
+
+    def _display_optimization_results(self, results: list[object], run_config: ProjectConfig) -> None:
+        currency = run_config.financial_parameters.currency
         feasible_count = sum(result.feasible for result in results)
         for index, result in enumerate(results):
             payback = (
@@ -3302,6 +3598,7 @@ class RainwaterTkApp(tk.Tk):
                     result.filtration_pump.name,
                     result.booster_tank.name,
                     f"{result.reliability_percent:.1f}%",
+                    f"{volume_to_display(result.average_annual_municipal_makeup_gallons, run_config):,.0f}",
                     f"{result.average_annual_energy_kwh:,.0f} kWh",
                     f"{currency} {result.total_installed_cost:,.0f}",
                     f"{currency} {result.net_annual_savings:,.0f}",
@@ -3310,19 +3607,26 @@ class RainwaterTkApp(tk.Tk):
             )
         if feasible_count:
             best = next(result for result in results if result.feasible)
-            best_payback = (
-                f"{best.simple_payback_years:.1f} years"
-                if best.simple_payback_years is not None else "not achieved"
-            )
+            objective = run_config.optimization_parameters.objective
+            if objective == "Simple payback":
+                best_value = f"{best.simple_payback_years:.1f} years" if best.simple_payback_years is not None else "not achieved"
+            elif objective == "Net annual savings":
+                best_value = f"{currency} {best.net_annual_savings:,.0f}/year"
+            elif objective == "Rainwater reliability":
+                best_value = f"{best.reliability_percent:.1f}%"
+            else:
+                best_value = f"{currency} {best.analysis_period_net_benefit:,.0f}"
             self.optimization_status_var.set(
-                f"{feasible_count} of {len(results)} combinations meet the reliability target. "
+                f"{feasible_count} of {len(results)} combinations meet all constraints. "
                 f"Best: {best.primary_tank.name} + {best.filtration_pump.name} + "
-                f"{best.booster_tank.name}; payback {best_payback}."
+                f"{best.booster_tank.name}; {objective.lower()} {best_value}."
             )
         else:
             self.optimization_status_var.set(
                 f"None of the {len(results)} combinations meet the reliability target."
             )
+        self.analysis_progress_var.set(100.0)
+        self.status_var.set("Optimization complete")
 
     def _build_financial_tab(self) -> None:
         self.financial_tab.columnconfigure(0, weight=1)
@@ -4240,6 +4544,15 @@ class RainwaterTkApp(tk.Tk):
         optimization = cfg.optimization_parameters
         self.optimization_minimum_reliability_var.set(f"{optimization.minimum_reliability_percent:g}")
         self.optimization_electricity_rate_var.set(f"{optimization.electricity_rate_per_kwh:g}")
+        self.optimization_objective_var.set(optimization.objective)
+        self.optimization_maximum_makeup_var.set(
+            "" if optimization.maximum_annual_municipal_makeup_gallons is None
+            else f"{volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg):g}"
+        )
+        self.optimization_maximum_cost_var.set(
+            "" if optimization.maximum_installed_cost is None else f"{optimization.maximum_installed_cost:g}"
+        )
+        self.optimization_positive_savings_var.set(optimization.require_positive_net_savings)
         self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -4274,6 +4587,7 @@ class RainwaterTkApp(tk.Tk):
         self._populate_comparison_tanks()
         self._update_multitank_comparison_state()
         self._update_rainfall_summary()
+        self._refresh_optimization_assumptions()
 
     def _update_setting_unit_labels(self) -> None:
         unit = volume_unit(self.config_model)
@@ -4339,6 +4653,16 @@ class RainwaterTkApp(tk.Tk):
         )
         cfg.optimization_parameters.electricity_rate_per_kwh = _float(
             self.optimization_electricity_rate_var.get(), 0.15
+        )
+        cfg.optimization_parameters.objective = self.optimization_objective_var.get() or "Simple payback"
+        maximum_makeup = self.optimization_maximum_makeup_var.get().strip()
+        cfg.optimization_parameters.maximum_annual_municipal_makeup_gallons = (
+            volume_to_internal(_float(maximum_makeup, 0.0), cfg) if maximum_makeup else None
+        )
+        maximum_cost = self.optimization_maximum_cost_var.get().strip()
+        cfg.optimization_parameters.maximum_installed_cost = _float(maximum_cost, 0.0) if maximum_cost else None
+        cfg.optimization_parameters.require_positive_net_savings = bool(
+            self.optimization_positive_savings_var.get()
         )
         cfg.demand.avg_flush_per_person = _float(self.flushes_var.get())
         cfg.demand.gallons_per_flush_toilet = volume_to_internal(_float(self.toilet_flush_var.get()), cfg)
@@ -4795,6 +5119,9 @@ class RainwaterTkApp(tk.Tk):
         )
 
     def new_project(self) -> None:
+        if self.analysis_running:
+            messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before replacing the project.")
+            return
         self._set_active_project(None)
         self._reset_weather_selection()
         self.config_model = default_project_config()
@@ -4809,6 +5136,9 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set("Started a new project")
 
     def close_project(self) -> None:
+        if self.analysis_running:
+            messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before closing the project.")
+            return
         self._set_active_project(None)
         self._reset_weather_selection()
         self.config_model = default_project_config()
@@ -4829,6 +5159,9 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set("Closed project")
 
     def load_selected_project(self) -> None:
+        if self.analysis_running:
+            messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before loading another project.")
+            return
         name = self.saved_project_var.get()
         if not name:
             messagebox.showinfo(APP_TITLE, "Select a saved project first.")
@@ -4905,6 +5238,9 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set("Cleared recent projects")
 
     def _open_project_file(self, selected_path: Path) -> None:
+        if self.analysis_running:
+            messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before opening another project.")
+            return
         previous_path = self.project_file_path
         previous_store = self.store
         try:

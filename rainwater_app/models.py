@@ -104,6 +104,11 @@ class FinancialParameters:
 class OptimizationParameters:
     minimum_reliability_percent: float = 80.0
     electricity_rate_per_kwh: float = 0.15
+    objective: str = "Simple payback"
+    maximum_annual_municipal_makeup_gallons: float | None = None
+    maximum_installed_cost: float | None = None
+    require_positive_net_savings: bool = False
+    catalog: List[Dict[str, object]] = field(default_factory=list)
 
 
 @dataclass
