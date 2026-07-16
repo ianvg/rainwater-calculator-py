@@ -1390,144 +1390,15 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _scroll_system_parameters_mousewheel(self, event: tk.Event) -> str | None:
-        if self.notebook.select() != str(self.system_parameters_tab):
-            return None
-        pointer_x, pointer_y = self.winfo_pointerxy()
-        canvas_x = self.system_parameters_canvas.winfo_rootx()
-        canvas_y = self.system_parameters_canvas.winfo_rooty()
-        if not (
-            canvas_x <= pointer_x < canvas_x + self.system_parameters_canvas.winfo_width()
-            and canvas_y <= pointer_y < canvas_y + self.system_parameters_canvas.winfo_height()
-        ):
-            return None
-        if getattr(event, "num", None) == 4:
-            direction = -1
-        elif getattr(event, "num", None) == 5:
-            direction = 1
-        else:
-            direction = -1 if event.delta > 0 else 1
-        self.system_parameters_canvas.yview_scroll(direction, "units")
-        return "break"
+        return None
 
     def _build_system_parameters_tab(self) -> None:
         self.system_parameters_tab.columnconfigure(0, weight=1)
         self.system_parameters_tab.rowconfigure(0, weight=1)
-        frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
-        self.system_parameters_canvas = tk.Canvas(
-            self.system_parameters_tab,
-            highlightthickness=0,
-            borderwidth=0,
-            background=frame_background,
-        )
-        self.system_parameters_canvas.grid(row=0, column=0, sticky="nsew")
-        system_scroll_y = ttk.Scrollbar(
-            self.system_parameters_tab,
-            orient="vertical",
-            command=self.system_parameters_canvas.yview,
-        )
-        system_scroll_y.grid(row=0, column=1, sticky="ns")
-        self.system_parameters_canvas.configure(yscrollcommand=system_scroll_y.set)
-        system_content = ttk.Frame(self.system_parameters_canvas, padding=(0, 0, 8, 8))
-        self.system_parameters_canvas_window = self.system_parameters_canvas.create_window(
-            (0, 0),
-            window=system_content,
-            anchor="nw",
-        )
-        system_content.columnconfigure(0, weight=1)
-        system_content.columnconfigure(1, weight=1)
-        system_content.bind(
-            "<Configure>",
-            lambda _event: self.system_parameters_canvas.configure(
-                scrollregion=self.system_parameters_canvas.bbox("all")
-            ),
-        )
-        self.system_parameters_canvas.bind("<Configure>", self._resize_system_parameters_content)
-        self.bind_all("<MouseWheel>", self._scroll_system_parameters_mousewheel, add="+")
-        self.bind_all("<Button-4>", self._scroll_system_parameters_mousewheel, add="+")
-        self.bind_all("<Button-5>", self._scroll_system_parameters_mousewheel, add="+")
-
-        system_type_frame = ttk.LabelFrame(system_content, text="System type", padding=12)
-        system_type_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
-        ttk.Radiobutton(
-            system_type_frame,
-            text="Direct system",
-            variable=self.system_type_var,
-            value="Direct system",
-        ).grid(row=0, column=0, sticky="w", padx=(0, 24))
-        ttk.Radiobutton(
-            system_type_frame,
-            text="Indirect system",
-            variable=self.system_type_var,
-            value="Indirect system",
-        ).grid(row=0, column=1, sticky="w")
-        ttk.Button(
-            system_type_frame,
-            text="i",
-            width=2,
-            command=self._show_indirect_system_schematic,
-            takefocus=True,
-        ).grid(row=0, column=2, sticky="w", padx=(5, 0))
-        ttk.Button(system_type_frame, text="Apply", command=self.apply_system_type).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(12, 0)
-        )
-        ttk.Label(
-            system_type_frame,
-            textvariable=self.current_system_type_var,
-            foreground="#6f777b",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        component_frame = ttk.LabelFrame(system_content, text="Component parameters", padding=12)
-        component_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
-        component_frame.columnconfigure(1, weight=1)
-        self._labeled_entry(component_frame, 0, "Distribution pump capacity (0 = unlimited)", self.pump_capacity_var, self.pump_capacity_unit_var)
-        self._labeled_entry(component_frame, 1, "Filtration pump capacity (0 = unlimited)", self.filtration_pump_capacity_var, self.pump_capacity_unit_var)
-        self._labeled_entry(component_frame, 2, "Filter recovery (indirect)", self.filter_recovery_var, self.percent_unit_var)
-        self._labeled_entry(component_frame, 3, "Booster tank size (indirect; 0 = pass-through)", self.booster_tank_size_var, self.tank_size_unit_var)
-        self._labeled_entry(component_frame, 4, "Booster initial fill (indirect)", self.booster_initial_fill_var, self.percent_unit_var)
-        self._labeled_entry(component_frame, 5, "Booster refill level (indirect)", self.booster_refill_level_var, self.percent_unit_var)
-        ttk.Checkbutton(
-            component_frame,
-            text="Municipal backup enabled",
-            variable=self.municipal_backup_enabled_var,
-        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(6, 0))
-
-        settings_frame = ttk.LabelFrame(system_content, text="Simulation settings", padding=10)
-        settings_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        settings_frame.columnconfigure(0, weight=1)
-        settings_frame.columnconfigure(1, weight=1)
-        graph_settings = ttk.Frame(settings_frame)
-        graph_settings.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        graph_settings.columnconfigure(1, weight=1)
-        self._labeled_entry(graph_settings, 0, "Graph start tank size", self.graph_start_var, self.tank_size_unit_var)
-        self._labeled_entry(graph_settings, 1, "Graph end tank size", self.graph_end_var, self.tank_size_unit_var)
-        self._labeled_entry(graph_settings, 2, "Graph step", self.graph_step_var, self.tank_size_unit_var)
-        ttk.Button(graph_settings, text="Auto", command=self.auto_set_graph_step).grid(
-            row=2, column=3, sticky="w", padx=(8, 0), pady=2
-        )
-        ttk.Label(graph_settings, text="Number of steps").grid(
-            row=2, column=4, sticky="w", padx=(12, 4), pady=2
-        )
-        ttk.Spinbox(
-            graph_settings,
-            from_=1,
-            to=1000,
-            increment=1,
-            textvariable=self.graph_auto_step_count_var,
-            width=6,
-        ).grid(row=2, column=5, sticky="w", pady=2)
-        tank_settings = ttk.Frame(settings_frame)
-        tank_settings.grid(row=0, column=1, sticky="nsew", padx=(12, 0))
-        tank_settings.columnconfigure(1, weight=1)
-        self._labeled_entry(tank_settings, 0, "Primary tank size", self.selected_tank_var, self.tank_size_unit_var)
-        ttk.Label(tank_settings, textvariable=self.selected_tank_warning_var, style="Invalid.TLabel").grid(
-            row=0, column=3, sticky="w", padx=(8, 0), pady=2
-        )
-        self._labeled_entry(tank_settings, 1, "Initial fill", self.initial_fill_var, self.percent_unit_var)
-        self._labeled_entry(tank_settings, 2, "Reserve threshold", self.reserve_var, self.reserve_unit_var)
-
         self.indirect_system_diagram_frame = ttk.LabelFrame(
-            system_content, text="System builder", padding=10
+            self.system_parameters_tab, text="System builder", padding=10
         )
-        self.indirect_system_diagram_frame.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(12, 0))
+        self.indirect_system_diagram_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.indirect_system_diagram_frame.columnconfigure(0, weight=1)
         self.system_builder_canvas = tk.Canvas(
             self.indirect_system_diagram_frame,
@@ -1546,8 +1417,11 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_side_tabs = ttk.Notebook(self.indirect_system_diagram_frame)
         self.system_builder_side_tabs.grid(row=0, column=1, sticky="nsew")
         system_library = ttk.Frame(self.system_builder_side_tabs, padding=8)
+        system_templates = ttk.Frame(self.system_builder_side_tabs, padding=8)
         system_edit = ttk.Frame(self.system_builder_side_tabs, padding=8)
+        self.system_component_edit_tab = system_edit
         self.system_builder_side_tabs.add(system_library, text="System object library")
+        self.system_builder_side_tabs.add(system_templates, text="System templates")
         self.system_builder_side_tabs.add(system_edit, text="Edit")
         system_library.columnconfigure(0, weight=1)
         system_library.rowconfigure(0, weight=1)
@@ -1565,6 +1439,25 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(system_library, text="Delete selected", command=self.delete_selected_system_component).grid(
             row=2, column=0, sticky="ew", pady=(6, 0)
         )
+        system_templates.columnconfigure(0, weight=1)
+        ttk.Label(
+            system_templates,
+            text="Start with a connected system made from objects in the library.",
+            foreground="#667278",
+            wraplength=230,
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(
+            system_templates, text="Use direct system", command=lambda: self.apply_system_template("Direct system")
+        ).grid(row=1, column=0, sticky="ew")
+        ttk.Button(
+            system_templates, text="Use indirect system", command=lambda: self.apply_system_template("Indirect system")
+        ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Label(
+            system_templates,
+            text="Applying a template replaces the objects and links currently on the canvas.",
+            foreground="#667278",
+            wraplength=230,
+        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
         system_edit.columnconfigure(1, weight=1)
         self.system_component_name_var = tk.StringVar()
         ttk.Label(system_edit, text="Name").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
@@ -1582,10 +1475,70 @@ class RainwaterTkApp(tk.Tk):
             foreground="#667278",
             wraplength=220,
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.system_component_parameters_editor = ttk.LabelFrame(
+            system_edit, text="Object parameters", padding=6
+        )
+        self.system_component_parameters_editor.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.system_component_parameters_editor.columnconfigure(1, weight=1)
+        self.system_parameter_frames: dict[str, ttk.Frame] = {}
+        parameter_specs = {
+            "primary_tank": [
+                ("Primary tank size", self.selected_tank_var, self.tank_size_unit_var),
+                ("Initial fill", self.initial_fill_var, self.percent_unit_var),
+                ("Reserve threshold", self.reserve_var, self.reserve_unit_var),
+                ("Graph start tank size", self.graph_start_var, self.tank_size_unit_var),
+                ("Graph end tank size", self.graph_end_var, self.tank_size_unit_var),
+                ("Graph step", self.graph_step_var, self.tank_size_unit_var),
+            ],
+            "filtration_pump": [
+                ("Pump capacity (0 = unlimited)", self.filtration_pump_capacity_var, self.pump_capacity_unit_var),
+            ],
+            "filtration_system": [
+                ("Filter recovery", self.filter_recovery_var, self.percent_unit_var),
+            ],
+            "booster_tank": [
+                ("Tank size (0 = pass-through)", self.booster_tank_size_var, self.tank_size_unit_var),
+                ("Initial fill", self.booster_initial_fill_var, self.percent_unit_var),
+                ("Refill level", self.booster_refill_level_var, self.percent_unit_var),
+            ],
+            "booster_pump": [
+                ("Pump capacity (0 = unlimited)", self.pump_capacity_var, self.pump_capacity_unit_var),
+            ],
+        }
+        for component_type, specs in parameter_specs.items():
+            frame = ttk.Frame(self.system_component_parameters_editor)
+            frame.grid(row=0, column=0, sticky="ew")
+            frame.columnconfigure(1, weight=1)
+            for row, (label, variable, unit_variable) in enumerate(specs):
+                self._labeled_entry(frame, row, label, variable, unit_variable)
+            if component_type == "primary_tank":
+                ttk.Button(frame, text="Auto graph step", command=self.auto_set_graph_step).grid(
+                    row=len(specs), column=0, columnspan=3, sticky="w", pady=(6, 0)
+                )
+                ttk.Label(frame, text="Number of steps").grid(
+                    row=len(specs) + 1, column=0, sticky="w", pady=2
+                )
+                ttk.Spinbox(
+                    frame, from_=1, to=1000, increment=1,
+                    textvariable=self.graph_auto_step_count_var, width=6,
+                ).grid(row=len(specs) + 1, column=1, sticky="w", pady=2)
+                ttk.Label(frame, textvariable=self.selected_tank_warning_var, style="Invalid.TLabel").grid(
+                    row=len(specs) + 2, column=0, columnspan=3, sticky="w", pady=(4, 0)
+                )
+            self.system_parameter_frames[component_type] = frame
+            frame.grid_remove()
+        self.system_municipal_backup_editor = ttk.Frame(self.system_component_parameters_editor)
+        self.system_municipal_backup_editor.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            self.system_municipal_backup_editor,
+            text="Municipal backup enabled",
+            variable=self.municipal_backup_enabled_var,
+        ).grid(row=0, column=0, sticky="w")
+        self.system_municipal_backup_editor.grid_remove()
         self.system_end_uses_editor = ttk.LabelFrame(
             system_edit, text="Demand objects", padding=6
         )
-        self.system_end_uses_editor.grid(row=3, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        self.system_end_uses_editor.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
         self.system_end_uses_editor.columnconfigure(0, weight=1)
         ttk.Label(self.system_end_uses_editor, text="Available").grid(row=0, column=0, sticky="w")
         self.system_available_demands_list = tk.Listbox(
@@ -1632,7 +1585,6 @@ class RainwaterTkApp(tk.Tk):
         self.system_library_drag_type: str | None = None
         self._refresh_system_component_editor()
         self._render_system_builder()
-        self._update_system_type_display()
 
     @staticmethod
     def _system_component_templates() -> dict[str, str]:
@@ -1653,6 +1605,58 @@ class RainwaterTkApp(tk.Tk):
         while f"{component_type}_{index}" in existing:
             index += 1
         return f"{component_type}_{index}"
+
+    def apply_system_template(self, system_type: str) -> None:
+        if system_type == "Direct system":
+            components = [
+                ("rainwater_input", "Rainwater input", 90, 135),
+                ("primary_tank", "Primary tank", 270, 135),
+                ("booster_pump", "Distribution pump", 460, 135),
+                ("end_uses", "End-uses", 650, 135),
+                ("municipal_backup", "Municipal water backup", 460, 260),
+            ]
+            links = [(0, 1), (1, 2), (2, 3), (4, 3)]
+        elif system_type == "Indirect system":
+            components = [
+                ("rainwater_input", "Rainwater input", 85, 100),
+                ("primary_tank", "Primary tank", 235, 100),
+                ("filtration_pump", "Filtration pump", 385, 100),
+                ("filtration_system", "Filtration system", 535, 100),
+                ("booster_tank", "Booster tank", 685, 100),
+                ("municipal_backup", "Municipal water backup", 535, 235),
+                ("booster_pump", "Booster pump", 385, 320),
+                ("end_uses", "End-uses", 650, 320),
+            ]
+            links = [(0, 1), (1, 2), (2, 3), (3, 4), (5, 4), (4, 6), (6, 7)]
+        else:
+            return
+        layout: list[dict[str, object]] = []
+        for index, (component_type, name, x, y) in enumerate(components, start=1):
+            layout.append(
+                {
+                    "id": f"{component_type}_{index}",
+                    "component_type": component_type,
+                    "name": name,
+                    "x": x,
+                    "y": y,
+                }
+            )
+        self.config_model.system_layout = layout
+        self.config_model.system_connections = [
+            {
+                "source_component": str(layout[source]["id"]),
+                "target_component": str(layout[target]["id"]),
+            }
+            for source, target in links
+        ]
+        self.config_model.system_type = system_type
+        self.system_type_var.set(system_type)
+        self.current_system_type_var.set(f"Current system type: {system_type}")
+        self.system_builder_selected_id = None
+        self.system_builder_selected_connection = None
+        self.system_builder_pending_source = None
+        self._render_system_builder()
+        self.status_var.set(f"Applied {system_type.lower()} template")
 
     def _add_system_component(self, component_type: str, x: float, y: float) -> None:
         label = self._system_component_templates().get(component_type)
@@ -1751,6 +1755,7 @@ class RainwaterTkApp(tk.Tk):
             item = self._system_layout_item(self.system_builder_selected_id)
             if item is not None:
                 self.system_builder_drag_offset = (event.x - float(item["x"]), event.y - float(item["y"]))
+            self.system_builder_side_tabs.select(self.system_component_edit_tab)
         self.system_builder_canvas.focus_set()
         self._render_system_builder()
 
@@ -1805,21 +1810,35 @@ class RainwaterTkApp(tk.Tk):
             if self.system_builder_selected_id is not None
             else None
         )
+        for frame in self.system_parameter_frames.values():
+            frame.grid_remove()
+        self.system_municipal_backup_editor.grid_remove()
         if item is None:
             self.system_component_name_var.set("")
             self.system_component_name_entry.state(["disabled"])
             self.apply_system_component_name_button.state(["disabled"])
             self.system_component_edit_status_var.set("Select a system object to edit.")
+            self.system_component_parameters_editor.grid_remove()
             self.system_end_uses_editor.grid_remove()
             return
         self.system_component_name_var.set(str(item.get("name", "")))
         self.system_component_name_entry.state(["!disabled"])
         self.apply_system_component_name_button.state(["!disabled"])
+        component_type_key = str(item.get("component_type", ""))
         component_type = self._system_component_templates().get(
-            str(item.get("component_type", "")), str(item.get("component_type", "System object"))
+            component_type_key, str(item.get("component_type", "System object"))
         )
         self.system_component_edit_status_var.set(f"Editing: {component_type}")
-        if str(item.get("component_type", "")) == "end_uses":
+        parameter_frame = self.system_parameter_frames.get(component_type_key)
+        if parameter_frame is not None:
+            self.system_component_parameters_editor.grid()
+            parameter_frame.grid()
+        elif component_type_key == "municipal_backup":
+            self.system_component_parameters_editor.grid()
+            self.system_municipal_backup_editor.grid()
+        else:
+            self.system_component_parameters_editor.grid_remove()
+        if component_type_key == "end_uses":
             self.system_end_uses_editor.grid()
             self._refresh_end_uses_demand_editor(item)
         else:
@@ -1897,6 +1916,46 @@ class RainwaterTkApp(tk.Tk):
         self.apply_system_component_name()
         return "break"
 
+    @staticmethod
+    def _system_connection_points(
+        source_x: float,
+        source_y: float,
+        target_x: float,
+        target_y: float,
+        canvas_height: float,
+    ) -> tuple[float, ...]:
+        """Route a connection to the target's left port without crossing either object."""
+        start_x = source_x + 68.0
+        end_x = target_x - 68.0
+        if end_x >= start_x + 24.0:
+            midpoint = (start_x + end_x) / 2.0
+            return (start_x, source_y, midpoint, source_y, midpoint, target_y, end_x, target_y)
+
+        source_rail_x = start_x + 24.0
+        target_rail_x = end_x - 24.0
+        upper_corridor = min(source_y, target_y) - 52.0
+        lower_corridor = max(source_y, target_y) + 52.0
+        if upper_corridor >= 10.0:
+            corridor_y = upper_corridor
+        elif lower_corridor <= max(canvas_height - 10.0, 10.0):
+            corridor_y = lower_corridor
+        else:
+            corridor_y = upper_corridor
+        return (
+            start_x,
+            source_y,
+            source_rail_x,
+            source_y,
+            source_rail_x,
+            corridor_y,
+            target_rail_x,
+            corridor_y,
+            target_rail_x,
+            target_y,
+            end_x,
+            target_y,
+        )
+
     def _render_system_builder(self) -> None:
         if not hasattr(self, "system_builder_canvas"):
             return
@@ -1911,16 +1970,10 @@ class RainwaterTkApp(tk.Tk):
             source_x, source_y = float(source.get("x", 0.0)), float(source.get("y", 0.0))
             target_x, target_y = float(target.get("x", 0.0)), float(target.get("y", 0.0))
             selected = connection is self.system_builder_selected_connection
-            midpoint = (source_x + target_x) / 2.0
             canvas.create_line(
-                source_x + 68,
-                source_y,
-                midpoint,
-                source_y,
-                midpoint,
-                target_y,
-                target_x - 68,
-                target_y,
+                *self._system_connection_points(
+                    source_x, source_y, target_x, target_y, canvas.winfo_height()
+                ),
                 fill="#1565c0" if selected else "#58656b",
                 width=4 if selected else 3,
                 arrow=tk.LAST,
@@ -2048,22 +2101,6 @@ class RainwaterTkApp(tk.Tk):
             x += half_step
         points.extend((end_x, center_y))
         return points
-
-    def _update_system_type_display(self) -> None:
-        if not hasattr(self, "indirect_system_diagram_frame"):
-            return
-        self.indirect_system_diagram_frame.grid()
-
-    def apply_system_type(self) -> None:
-        selected_type = self.system_type_var.get()
-        if selected_type not in {"Direct system", "Indirect system"}:
-            selected_type = "Direct system"
-            self.system_type_var.set(selected_type)
-        self.config_model.system_type = selected_type
-        self._apply_form_to_model()
-        self.current_system_type_var.set(f"Current system type: {selected_type}")
-        self._update_system_type_display()
-        self.status_var.set(f"Applied system type: {selected_type}")
 
     def _build_import_tab(self) -> None:
         self.import_tab.columnconfigure(0, weight=1)
@@ -2400,12 +2437,22 @@ class RainwaterTkApp(tk.Tk):
         return image
 
     def _build_demand_tab(self) -> None:
-        self.demand_tab.columnconfigure(0, weight=2)
-        self.demand_tab.columnconfigure(1, weight=1)
-        self.demand_tab.rowconfigure(3, weight=1)
+        self.demand_tab.columnconfigure(0, weight=1)
+        self.demand_tab.rowconfigure(0, weight=1)
+        self.demand_settings_notebook = ttk.Notebook(self.demand_tab)
+        self.demand_settings_notebook.grid(row=0, column=0, sticky="nsew")
+        self.overall_demand_settings_tab = ttk.Frame(self.demand_settings_notebook, padding=10)
+        self.daily_demand_only_tab = ttk.Frame(self.demand_settings_notebook, padding=10)
+        self.hourly_demand_only_tab = ttk.Frame(self.demand_settings_notebook, padding=10)
+        self.demand_settings_notebook.add(self.overall_demand_settings_tab, text="Overall demand settings")
+        self.demand_settings_notebook.add(self.daily_demand_only_tab, text="Daily demand only settings")
+        self.demand_settings_notebook.add(self.hourly_demand_only_tab, text="Hourly demand only settings")
 
-        settings_frame = ttk.LabelFrame(self.demand_tab, text="Simple demand settings", padding=10)
-        settings_frame.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
+        overall = self.overall_demand_settings_tab
+        overall.columnconfigure(0, weight=1)
+        overall.rowconfigure(1, weight=1)
+        settings_frame = ttk.LabelFrame(overall, text="Simple demand settings", padding=10)
+        settings_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         settings_frame.columnconfigure(1, weight=1)
         self._labeled_entry(settings_frame, 0, "Simple daily demand", self.simple_daily_var, self.simple_daily_unit_var)
         ttk.Label(settings_frame, text="Daily demand schedule").grid(row=1, column=0, sticky="w", pady=2)
@@ -2422,32 +2469,66 @@ class RainwaterTkApp(tk.Tk):
         self._labeled_entry(settings_frame, 3, "Toilet volume", self.toilet_flush_var, self.flush_volume_unit_var)
         self._labeled_entry(settings_frame, 4, "Urinal volume", self.urinal_flush_var, self.flush_volume_unit_var)
 
-        demand_objects_frame = ttk.LabelFrame(self.demand_tab, text="Demand objects", padding=8)
-        demand_objects_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 10), pady=(0, 10))
+        monthly_frame = ttk.LabelFrame(overall, text="Monthly demand", padding=8)
+        monthly_frame.grid(row=1, column=0, sticky="nsew")
+        monthly_frame.columnconfigure(0, weight=1)
+        monthly_frame.rowconfigure(0, weight=1)
+        columns = ["month"] + [field for field, _label in DEMAND_FIELDS]
+        self.demand_tree = ttk.Treeview(
+            monthly_frame, columns=columns, show="headings", height=12, style="MonthlyDemand.Treeview"
+        )
+        self.demand_tree.heading("month", text="Month")
+        self.demand_tree.column("month", width=80, anchor="w")
+        for field, _label in DEMAND_FIELDS:
+            self.demand_tree.column(field, width=105, anchor="e")
+        self._update_demand_headings()
+        self.demand_tree.grid(row=0, column=0, sticky="nsew")
+        self.demand_tree.bind("<Double-1>", self._edit_demand_month_from_event)
+        scroll_x = ttk.Scrollbar(monthly_frame, orient="horizontal", command=self.demand_tree.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.demand_tree.configure(xscrollcommand=scroll_x.set)
+        ttk.Button(monthly_frame, text="Edit Selected Month", command=self.edit_demand_month).grid(
+            row=2, column=0, sticky="w", pady=(8, 0)
+        )
+
+        self._build_demand_objects_workspace(self.daily_demand_only_tab, "daily")
+        self._build_demand_objects_workspace(self.hourly_demand_only_tab, "hourly")
+        self.demand_objects_tree = self.daily_demand_objects_tree
+        self.demand_library_tree = self.daily_demand_library_tree
+        self._refresh_demand_object_library()
+
+    def _build_demand_objects_workspace(self, parent: ttk.Frame, prefix: str) -> None:
+        parent.columnconfigure(0, weight=2)
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(0, weight=1)
+        demand_objects_frame = ttk.LabelFrame(parent, text="Demand objects", padding=8)
+        demand_objects_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         demand_objects_frame.columnconfigure(0, weight=1)
-        self.demand_objects_tree = ttk.Treeview(
+        demand_objects_frame.rowconfigure(0, weight=1)
+        objects_tree = ttk.Treeview(
             demand_objects_frame,
             columns=("name", "type", "instantaneous_demand", "schedule"),
             show="headings",
-            height=4,
+            height=12,
             selectmode="browse",
         )
-        self.demand_objects_tree.heading("name", text="Name")
-        self.demand_objects_tree.heading("type", text="Type")
-        self.demand_objects_tree.heading("instantaneous_demand", text="Instantaneous demand")
-        self.demand_objects_tree.heading("schedule", text="Schedule")
-        self.demand_objects_tree.column("name", width=190)
-        self.demand_objects_tree.column("type", width=140)
-        self.demand_objects_tree.column("instantaneous_demand", width=165, anchor="e")
-        self.demand_objects_tree.column("schedule", width=190)
-        self.demand_objects_tree.grid(row=0, column=0, sticky="ew")
+        objects_tree.heading("name", text="Name")
+        objects_tree.heading("type", text="Type")
+        objects_tree.heading("instantaneous_demand", text="Instantaneous demand")
+        objects_tree.heading("schedule", text="Schedule")
+        objects_tree.column("name", width=190)
+        objects_tree.column("type", width=140)
+        objects_tree.column("instantaneous_demand", width=165, anchor="e")
+        objects_tree.column("schedule", width=190)
+        objects_tree.grid(row=0, column=0, sticky="nsew")
         demand_object_scroll = ttk.Scrollbar(
-            demand_objects_frame, orient="vertical", command=self.demand_objects_tree.yview
+            demand_objects_frame, orient="vertical", command=objects_tree.yview
         )
         demand_object_scroll.grid(row=0, column=1, sticky="ns")
-        self.demand_objects_tree.configure(yscrollcommand=demand_object_scroll.set)
-        self.demand_objects_tree.bind("<Double-1>", self._edit_demand_object_from_event)
-        self.demand_objects_tree.bind("<Return>", self._edit_selected_demand_object_from_event)
+        objects_tree.configure(yscrollcommand=demand_object_scroll.set)
+        objects_tree.bind("<Double-1>", self._edit_demand_object_from_event)
+        objects_tree.bind("<Return>", self._edit_selected_demand_object_from_event)
+        setattr(self, f"{prefix}_demand_objects_tree", objects_tree)
         object_buttons = ttk.Frame(demand_objects_frame)
         object_buttons.grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(object_buttons, text="Add demand object", command=self.add_demand_object).grid(row=0, column=0)
@@ -2461,66 +2542,43 @@ class RainwaterTkApp(tk.Tk):
             row=0, column=3, padx=(6, 0)
         )
 
-        demand_library_frame = ttk.LabelFrame(self.demand_tab, text="Demand object library", padding=8)
-        demand_library_frame.grid(row=1, column=1, sticky="nsew", pady=(0, 10))
+        demand_library_frame = ttk.LabelFrame(parent, text="Demand object library", padding=8)
+        demand_library_frame.grid(row=0, column=1, sticky="nsew")
         demand_library_frame.columnconfigure(0, weight=1)
         demand_library_frame.rowconfigure(1, weight=1)
         demand_library_toolbar = ttk.Frame(demand_library_frame)
         demand_library_toolbar.grid(row=0, column=0, sticky="w", pady=(0, 6))
-        self.demand_library_add_button = ttk.Button(
+        demand_library_add_button = ttk.Button(
             demand_library_toolbar, image=self.schedule_add_icon, command=self.create_custom_demand_object_template
         )
-        self.demand_library_add_button.grid(row=0, column=0)
-        self.demand_library_duplicate_button = ttk.Button(
+        demand_library_add_button.grid(row=0, column=0)
+        demand_library_duplicate_button = ttk.Button(
             demand_library_toolbar, image=self.schedule_duplicate_icon, command=self.duplicate_demand_object_template
         )
-        self.demand_library_duplicate_button.grid(row=0, column=1, padx=(2, 0))
-        self.demand_library_delete_button = ttk.Button(
+        demand_library_duplicate_button.grid(row=0, column=1, padx=(2, 0))
+        demand_library_delete_button = ttk.Button(
             demand_library_toolbar, image=self.schedule_delete_icon, command=self.delete_custom_demand_object_template
         )
-        self.demand_library_delete_button.grid(row=0, column=2, padx=(2, 0))
-        self.demand_library_tree = ttk.Treeview(demand_library_frame, show="tree", selectmode="browse", height=5)
-        self.demand_library_tree.grid(row=1, column=0, sticky="nsew")
+        demand_library_delete_button.grid(row=0, column=2, padx=(2, 0))
+        library_tree = ttk.Treeview(demand_library_frame, show="tree", selectmode="browse", height=12)
+        library_tree.grid(row=1, column=0, sticky="nsew")
         demand_library_scroll = ttk.Scrollbar(
-            demand_library_frame, orient="vertical", command=self.demand_library_tree.yview
+            demand_library_frame, orient="vertical", command=library_tree.yview
         )
         demand_library_scroll.grid(row=1, column=1, sticky="ns")
-        self.demand_library_tree.configure(yscrollcommand=demand_library_scroll.set)
-        self.demand_library_tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
-        self.demand_library_tree.bind("<<TreeviewSelect>>", self._demand_library_selection_changed)
-        self.demand_library_tree.bind("<Double-1>", self._add_demand_library_object_from_event)
-        self.demand_library_tree.bind("<Return>", self._add_demand_library_object_from_event)
-        self.add_demand_library_to_project_button = ttk.Button(
+        library_tree.configure(yscrollcommand=demand_library_scroll.set)
+        library_tree.tag_configure("group", font=("Segoe UI", 9, "bold"))
+        library_tree.bind("<<TreeviewSelect>>", self._demand_library_selection_changed)
+        library_tree.bind("<Double-1>", self._add_demand_library_object_from_event)
+        library_tree.bind("<Return>", self._add_demand_library_object_from_event)
+        add_library_button = ttk.Button(
             demand_library_frame, text="Add selected to project", command=self.add_demand_object_from_library
         )
-        self.add_demand_library_to_project_button.grid(row=2, column=0, sticky="ew", pady=(8, 0))
-        self._refresh_demand_object_library()
-
-        ttk.Label(self.demand_tab, text="Monthly demand", font=("Segoe UI", 10, "bold")).grid(
-            row=2, column=0, columnspan=2, sticky="w", pady=(0, 6)
-        )
-
-        columns = ["month"] + [field for field, _label in DEMAND_FIELDS]
-        self.demand_tree = ttk.Treeview(
-            self.demand_tab,
-            columns=columns,
-            show="headings",
-            height=9,
-            style="MonthlyDemand.Treeview",
-        )
-        self.demand_tree.heading("month", text="Month")
-        self.demand_tree.column("month", width=80, anchor="w")
-        for field, _label in DEMAND_FIELDS:
-            self.demand_tree.column(field, width=105, anchor="e")
-        self._update_demand_headings()
-        self.demand_tree.grid(row=3, column=0, columnspan=2, sticky="nsew")
-        self.demand_tree.bind("<Double-1>", self._edit_demand_month_from_event)
-        scroll_x = ttk.Scrollbar(self.demand_tab, orient="horizontal", command=self.demand_tree.xview)
-        scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.demand_tree.configure(xscrollcommand=scroll_x.set)
-        ttk.Button(self.demand_tab, text="Edit Selected Month", command=self.edit_demand_month).grid(
-            row=5, column=0, sticky="w", pady=(8, 0)
-        )
+        add_library_button.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        setattr(self, f"{prefix}_demand_library_tree", library_tree)
+        setattr(self, f"{prefix}_demand_library_duplicate_button", demand_library_duplicate_button)
+        setattr(self, f"{prefix}_demand_library_delete_button", demand_library_delete_button)
+        setattr(self, f"{prefix}_add_demand_library_to_project_button", add_library_button)
 
     def _build_analysis_tab(self) -> None:
         self.analysis_tab.columnconfigure(0, weight=1)
@@ -3267,7 +3325,6 @@ class RainwaterTkApp(tk.Tk):
         self.booster_initial_fill_var.set(f"{cfg.system_parameters.booster_initial_fill_percent:.2f}")
         self.booster_refill_level_var.set(f"{cfg.system_parameters.booster_refill_level_percent:.2f}")
         self.municipal_backup_enabled_var.set(cfg.system_parameters.municipal_backup_enabled)
-        self._update_system_type_display()
         self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -3402,27 +3459,26 @@ class RainwaterTkApp(tk.Tk):
     def _populate_demand_objects(self, select_index: int | None = None) -> None:
         if not hasattr(self, "demand_objects_tree"):
             return
-        self.demand_objects_tree.heading(
-            "instantaneous_demand", text=f"Instantaneous demand ({volume_unit(self.config_model)}/min)"
-        )
-        self.demand_objects_tree.delete(*self.demand_objects_tree.get_children())
-        for index, demand_object in enumerate(self.config_model.demand.demand_objects):
-            self.demand_objects_tree.insert(
-                "",
-                "end",
-                iid=str(index),
-                values=(
-                    demand_object.name,
-                    demand_object.object_type,
-                    f"{volume_to_display(demand_object.instantaneous_demand_gallons_per_minute, self.config_model):.2f}",
-                    demand_object.schedule_name,
-                ),
+        for tree in (self.daily_demand_objects_tree, self.hourly_demand_objects_tree):
+            tree.heading(
+                "instantaneous_demand", text=f"Instantaneous demand ({volume_unit(self.config_model)}/min)"
             )
-        if select_index is not None and 0 <= select_index < len(self.config_model.demand.demand_objects):
-            iid = str(select_index)
-            self.demand_objects_tree.selection_set(iid)
-            self.demand_objects_tree.focus(iid)
-            self.demand_objects_tree.see(iid)
+            tree.delete(*tree.get_children())
+            for index, demand_object in enumerate(self.config_model.demand.demand_objects):
+                tree.insert(
+                    "", "end", iid=str(index),
+                    values=(
+                        demand_object.name,
+                        demand_object.object_type,
+                        f"{volume_to_display(demand_object.instantaneous_demand_gallons_per_minute, self.config_model):.2f}",
+                        demand_object.schedule_name,
+                    ),
+                )
+            if select_index is not None and 0 <= select_index < len(self.config_model.demand.demand_objects):
+                iid = str(select_index)
+                tree.selection_set(iid)
+                tree.focus(iid)
+                tree.see(iid)
         self._render_system_builder()
 
     def _update_demand_headings(self) -> None:
@@ -4408,48 +4464,66 @@ class RainwaterTkApp(tk.Tk):
     def _all_demand_object_templates(self) -> dict[str, DemandObject]:
         return {**_common_demand_object_templates(), **self.custom_demand_object_templates}
 
+    def _active_demand_objects_tree(self) -> ttk.Treeview:
+        if self.demand_settings_notebook.select() == str(self.hourly_demand_only_tab):
+            return self.hourly_demand_objects_tree
+        return self.daily_demand_objects_tree
+
+    def _active_demand_library_tree(self) -> ttk.Treeview:
+        if self.demand_settings_notebook.select() == str(self.hourly_demand_only_tab):
+            return self.hourly_demand_library_tree
+        return self.daily_demand_library_tree
+
     def _selected_demand_library_object(self) -> tuple[str, str] | None:
-        selected = self.demand_library_tree.selection()
+        selected = self._active_demand_library_tree().selection()
         if not selected:
             return None
         return self.demand_library_item_map.get(selected[0])
 
     def _refresh_demand_object_library(self, select_name: str | None = None) -> None:
-        self.demand_library_tree.delete(*self.demand_library_tree.get_children())
         self.demand_library_item_map: dict[str, tuple[str, str]] = {}
-        template_group = self.demand_library_tree.insert(
-            "", "end", iid="demand_library_templates", text="Templates", open=True, tags=("group",)
-        )
-        custom_group = self.demand_library_tree.insert(
-            "", "end", iid="demand_library_custom", text="Custom", open=True, tags=("group",)
-        )
-        selected_iid: str | None = None
-        for kind, parent, templates in (
-            ("template", template_group, _common_demand_object_templates()),
-            ("custom", custom_group, self.custom_demand_object_templates),
-        ):
-            for index, name in enumerate(templates):
-                iid = f"demand_library_{kind}_{index}"
-                self.demand_library_tree.insert(parent, "end", iid=iid, text=name)
-                self.demand_library_item_map[iid] = (kind, name)
-                if name == select_name:
-                    selected_iid = iid
-        if selected_iid is not None:
-            self.demand_library_tree.selection_set(selected_iid)
-            self.demand_library_tree.focus(selected_iid)
-            self.demand_library_tree.see(selected_iid)
+        for tree in (self.daily_demand_library_tree, self.hourly_demand_library_tree):
+            tree.delete(*tree.get_children())
+            template_group = tree.insert(
+                "", "end", iid="demand_library_templates", text="Templates", open=True, tags=("group",)
+            )
+            custom_group = tree.insert(
+                "", "end", iid="demand_library_custom", text="Custom", open=True, tags=("group",)
+            )
+            selected_iid: str | None = None
+            for kind, parent, templates in (
+                ("template", template_group, _common_demand_object_templates()),
+                ("custom", custom_group, self.custom_demand_object_templates),
+            ):
+                for index, name in enumerate(templates):
+                    iid = f"demand_library_{kind}_{index}"
+                    tree.insert(parent, "end", iid=iid, text=name)
+                    self.demand_library_item_map[iid] = (kind, name)
+                    if name == select_name:
+                        selected_iid = iid
+            if selected_iid is not None:
+                tree.selection_set(selected_iid)
+                tree.focus(selected_iid)
+                tree.see(selected_iid)
         self._update_demand_library_state()
 
     def _demand_library_selection_changed(self, _event: tk.Event | None = None) -> None:
         self._update_demand_library_state()
 
     def _update_demand_library_state(self) -> None:
-        selected = self._selected_demand_library_object()
-        self.demand_library_duplicate_button.state(["!disabled"] if selected else ["disabled"])
-        self.demand_library_delete_button.state(
-            ["!disabled"] if selected and selected[0] == "custom" else ["disabled"]
-        )
-        self.add_demand_library_to_project_button.state(["!disabled"] if selected else ["disabled"])
+        for prefix in ("daily", "hourly"):
+            tree = getattr(self, f"{prefix}_demand_library_tree")
+            selected_rows = tree.selection()
+            selected = self.demand_library_item_map.get(selected_rows[0]) if selected_rows else None
+            getattr(self, f"{prefix}_demand_library_duplicate_button").state(
+                ["!disabled"] if selected else ["disabled"]
+            )
+            getattr(self, f"{prefix}_demand_library_delete_button").state(
+                ["!disabled"] if selected and selected[0] == "custom" else ["disabled"]
+            )
+            getattr(self, f"{prefix}_add_demand_library_to_project_button").state(
+                ["!disabled"] if selected else ["disabled"]
+            )
 
     def _unique_demand_library_name(self, base_name: str) -> str:
         existing = {name.casefold() for name in self._all_demand_object_templates()}
@@ -4522,17 +4596,18 @@ class RainwaterTkApp(tk.Tk):
             self._populate_demand_objects(select_index=len(self.config_model.demand.demand_objects) - 1)
 
     def _add_demand_library_object_from_event(self, event: tk.Event) -> str:
+        tree = event.widget
         if getattr(event, "y", None) is not None:
-            row_id = self.demand_library_tree.identify_row(event.y)
+            row_id = tree.identify_row(event.y)
             if row_id in self.demand_library_item_map:
-                self.demand_library_tree.selection_set(row_id)
-                self.demand_library_tree.focus(row_id)
+                tree.selection_set(row_id)
+                tree.focus(row_id)
         if self._selected_demand_library_object() is not None:
             self.add_demand_object_from_library()
         return "break"
 
     def save_selected_demand_object_to_library(self) -> None:
-        selected = self.demand_objects_tree.selection()
+        selected = self._active_demand_objects_tree().selection()
         if not selected:
             messagebox.showinfo(APP_TITLE, "Select a demand object first.", parent=self)
             return
@@ -4545,7 +4620,7 @@ class RainwaterTkApp(tk.Tk):
             self._refresh_demand_object_library(select_name=source.name)
 
     def edit_demand_object(self) -> None:
-        selected = self.demand_objects_tree.selection()
+        selected = self._active_demand_objects_tree().selection()
         if not selected:
             messagebox.showinfo(APP_TITLE, "Select a demand object first.", parent=self)
             return
@@ -4559,7 +4634,7 @@ class RainwaterTkApp(tk.Tk):
             self._populate_demand_objects(select_index=index)
 
     def delete_demand_object(self) -> None:
-        selected = self.demand_objects_tree.selection()
+        selected = self._active_demand_objects_tree().selection()
         if not selected:
             return
         index = int(selected[0])
@@ -4580,15 +4655,16 @@ class RainwaterTkApp(tk.Tk):
         self._render_system_builder()
 
     def _edit_demand_object_from_event(self, event: tk.Event) -> str:
-        row_id = self.demand_objects_tree.identify_row(event.y)
+        tree = event.widget
+        row_id = tree.identify_row(event.y)
         if row_id:
-            self.demand_objects_tree.selection_set(row_id)
-            self.demand_objects_tree.focus(row_id)
+            tree.selection_set(row_id)
+            tree.focus(row_id)
             self.edit_demand_object()
         return "break"
 
-    def _edit_selected_demand_object_from_event(self, _event: tk.Event) -> str:
-        if self.demand_objects_tree.selection():
+    def _edit_selected_demand_object_from_event(self, event: tk.Event) -> str:
+        if event.widget.selection():
             self.edit_demand_object()
         return "break"
 

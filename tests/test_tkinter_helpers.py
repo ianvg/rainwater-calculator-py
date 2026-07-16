@@ -454,3 +454,22 @@ def test_report_tank_level_distribution_uses_six_bins_and_all_days() -> None:
     assert sum(int(row["count"]) for row in distribution) == len(results)
     assert distribution[0] == {"low": 0.0, "high": 100.0, "count": 2}
     assert distribution[-1] == {"low": 500.0, "high": 600.0, "count": 2}
+
+
+def test_reverse_system_connection_routes_around_object_bodies() -> None:
+    points = RainwaterTkApp._system_connection_points(500.0, 180.0, 220.0, 180.0, 420.0)
+
+    coordinate_pairs = list(zip(points[::2], points[1::2]))
+    assert len(coordinate_pairs) == 6
+    assert coordinate_pairs[0] == (568.0, 180.0)
+    assert coordinate_pairs[-1] == (152.0, 180.0)
+    assert any(y < 150.0 for _x, y in coordinate_pairs)
+    assert coordinate_pairs[-2][0] < 158.0
+
+
+def test_forward_system_connection_uses_compact_orthogonal_route() -> None:
+    points = RainwaterTkApp._system_connection_points(100.0, 100.0, 400.0, 220.0, 420.0)
+
+    assert len(points) == 8
+    assert points[:2] == (168.0, 100.0)
+    assert points[-2:] == (332.0, 220.0)

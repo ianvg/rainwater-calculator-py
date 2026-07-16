@@ -4,7 +4,7 @@ Water demand describes how stored rainwater is consumed. Enter only end uses sup
 
 ## Demand settings
 
-Open **Demand parameters** to configure simple daily demand and detailed monthly end-use inputs. The general demand controls appear above the monthly table. Available categories include occupancy-related fixtures, indoor processes, irrigation, vehicle washing, and other uses.
+Open **Demand parameters** to use the **Overall demand settings**, **Daily demand only settings**, and **Hourly demand only settings** subtabs. Overall settings contain the simple daily controls and detailed monthly end-use table. The daily-only and hourly-only tabs provide synchronized views of the project demand objects and reusable demand-object library, so a change made from either view updates the same project data. Available monthly categories include occupancy-related fixtures, indoor processes, irrigation, vehicle washing, and other uses.
 
 Unit labels appear beside input fields and in monthly-demand table headings. Confirm whether the project is using imperial or metric units before entering values.
 

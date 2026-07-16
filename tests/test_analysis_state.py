@@ -38,6 +38,15 @@ def test_signature_changes_when_comparison_tank_sizes_change() -> None:
     assert analysis_input_signature(config, _rainfall()) != before
 
 
+def test_signature_changes_when_system_layout_changes() -> None:
+    config = default_project_config()
+    before = analysis_input_signature(config, _rainfall())
+
+    config.system_layout.append({"id": "tank", "component_type": "primary_tank"})
+
+    assert analysis_input_signature(config, _rainfall()) != before
+
+
 def test_signature_ignores_project_metadata_and_rainfall_row_order() -> None:
     config = default_project_config()
     rainfall = _rainfall()

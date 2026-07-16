@@ -8,7 +8,7 @@ import pandas as pd
 
 from .models import ProjectConfig
 
-ANALYSIS_ALGORITHM_VERSION = 5
+ANALYSIS_ALGORITHM_VERSION = 6
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:
@@ -37,6 +37,9 @@ def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -
         "multitank_comparison_enabled": bool(config.multitank_comparison_enabled),
         "comparison_tank_sizes_gal": sorted(float(value) for value in config.comparison_tank_sizes_gal),
         "tank_parameters": asdict(config.tank_parameters),
+        "system_type": config.system_type,
+        "system_layout": config.system_layout,
+        "system_connections": config.system_connections,
         "system_parameters": asdict(config.system_parameters),
         "rainfall": rainfall,
     }
