@@ -42,6 +42,78 @@ def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
     assert result["DemandGallons"].iloc[2:].sum() == pytest.approx(0.0)
 
 
+def test_custom_direct_graph_runs_with_zero_mass_balance_residual() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Custom system"
+    cfg.system_layout = [
+        {"id": kind, "component_type": kind, "name": kind}
+        for kind in ("rainwater_input", "primary_tank", "end_uses", "overflow_discharge", "municipal_backup")
+    ]
+    cfg.system_connections = [
+        {"source_component": source, "target_component": target}
+        for source, target in (
+            ("rainwater_input", "primary_tank"),
+            ("primary_tank", "end_uses"),
+            ("primary_tank", "overflow_discharge"),
+            ("municipal_backup", "end_uses"),
+        )
+    ]
+    cfg.demand.simple_daily_demand_gallons = 240.0
+    cfg.tank_parameters.initial_fill_percent = 0.0
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert set(result["SystemType"]) == {"Custom system"}
+    assert result["MainsSuppliedGallons"].sum() == pytest.approx(240.0)
+    assert result["SystemUnmetDemandGallons"].sum() == pytest.approx(0.0)
+    assert result["MassBalanceErrorGallons"].abs().max() < 1e-9
+    assert result["OverallMassBalanceErrorGallons"].iloc[0] == pytest.approx(0.0)
+
+    daily = simulate_tank(cfg, rainfall, 1000.0)
+    assert daily["DemandGallons"].iloc[0] == pytest.approx(240.0)
+    assert daily["UnmetDemandGallons"].iloc[0] == pytest.approx(240.0)
+
+
+def test_custom_treatment_and_booster_graph_conserves_all_hourly_flows() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Custom system"
+    path = [
+        "rainwater_input", "primary_tank", "filtration_pump", "filtration_system",
+        "booster_tank", "booster_pump", "end_uses", "overflow_discharge",
+        "municipal_backup",
+    ]
+    cfg.system_layout = [
+        {"id": kind, "component_type": kind, "name": kind} for kind in path
+    ]
+    cfg.system_connections = [
+        {"source_component": source, "target_component": target}
+        for source, target in (
+            ("rainwater_input", "primary_tank"),
+            ("primary_tank", "filtration_pump"),
+            ("filtration_pump", "filtration_system"),
+            ("filtration_system", "booster_tank"),
+            ("booster_tank", "booster_pump"),
+            ("booster_pump", "end_uses"),
+            ("primary_tank", "overflow_discharge"),
+            ("municipal_backup", "booster_tank"),
+        )
+    ]
+    cfg.demand.simple_daily_demand_gallons = 240.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = 100.0
+    cfg.system_parameters.filter_recovery_percent = 80.0
+    cfg.system_parameters.booster_tank_size_gallons = 100.0
+    cfg.system_parameters.booster_refill_level_percent = 50.0
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert result["FilterLossGallons"].sum() > 0.0
+    assert result["BoosterTankGallons"].max() <= 100.0
+    assert result["MassBalanceErrorGallons"].abs().max() < 1e-9
+
+
 def test_simulate_tank_returns_expected_columns() -> None:
     cfg = default_project_config()
     cfg.surfaces[0].area = 1000

@@ -4,7 +4,11 @@ a = Analysis(
     ["tkinter_app.py"],
     pathex=[],
     binaries=[],
-    datas=[("site", "help"), ("assets/app_icon.png", "assets")],
+    datas=[
+        ("site", "help"),
+        ("assets/app_icon.png", "assets"),
+        ("assets/app_icon.ico", "assets"),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 
 from .models import DemandProfile, MONTH_KEYS, ProjectConfig, TankParameters, WEEKDAY_KEYS
-from .system_model import build_system_template
+from .system_model import build_custom_system, build_system_template
 
 GAL_PER_CUBIC_FOOT = 7.48052
 
@@ -126,6 +126,45 @@ def simulate_tank(
 ) -> pd.DataFrame:
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
+    if config.system_type == "Custom system":
+        hourly = simulate_hourly_tank(
+            config,
+            rainfall_df,
+            tank_size_gallons,
+            cancel_callback=cancel_callback,
+        )
+        if hourly.empty:
+            return pd.DataFrame(
+                columns=[
+                    "Date", "Precipitation", "CollectedGallons", "DemandGallons",
+                    "DemandMet", "ReserveTargetMet", "UnmetDemandGallons",
+                    "OverflowGallons", "WaterInTankGallons", "ReliabilityPercent",
+                ]
+            )
+        daily = hourly.assign(Day=pd.to_datetime(hourly["Date"]).dt.normalize()).groupby(
+            "Day", sort=True
+        ).agg(
+            CollectedGallons=("CollectedGallons", "sum"),
+            DemandGallons=("DemandGallons", "sum"),
+            UnmetDemandGallons=("UnmetDemandGallons", "sum"),
+            OverflowGallons=("OverflowGallons", "sum"),
+            WaterInTankGallons=("WaterInTankGallons", "last"),
+        ).reset_index().rename(columns={"Day": "Date"})
+        validated_rainfall = _validate_rainfall(rainfall_df)
+        rainfall = validated_rainfall.set_index(
+            pd.to_datetime(validated_rainfall["Date"]).dt.normalize()
+        )["Precipitation"]
+        daily["Precipitation"] = daily["Date"].map(rainfall).fillna(0.0)
+        daily["DemandMet"] = daily["UnmetDemandGallons"] <= 1e-9
+        daily["ReserveTargetMet"] = daily["DemandMet"]
+        reliability = float(daily["DemandMet"].mean() * 100.0) if not daily.empty else 0.0
+        return daily[
+            [
+                "Date", "Precipitation", "CollectedGallons", "DemandGallons", "DemandMet",
+                "ReserveTargetMet", "UnmetDemandGallons", "OverflowGallons",
+                "WaterInTankGallons",
+            ]
+        ].assign(ReliabilityPercent=reliability)
 
     params = tank_parameters or config.tank_parameters
     data = _validate_rainfall(rainfall_df)
@@ -195,15 +234,37 @@ def simulate_hourly_tank(
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
     data = _validate_rainfall(rainfall_df)
-    system = build_system_template(config.system_type)
-    indirect = system.system_type == "Indirect system"
+    system = (
+        build_custom_system(config.system_layout, config.system_connections)
+        if config.system_type == "Custom system"
+        else build_system_template(config.system_type)
+    )
+    custom_path = str(
+        system.components.get("__metadata__", None).properties.get("service_path", "")
+        if "__metadata__" in system.components else ""
+    ).split(",")
+    indirect = system.system_type == "Indirect system" or any(
+        kind in custom_path for kind in ("filtration_pump", "filtration_system", "booster_tank")
+    )
+    has_filter = system.system_type != "Custom system" or "filtration_system" in custom_path
+    has_filtration_pump = system.system_type != "Custom system" or "filtration_pump" in custom_path
+    has_booster = system.system_type != "Custom system" or "booster_tank" in custom_path
     component_params = config.system_parameters
     pump_capacity = max(float(component_params.pump_capacity_gallons_per_hour), 0.0)
-    filtration_pump_capacity = max(
-        float(component_params.filtration_pump_capacity_gallons_per_hour), 0.0
+    if system.system_type == "Custom system" and "booster_pump" not in custom_path:
+        pump_capacity = 0.0
+    filtration_pump_capacity = (
+        max(float(component_params.filtration_pump_capacity_gallons_per_hour), 0.0)
+        if has_filtration_pump else 0.0
     )
-    filter_recovery = min(max(float(component_params.filter_recovery_percent) / 100.0, 0.0), 1.0)
-    booster_capacity = max(float(component_params.booster_tank_size_gallons), 0.0) if indirect else 0.0
+    filter_recovery = (
+        min(max(float(component_params.filter_recovery_percent) / 100.0, 0.0), 1.0)
+        if has_filter else 1.0
+    )
+    booster_capacity = (
+        max(float(component_params.booster_tank_size_gallons), 0.0)
+        if indirect and has_booster else 0.0
+    )
     booster_fill = min(max(float(component_params.booster_initial_fill_percent) / 100.0, 0.0), 1.0)
     booster_water = booster_capacity * booster_fill
     booster_rainwater = booster_water
@@ -248,6 +309,7 @@ def simulate_hourly_tank(
             for object_hour, object_multiplier in enumerate(object_multipliers):
                 object_hourly_demands[object_hour] += object_flow * object_multiplier * 60.0
         for hour, fraction in enumerate(fractions):
+            stored_before = water + booster_water
             demand_hour = max(
                 float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
                 0.0,
@@ -322,6 +384,12 @@ def simulate_hourly_tank(
             water += collected_hour
             overflow = max(water - tank_size_gallons, 0.0)
             water = min(max(water, 0.0), tank_size_gallons)
+            stored_after = water + booster_water
+            mass_balance_error = (
+                collected_hour + mains_makeup
+                - rainwater_supplied - mains_supplied - filter_loss - overflow
+                - (stored_after - stored_before)
+            )
             met_hours += int(met)
             rows.append(
                 {
@@ -341,10 +409,18 @@ def simulate_hourly_tank(
                     "BoosterRefillActive": refill_active,
                     "OverflowGallons": overflow,
                     "WaterInTankGallons": water,
+                    "MassBalanceErrorGallons": mass_balance_error,
                 }
             )
     reliability = met_hours / len(rows) * 100.0 if rows else 0.0
-    return pd.DataFrame(rows).assign(ReliabilityPercent=reliability)
+    result = pd.DataFrame(rows)
+    overall_balance_error = (
+        float(result["MassBalanceErrorGallons"].sum()) if not result.empty else 0.0
+    )
+    return result.assign(
+        ReliabilityPercent=reliability,
+        OverallMassBalanceErrorGallons=overall_balance_error,
+    )
 
 
 def reliability_curve(

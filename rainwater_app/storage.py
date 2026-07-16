@@ -226,7 +226,7 @@ class SQLiteStore:
             country_code=payload.get("country_code", "USA"),
             system_type=(
                 payload.get("system_type")
-                if payload.get("system_type") in {"Direct system", "Indirect system"}
+                if payload.get("system_type") in {"Direct system", "Indirect system", "Custom system"}
                 else "Direct system"
             ),
             system_layout=[

@@ -55,6 +55,7 @@ from rainwater_app.models import (
 from rainwater_app.rainfall import load_rainfall_csv
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.stations import bounding_box, nearest_stations
+from rainwater_app.system_model import build_custom_system
 from rainwater_app.units import (
     area_to_display,
     area_to_internal,
@@ -707,8 +708,12 @@ class RainwaterTkApp(tk.Tk):
         super().__init__()
         self.withdraw()
         self.title(APP_TITLE)
-        icon_path = _resource_path("assets/app_icon.png")
-        self.app_icon = tk.PhotoImage(file=icon_path) if icon_path.is_file() else None
+        icon_path = _resource_path("assets/app_icon.ico")
+        if icon_path.is_file():
+            self.iconbitmap(default=icon_path)
+
+        png_icon_path = _resource_path("assets/app_icon.png")
+        self.app_icon = tk.PhotoImage(file=png_icon_path) if png_icon_path.is_file() else None
         if self.app_icon is not None:
             self.iconphoto(True, self.app_icon)
         self.active_project_name: str | None = None
@@ -1399,6 +1404,12 @@ class RainwaterTkApp(tk.Tk):
             variable=self.system_type_var,
             value="Indirect system",
         ).grid(row=0, column=1, sticky="w")
+        ttk.Radiobutton(
+            system_type_frame,
+            text="Custom system",
+            variable=self.system_type_var,
+            value="Custom system",
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         ttk.Button(
             system_type_frame,
             text="i",
@@ -1407,13 +1418,13 @@ class RainwaterTkApp(tk.Tk):
             takefocus=True,
         ).grid(row=0, column=2, sticky="w", padx=(5, 0))
         ttk.Button(system_type_frame, text="Apply", command=self.apply_system_type).grid(
-            row=1, column=0, columnspan=2, sticky="w", pady=(12, 0)
+            row=2, column=0, columnspan=2, sticky="w", pady=(12, 0)
         )
         ttk.Label(
             system_type_frame,
             textvariable=self.current_system_type_var,
             foreground="#6f777b",
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         component_frame = ttk.LabelFrame(system_content, text="Component parameters", padding=12)
         component_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
         component_frame.columnconfigure(1, weight=1)
@@ -1497,6 +1508,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_component_library.bind("<Double-1>", self._add_system_library_component_from_event)
         self.system_component_library.bind("<Return>", self._add_system_library_component_from_event)
         self.system_component_library.bind("<ButtonPress-1>", self._system_library_drag_start)
+        self.system_component_library.bind("<B1-Motion>", self._system_library_drag_motion)
         self.system_component_library.bind("<ButtonRelease-1>", self._system_library_drop)
         ttk.Button(system_library, text="Add selected", command=self.add_selected_system_component).grid(
             row=1, column=0, sticky="ew", pady=(8, 0)
@@ -1536,6 +1548,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_pending_source: str | None = None
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_library_drag_type: str | None = None
+        self.system_library_drag_preview: tk.Toplevel | None = None
         self._refresh_system_component_editor()
         self._render_system_builder()
         self._update_system_type_display()
@@ -1551,6 +1564,7 @@ class RainwaterTkApp(tk.Tk):
             "booster_pump": "Booster pump",
             "municipal_backup": "Municipal water backup",
             "end_uses": "End-uses",
+            "overflow_discharge": "Overflow discharge",
         }
 
     def _new_system_component_id(self, component_type: str) -> str:
@@ -1586,11 +1600,51 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _system_library_drag_start(self, event: tk.Event) -> None:
+        self._destroy_system_library_drag_preview()
         row_id = self.system_component_library.identify_row(event.y)
         self.system_library_drag_type = row_id if row_id in self._system_component_templates() else None
 
+    def _system_library_drag_motion(self, _event: tk.Event) -> None:
+        if self.system_library_drag_type is None:
+            return
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        if self.system_library_drag_preview is None:
+            label = self._system_component_templates()[self.system_library_drag_type]
+            preview = tk.Toplevel(self)
+            preview.overrideredirect(True)
+            preview.attributes("-topmost", True)
+            try:
+                preview.attributes("-alpha", 0.82)
+            except tk.TclError:
+                pass
+            canvas = tk.Canvas(
+                preview,
+                width=124,
+                height=60,
+                background="#e8f1f5",
+                highlightthickness=2,
+                highlightbackground="#1565c0",
+            )
+            canvas.pack()
+            canvas.create_text(
+                62,
+                30,
+                text=label,
+                width=112,
+                justify="center",
+                font=("Segoe UI", 9, "bold"),
+            )
+            self.system_library_drag_preview = preview
+        self.system_library_drag_preview.geometry(f"+{pointer_x + 14}+{pointer_y + 14}")
+
+    def _destroy_system_library_drag_preview(self) -> None:
+        if self.system_library_drag_preview is not None:
+            self.system_library_drag_preview.destroy()
+            self.system_library_drag_preview = None
+
     def _system_library_drop(self, _event: tk.Event) -> None:
         if self.system_library_drag_type is None:
+            self._destroy_system_library_drag_preview()
             return
         pointer_x, pointer_y = self.winfo_pointerxy()
         canvas_x = pointer_x - self.system_builder_canvas.winfo_rootx()
@@ -1598,6 +1652,7 @@ class RainwaterTkApp(tk.Tk):
         if 0 <= canvas_x <= self.system_builder_canvas.winfo_width() and 0 <= canvas_y <= self.system_builder_canvas.winfo_height():
             self._add_system_component(self.system_library_drag_type, canvas_x, canvas_y)
         self.system_library_drag_type = None
+        self._destroy_system_library_drag_preview()
 
     def _system_layout_item(self, component_id: str) -> dict[str, object] | None:
         return next(
@@ -1608,7 +1663,7 @@ class RainwaterTkApp(tk.Tk):
     @staticmethod
     def _system_component_ports(component_type: str) -> tuple[bool, bool]:
         has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
-        has_outlet = component_type != "end_uses"
+        has_outlet = component_type not in {"end_uses", "overflow_discharge"}
         return has_inlet, has_outlet
 
     def _connect_system_components(self, source_id: str, target_id: str) -> None:
@@ -1895,9 +1950,15 @@ class RainwaterTkApp(tk.Tk):
 
     def apply_system_type(self) -> None:
         selected_type = self.system_type_var.get()
-        if selected_type not in {"Direct system", "Indirect system"}:
+        if selected_type not in {"Direct system", "Indirect system", "Custom system"}:
             selected_type = "Direct system"
             self.system_type_var.set(selected_type)
+        if selected_type == "Custom system":
+            try:
+                build_custom_system(self.config_model.system_layout, self.config_model.system_connections)
+            except ValueError as exc:
+                messagebox.showerror(APP_TITLE, str(exc), parent=self)
+                return
         self.config_model.system_type = selected_type
         self._apply_form_to_model()
         self.current_system_type_var.set(f"Current system type: {selected_type}")
@@ -2547,6 +2608,12 @@ class RainwaterTkApp(tk.Tk):
         )
         self.hourly_results_year_combo.grid(row=0, column=1)
         self.hourly_results_year_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_hourly_results_view())
+        self.hourly_mass_balance_var = tk.StringVar(value="Mass balance: --")
+        ttk.Label(
+            hourly_controls,
+            textvariable=self.hourly_mass_balance_var,
+            foreground="#667278",
+        ).grid(row=0, column=2, padx=(18, 0), sticky="w")
         self.hourly_tank_canvas = tk.Canvas(
             hourly, height=240, bg="white", highlightthickness=1, highlightbackground="#b7b7b7"
         )
@@ -2554,7 +2621,7 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
         hourly_columns = (
             "datetime", "collected", "demand", "pump", "filter", "filter_loss", "booster",
-            "mains", "shortfall", "system_unmet", "overflow", "tank"
+            "mains", "shortfall", "system_unmet", "overflow", "tank", "balance"
         )
         self.hourly_results_tree = ttk.Treeview(hourly, columns=hourly_columns, show="headings", height=12)
         for column, label in {
@@ -2562,6 +2629,7 @@ class RainwaterTkApp(tk.Tk):
             "pump": "Pump flow", "filter": "Filter throughput", "filter_loss": "Filter loss",
             "booster": "Booster tank", "mains": "Mains makeup", "shortfall": "Rainwater shortfall",
             "system_unmet": "System unmet", "overflow": "Overflow", "tank": "Primary tank",
+            "balance": "Mass-balance residual",
         }.items():
             self.hourly_results_tree.heading(column, text=label)
             self.hourly_results_tree.column(column, width=145, anchor="w" if column == "datetime" else "e")
@@ -3065,7 +3133,9 @@ class RainwaterTkApp(tk.Tk):
         self._update_coordinates_label()
         self.unit_var.set(cfg.unit_system)
         self.system_type_var.set(
-            cfg.system_type if cfg.system_type in {"Direct system", "Indirect system"} else "Direct system"
+            cfg.system_type
+            if cfg.system_type in {"Direct system", "Indirect system", "Custom system"}
+            else "Direct system"
         )
         self.current_system_type_var.set(f"Current system type: {self.system_type_var.get()}")
         self.pump_capacity_var.set(
@@ -4876,7 +4946,7 @@ class RainwaterTkApp(tk.Tk):
                     cfg.selected_tank_size_gal,
                     cancel_callback=cancellation_requested,
                 )
-                if cfg.demand.hourly_schedule_enabled
+                if cfg.demand.hourly_schedule_enabled or cfg.system_type == "Custom system"
                 else pd.DataFrame()
             )
             comparison_results: dict[float, pd.DataFrame] = {}
@@ -6937,9 +7007,26 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         if self.hourly_results_year_var.get() not in years:
             self.hourly_results_year_var.set(years[0] if years else "--")
         unit = volume_unit(self.config_model)
+        if self.hourly_results_df.empty:
+            self.hourly_mass_balance_var.set("Mass balance: --")
+        else:
+            residuals = pd.to_numeric(
+                self.hourly_results_df.get(
+                    "MassBalanceErrorGallons",
+                    pd.Series(0.0, index=self.hourly_results_df.index),
+                ),
+                errors="coerce",
+            ).fillna(0.0)
+            overall = float(residuals.sum())
+            maximum = float(residuals.abs().max()) if not residuals.empty else 0.0
+            self.hourly_mass_balance_var.set(
+                f"Mass balance: overall {volume_to_display(overall, self.config_model):.6g} {unit}; "
+                f"maximum hourly residual {volume_to_display(maximum, self.config_model):.6g} {unit}"
+            )
         for column in (
             "collected", "demand", "pump", "filter", "filter_loss", "booster", "mains",
             "shortfall", "system_unmet", "overflow", "tank",
+            "balance",
         ):
             label = self.hourly_results_tree.heading(column, "text").split(" (")[0]
             self.hourly_results_tree.heading(column, text=f"{label} ({unit})")
@@ -6958,6 +7045,7 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
                     f"{volume_to_display(row.SystemUnmetDemandGallons, self.config_model):.2f}",
                     f"{volume_to_display(row.OverflowGallons, self.config_model):.2f}",
                     f"{volume_to_display(row.WaterInTankGallons, self.config_model):.2f}",
+                    f"{volume_to_display(getattr(row, 'MassBalanceErrorGallons', 0.0), self.config_model):.6f}",
                 )
             )
 
