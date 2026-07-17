@@ -2015,38 +2015,57 @@ class RainwaterTkApp(tk.Tk):
 
     @staticmethod
     def _set_media_control_icon(canvas: tk.Canvas, text_item: int, icon: str) -> None:
-        canvas.itemconfigure(text_item, text=icon)
-        bounds = canvas.bbox(text_item)
-        if bounds is not None:
-            center_x = (bounds[0] + bounds[2]) / 2.0
-            center_y = (bounds[1] + bounds[3]) / 2.0
-            canvas.move(text_item, 23.0 - center_x, 23.0 - center_y)
-
-    @staticmethod
-    def _draw_day_navigation_icon(canvas: tk.Canvas, *, previous: bool) -> None:
-        """Draw one triangle touching the outside day-boundary line."""
-        color = "#263238"
-        line_x = 17 if previous else 29
-        base_x = 27 if previous else 19
-        canvas.create_line(line_x, 16, line_x, 30, fill=color, width=2)
-        canvas.create_polygon(
-            line_x, 23, base_x, 16, base_x, 30,
-            fill=color, outline=color,
+        canvas.itemconfigure(text_item, text="")
+        RainwaterTkApp._draw_tabler_player_icon(
+            canvas, "pause" if icon == "⏸" else "play", color="#1565c0"
         )
 
     @staticmethod
-    def _draw_hour_navigation_icon(canvas: tk.Canvas, *, previous: bool) -> None:
-        """Draw two touching triangles matching the day-navigation triangle size."""
-        color = "#263238"
-        if previous:
-            triangles = ((13, 23, 23), (23, 23, 33))
-        else:
-            triangles = ((33, 23, 23), (23, 23, 13))
-        for tip_x, tip_y, base_x in triangles:
+    def _draw_tabler_player_icon(
+        canvas: tk.Canvas, icon: str, *, color: str = "#263238"
+    ) -> None:
+        """Draw the approved Tabler filled player icons on the 24px source grid."""
+        canvas.delete("tabler-player-icon")
+        scale, offset = 1.05, 10.4
+
+        def point(px: float, py: float) -> tuple[float, float]:
+            return offset + px * scale, offset + py * scale
+
+        def polygon(values: tuple[float, ...]) -> None:
+            coordinates: list[float] = []
+            for index in range(0, len(values), 2):
+                coordinates.extend(point(values[index], values[index + 1]))
             canvas.create_polygon(
-                tip_x, tip_y, base_x, 16, base_x, 30,
-                fill=color, outline=color,
+                *coordinates, fill=color, outline=color, tags=("tabler-player-icon",)
             )
+
+        if icon == "play":
+            polygon((6, 4, 21, 12, 6, 20))
+        elif icon == "pause":
+            for left, right in ((5, 11), (13, 19)):
+                x1, y1 = point(left, 4); x2, y2 = point(right, 20)
+                canvas.create_rectangle(
+                    x1, y1, x2, y2, fill=color, outline=color,
+                    tags=("tabler-player-icon",),
+                )
+        elif icon in {"skip-back", "skip-forward"}:
+            if icon == "skip-back":
+                polygon((20, 4, 7, 12, 20, 20))
+                x1, y1 = point(3, 4); x2, y2 = point(5, 20)
+            else:
+                polygon((4, 4, 17, 12, 4, 20))
+                x1, y1 = point(19, 4); x2, y2 = point(21, 20)
+            canvas.create_rectangle(
+                x1, y1, x2, y2, fill=color, outline=color,
+                tags=("tabler-player-icon",),
+            )
+        elif icon in {"track-prev", "track-next"}:
+            if icon == "track-prev":
+                polygon((21, 4, 12, 12, 21, 20))
+                polygon((10, 4, 1, 12, 10, 20))
+            else:
+                polygon((3, 4, 12, 12, 3, 20))
+                polygon((14, 4, 23, 12, 14, 20))
 
     def _attach_media_control_tooltip(self, canvas: tk.Canvas, text: str) -> None:
         canvas._media_tooltip_text = text  # type: ignore[attr-defined]
@@ -2135,29 +2154,32 @@ class RainwaterTkApp(tk.Tk):
             transport, "", "Previous day", lambda: self._step_system_animation_day(-1),
             icon_font_size=11,
         )
-        self._draw_day_navigation_icon(previous_day, previous=True)
+        self._draw_tabler_player_icon(previous_day, "skip-back")
         previous_day.master.grid(row=0, column=0, padx=0)
         previous_hour, _previous_hour_text = self._create_media_control(
             transport, "", "Previous hour", lambda: self._step_system_animation(-1),
             icon_font_size=11,
         )
-        self._draw_hour_navigation_icon(previous_hour, previous=True)
+        self._draw_tabler_player_icon(previous_hour, "track-prev")
         previous_hour.master.grid(row=0, column=1, padx=0)
         self.system_animation_play_button, self.system_animation_play_icon = self._create_media_control(
-            transport, "▶", "Play (K)", self._toggle_system_animation, primary=True
+            transport, "", "Play (K)", self._toggle_system_animation, primary=True
+        )
+        self._draw_tabler_player_icon(
+            self.system_animation_play_button, "play", color="#1565c0"
         )
         self.system_animation_play_button.master.grid(row=0, column=2, padx=0)
         next_hour, _next_hour_text = self._create_media_control(
             transport, "", "Next hour", lambda: self._step_system_animation(1),
             icon_font_size=11,
         )
-        self._draw_hour_navigation_icon(next_hour, previous=False)
+        self._draw_tabler_player_icon(next_hour, "track-next")
         next_hour.master.grid(row=0, column=3, padx=0)
         next_day, _next_day_text = self._create_media_control(
             transport, "", "Next day", lambda: self._step_system_animation_day(1),
             icon_font_size=11,
         )
-        self._draw_day_navigation_icon(next_day, previous=False)
+        self._draw_tabler_player_icon(next_day, "skip-forward")
         next_day.master.grid(row=0, column=4, padx=0)
         self.system_animation_seek_var = tk.DoubleVar(value=0.0)
         self.system_animation_seek = ttk.Scale(
