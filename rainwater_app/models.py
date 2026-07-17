@@ -139,6 +139,8 @@ class ProjectConfig:
     multitank_comparison_enabled: bool = False
     comparison_tank_sizes_gal: List[float] = field(default_factory=list)
     rainfall_source_label: str | None = None
+    weather_station_latitude: float | None = None
+    weather_station_longitude: float | None = None
     analysis_input_signature: str | None = None
     analysis_unit_system: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)

@@ -112,6 +112,57 @@ def test_daily_rainfall_is_available_after_that_days_demand() -> None:
     assert result.loc[1, "WaterInTankGallons"] == 50.0
 
 
+def test_daily_simulation_obeys_builder_collection_and_supply_paths() -> None:
+    cfg = default_project_config()
+    cfg.surfaces[0].area = 1000.0
+    cfg.surfaces[0].runoff_coefficient = 1.0
+    cfg.demand.simple_daily_demand_gallons = 10.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "uses", "component_type": "end_uses"},
+    ]
+    cfg.system_connections = []
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [1.0]})
+
+    disconnected = simulate_tank(cfg, rainfall, 100.0)
+    cfg.system_connections = [
+        {"source_component": "rain", "target_component": "tank"},
+        {"source_component": "tank", "target_component": "uses"},
+    ]
+    connected = simulate_tank(cfg, rainfall, 100.0)
+
+    assert disconnected["CollectedGallons"].sum() == pytest.approx(0.0)
+    assert disconnected["UnmetDemandGallons"].sum() == pytest.approx(10.0)
+    assert connected["CollectedGallons"].sum() > 0.0
+    assert connected["UnmetDemandGallons"].sum() == pytest.approx(0.0)
+
+
+def test_daily_simulation_applies_filter_recovery_from_builder_path() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 20.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.filter_recovery_percent = 50.0
+    cfg.system_layout = [
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "pump", "component_type": "filtration_pump"},
+        {"id": "filter", "component_type": "filtration_system"},
+        {"id": "uses", "component_type": "end_uses"},
+    ]
+    cfg.system_connections = [
+        {"source_component": "tank", "target_component": "pump"},
+        {"source_component": "pump", "target_component": "filter"},
+        {"source_component": "filter", "target_component": "uses"},
+    ]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_tank(cfg, rainfall, 100.0)
+
+    assert result["UnmetDemandGallons"].sum() == pytest.approx(0.0)
+    assert result["WaterInTankGallons"].iloc[-1] == pytest.approx(60.0)
+
+
 def test_default_acis_range_uses_complete_calendar_years() -> None:
     start, end = default_complete_calendar_range(years=30, today=pd.Timestamp("2026-07-03").date())
 
@@ -418,6 +469,76 @@ def test_hourly_rainfall_is_added_after_hour_23_demand() -> None:
     assert result["CollectedGallons"].iloc[23] > 0.0
     assert result["MainsMakeupGallons"].sum() == pytest.approx(24.0)
     assert result["WaterInTankGallons"].iloc[23] > 0.0
+
+
+def test_custom_builder_rain_input_only_emits_through_a_connected_path() -> None:
+    cfg = default_project_config()
+    cfg.surfaces[0].area = 1000.0
+    cfg.surfaces[0].runoff_coefficient = 1.0
+    cfg.tank_parameters.initial_fill_percent = 0.0
+    cfg.system_layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "tank", "component_type": "primary_tank"},
+    ]
+    cfg.system_connections = []
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [1.0]})
+
+    disconnected = simulate_hourly_tank(cfg, rainfall, 1000.0)
+    cfg.system_connections = [{"source_component": "rain", "target_component": "tank"}]
+    connected = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert disconnected["CollectedGallons"].sum() == pytest.approx(0.0)
+    assert disconnected["WaterInTankGallons"].iloc[-1] == pytest.approx(0.0)
+    assert connected["CollectedGallons"].sum() > 0.0
+    assert connected["WaterInTankGallons"].iloc[-1] > 0.0
+
+
+def test_custom_builder_connections_govern_demand_delivery() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.demand.simple_daily_demand_gallons = 24.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.municipal_backup_enabled = False
+    cfg.system_layout = [
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "pump", "component_type": "booster_pump"},
+        {"id": "uses", "component_type": "end_uses"},
+    ]
+    cfg.system_connections = [
+        {"source_component": "tank", "target_component": "pump"},
+        {"source_component": "pump", "target_component": "uses"},
+    ]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    connected = simulate_hourly_tank(cfg, rainfall, 1000.0)
+    cfg.system_connections.pop()
+    disconnected = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert connected["PumpFlowGallons"].sum() == pytest.approx(24.0)
+    assert set(connected["SystemType"]) == {"Custom direct system"}
+    assert disconnected["PumpFlowGallons"].sum() == pytest.approx(0.0)
+    assert disconnected["SystemUnmetDemandGallons"].sum() == pytest.approx(24.0)
+
+
+def test_custom_direct_pump_block_applies_its_capacity() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 24.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.pump_capacity_gallons_per_hour = 0.5
+    cfg.system_layout = [
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "pump", "component_type": "booster_pump"},
+        {"id": "uses", "component_type": "end_uses"},
+    ]
+    cfg.system_connections = [
+        {"source_component": "tank", "target_component": "pump"},
+        {"source_component": "pump", "target_component": "uses"},
+    ]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert result["PumpFlowGallons"].sum() == pytest.approx(12.0)
 
 
 def test_indirect_hourly_results_report_filter_throughput() -> None:

@@ -1,3 +1,5 @@
+import pytest
+
 from rainwater_app.storage import SQLiteStore
 
 
@@ -165,6 +167,10 @@ def test_system_builder_layout_is_loaded() -> None:
     layout = [
         {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80},
         {
+            "id": "booster_tank_1", "component_type": "booster_tank",
+            "name": "Booster tank", "x": 260, "y": 80, "extra_input_node": True,
+        },
+        {
             "id": "end_uses_1",
             "component_type": "end_uses",
             "name": "End-uses",
@@ -174,13 +180,48 @@ def test_system_builder_layout_is_loaded() -> None:
         },
     ]
 
-    connections = [{"source_component": "rainwater_input_1", "target_component": "primary_tank_1"}]
+    connections = [
+        {"source_component": "rainwater_input_1", "target_component": "primary_tank_1"},
+        {
+            "source_component": "municipal_backup_1",
+            "target_component": "booster_tank_1", "target_port": "in2",
+        },
+    ]
     config = SQLiteStore._config_from_dict(
         {"name": "Builder", "system_layout": layout, "system_connections": connections}
     )
 
     assert config.system_layout == layout
     assert config.system_connections == connections
+
+
+def test_custom_system_template_library_crud(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "templates.db"))
+    template = {
+        "version": 1,
+        "system_type": "Indirect system",
+        "system_layout": [{"id": "booster", "component_type": "booster_tank"}],
+        "system_connections": [],
+    }
+
+    store.save_system_template("My system", template)
+
+    assert store.list_system_templates() == ["My system"]
+    assert store.load_system_template("my SYSTEM") == template
+
+    store.rename_system_template("My system", "Office system")
+    assert store.list_system_templates() == ["Office system"]
+
+    store.delete_system_template("office SYSTEM")
+    assert store.list_system_templates() == []
+
+
+def test_custom_system_template_names_are_unique_case_insensitively(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "templates.db"))
+    store.save_system_template("Campus", {"system_layout": []})
+
+    with pytest.raises(ValueError, match="already exists"):
+        store.save_system_template("CAMPUS", {"system_layout": []})
 
 
 def test_graph_auto_step_count_is_loaded() -> None:

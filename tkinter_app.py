@@ -17,6 +17,7 @@ import tkinter.font as tkfont
 import tempfile
 import threading
 import webbrowser
+from dataclasses import asdict
 from functools import partial
 from pathlib import Path
 from tkinter import filedialog, messagebox, simpledialog, ttk
@@ -50,12 +51,15 @@ from rainwater_app.models import (
     MONTH_KEYS,
     ProjectConfig,
     Surface,
+    SystemComponentParameters,
+    TankParameters,
     WEEKDAY_KEYS,
     common_hourly_schedule_templates,
     default_hourly_weekly_fractions,
 )
 from rainwater_app.rainfall import load_rainfall_csv
 from rainwater_app.storage import SQLiteStore
+from rainwater_app.system_model import compile_builder_system, validate_builder_system
 from rainwater_app.stations import bounding_box, nearest_stations
 from rainwater_app.units import (
     LITERS_PER_GALLON,
@@ -77,6 +81,8 @@ from rainwater_app.optimization import (
 )
 
 APP_TITLE = "Rainwater Harvesting Calculator"
+SYSTEM_ANIMATION_FRAME_MS = 40
+SYSTEM_ANIMATION_CYCLES_PER_SECOND = 0.6
 DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
 DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 680
@@ -761,6 +767,8 @@ class RainwaterTkApp(tk.Tk):
         self.app_icon = tk.PhotoImage(file=icon_path) if icon_path.is_file() else None
         if self.app_icon is not None:
             self.iconphoto(True, self.app_icon)
+        self.system_weather_images: dict[str, tk.PhotoImage] = {}
+        self.system_weather_assets_loaded = False
         self.active_project_name: str | None = None
         self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
         self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
@@ -984,8 +992,8 @@ class RainwaterTkApp(tk.Tk):
         self.notebook.add(self.demand_tab, text="Demand parameters")
         self.notebook.add(self.system_parameters_tab, text="System parameters")
         self.notebook.add(self.analysis_tab, text="Analysis settings")
-        self.notebook.add(self.optimization_tab, text="Optimization")
         self.notebook.add(self.financial_tab, text="Financial analysis")
+        self.notebook.add(self.optimization_tab, text="Optimization")
         self.notebook.add(self.results_tab, text="Results")
         self.notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_changed)
         self.notebook.bind("<ButtonRelease-1>", self._clear_top_level_tab_focus, add="+")
@@ -1519,28 +1527,134 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _scroll_system_parameters_mousewheel(self, event: tk.Event) -> str | None:
-        return None
+        if not hasattr(self, "system_builder_scroll_canvas"):
+            return None
+        if self.notebook.select() != str(self.system_parameters_tab):
+            return None
+        if self.system_parameters_notebook.select() != str(self.system_builder_page):
+            return None
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        builder_canvas = self.system_builder_canvas
+        builder_x, builder_y = builder_canvas.winfo_rootx(), builder_canvas.winfo_rooty()
+        over_builder_canvas = (
+            builder_x <= pointer_x < builder_x + builder_canvas.winfo_width()
+            and builder_y <= pointer_y < builder_y + builder_canvas.winfo_height()
+        )
+        if over_builder_canvas and (int(getattr(event, "state", 0)) & 0x0001):
+            if getattr(event, "num", None) == 4:
+                zoom_delta = 0.1
+            elif getattr(event, "num", None) == 5:
+                zoom_delta = -0.1
+            else:
+                zoom_delta = 0.1 if event.delta > 0 else -0.1
+            self._change_system_builder_zoom(zoom_delta)
+            self.status_var.set(f"System builder zoom: {self.system_builder_zoom_var.get()}")
+            return "break"
+        canvas = self.system_builder_scroll_canvas
+        canvas_x, canvas_y = canvas.winfo_rootx(), canvas.winfo_rooty()
+        if not (
+            canvas_x <= pointer_x < canvas_x + canvas.winfo_width()
+            and canvas_y <= pointer_y < canvas_y + canvas.winfo_height()
+        ):
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        canvas.yview_scroll(direction, "units")
+        return "break"
+
+    def _resize_system_builder_scroll_content(self, event: tk.Event) -> None:
+        self.system_builder_scroll_canvas.itemconfigure(
+            self.system_builder_scroll_window, width=event.width
+        )
+
+    def _update_system_builder_scroll_region(self, _event: tk.Event | None = None) -> None:
+        self.system_builder_scroll_canvas.configure(
+            scrollregion=self.system_builder_scroll_canvas.bbox("all")
+        )
 
     def _build_system_parameters_tab(self) -> None:
         self.system_parameters_tab.columnconfigure(0, weight=1)
         self.system_parameters_tab.rowconfigure(0, weight=1)
+        self.system_parameters_notebook = ttk.Notebook(self.system_parameters_tab)
+        self.system_parameters_notebook.grid(row=0, column=0, sticky="nsew")
+        system_builder_page = ttk.Frame(self.system_parameters_notebook)
+        system_animation_page = ttk.Frame(self.system_parameters_notebook)
+        system_builder_page.columnconfigure(0, weight=1)
+        system_builder_page.rowconfigure(0, weight=1)
+        self.system_parameters_notebook.add(system_builder_page, text="Builder")
+        self.system_parameters_notebook.add(system_animation_page, text="Animation")
+        self.system_builder_page = system_builder_page
+        self.system_animation_page = system_animation_page
+        self.system_builder_scroll_canvas = tk.Canvas(
+            system_builder_page, highlightthickness=0, borderwidth=0
+        )
+        self.system_builder_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        system_builder_scrollbar = ttk.Scrollbar(
+            system_builder_page, orient="vertical",
+            command=self.system_builder_scroll_canvas.yview,
+        )
+        system_builder_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.system_builder_scroll_canvas.configure(yscrollcommand=system_builder_scrollbar.set)
+        system_builder_content = ttk.Frame(self.system_builder_scroll_canvas)
+        self.system_builder_scroll_window = self.system_builder_scroll_canvas.create_window(
+            (0, 0), window=system_builder_content, anchor="nw"
+        )
+        system_builder_content.columnconfigure(0, weight=1)
+        system_builder_content.bind("<Configure>", self._update_system_builder_scroll_region)
+        self.system_builder_scroll_canvas.bind(
+            "<Configure>", self._resize_system_builder_scroll_content
+        )
+        self.bind_all("<MouseWheel>", self._scroll_system_parameters_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._scroll_system_parameters_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._scroll_system_parameters_mousewheel, add="+")
         self.indirect_system_diagram_frame = ttk.LabelFrame(
-            self.system_parameters_tab, text="System builder", padding=10
+            system_builder_content, text="System builder", padding=10
         )
         self.indirect_system_diagram_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
         self.indirect_system_diagram_frame.columnconfigure(0, weight=1)
+        self.system_builder_zoom = 1.0
+        self.system_builder_pan_x = 0.0
+        self.system_builder_pan_y = 0.0
+        self.system_builder_pan_state: tuple[float, float, float, float] | None = None
+        self.system_builder_zoom_var = tk.StringVar(value="100%")
+        canvas_column = ttk.Frame(self.indirect_system_diagram_frame)
+        canvas_column.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        canvas_column.columnconfigure(0, weight=1)
+        canvas_column.rowconfigure(1, weight=1)
+        zoom_bar = ttk.Frame(canvas_column)
+        zoom_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Button(
+            zoom_bar, text="Zoom out 10%", command=lambda: self._change_system_builder_zoom(-0.1)
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(zoom_bar, textvariable=self.system_builder_zoom_var, width=6, anchor="center").grid(
+            row=0, column=1, padx=6
+        )
+        ttk.Button(
+            zoom_bar, text="Zoom in 10%", command=lambda: self._change_system_builder_zoom(0.1)
+        ).grid(row=0, column=2, sticky="w")
+        ttk.Label(
+            zoom_bar, text="Shift+wheel: zoom  |  Middle-drag: pan", foreground="#667278"
+        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
         self.system_builder_canvas = tk.Canvas(
-            self.indirect_system_diagram_frame,
+            canvas_column,
             width=760,
             height=420,
             background="white",
             highlightthickness=1,
             highlightbackground="#b7b7b7",
         )
-        self.system_builder_canvas.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        self.system_builder_canvas.grid(row=1, column=0, sticky="nsew")
         self.system_builder_canvas.bind("<ButtonPress-1>", self._system_canvas_press)
         self.system_builder_canvas.bind("<B1-Motion>", self._system_canvas_drag)
         self.system_builder_canvas.bind("<ButtonRelease-1>", self._system_canvas_release)
+        self.system_builder_canvas.bind("<ButtonPress-2>", self._system_canvas_pan_start)
+        self.system_builder_canvas.bind("<B2-Motion>", self._system_canvas_pan_drag)
+        self.system_builder_canvas.bind("<ButtonRelease-2>", self._system_canvas_pan_end)
+        self.system_builder_canvas.bind("<Configure>", self._system_builder_canvas_resized)
         self.system_builder_canvas.bind("<Button-3>", self._system_node_context_menu)
         self.system_builder_canvas.bind("<Delete>", lambda _event: self.delete_selected_system_component())
         self.system_builder_canvas.bind("<Escape>", self._cancel_system_link)
@@ -1572,24 +1686,41 @@ class RainwaterTkApp(tk.Tk):
             row=2, column=0, sticky="ew", pady=(6, 0)
         )
         system_templates.columnconfigure(0, weight=1)
+        system_templates.rowconfigure(1, weight=1)
         ttk.Label(
             system_templates,
-            text="Start with a connected system made from objects in the library.",
+            text="Apply a built-in design or save the current canvas for later use.",
             foreground="#667278",
             wraplength=230,
         ).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.system_template_library = ttk.Treeview(
+            system_templates, show="tree", height=10, selectmode="browse"
+        )
+        self.system_template_library.grid(row=1, column=0, sticky="nsew")
+        self.system_template_library.bind("<Double-1>", self._apply_selected_system_template_event)
+        self.system_template_library.bind("<Return>", self._apply_selected_system_template_event)
         ttk.Button(
-            system_templates, text="Use direct system", command=lambda: self.apply_system_template("Direct system")
-        ).grid(row=1, column=0, sticky="ew")
-        ttk.Button(
-            system_templates, text="Use indirect system", command=lambda: self.apply_system_template("Indirect system")
+            system_templates, text="Apply selected", command=self.apply_selected_system_template
         ).grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        ttk.Button(
+            system_templates, text="Save current as custom", command=self.save_custom_system_template
+        ).grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        custom_actions = ttk.Frame(system_templates)
+        custom_actions.grid(row=4, column=0, sticky="ew", pady=(6, 0))
+        custom_actions.columnconfigure((0, 1), weight=1)
+        ttk.Button(
+            custom_actions, text="Rename", command=self.rename_custom_system_template
+        ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        ttk.Button(
+            custom_actions, text="Delete", command=self.delete_custom_system_template
+        ).grid(row=0, column=1, sticky="ew", padx=(3, 0))
         ttk.Label(
             system_templates,
             text="Applying a template replaces the objects and links currently on the canvas.",
             foreground="#667278",
             wraplength=230,
-        ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ).grid(row=5, column=0, sticky="ew", pady=(10, 0))
+        self._refresh_system_template_library()
         system_geometry.columnconfigure(0, weight=1)
         ttk.Checkbutton(
             system_geometry,
@@ -1688,6 +1819,7 @@ class RainwaterTkApp(tk.Tk):
             self.system_municipal_backup_editor,
             text="Municipal backup enabled",
             variable=self.municipal_backup_enabled_var,
+            command=self._system_builder_backup_setting_changed,
         ).grid(row=0, column=0, sticky="w")
         self.system_municipal_backup_editor.grid_remove()
         self.system_end_uses_editor = ttk.LabelFrame(
@@ -1734,14 +1866,26 @@ class RainwaterTkApp(tk.Tk):
             text="The previous indirect-system schematic is preserved in assets/indirect_system.svg.",
             foreground="#667278",
         ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(3, 0))
+        self.system_builder_warning_var = tk.StringVar()
+        self.system_builder_warning_label = ttk.Label(
+            self.indirect_system_diagram_frame,
+            textvariable=self.system_builder_warning_var,
+            style="Invalid.TLabel", wraplength=980, justify="left",
+        )
+        self.system_builder_warning_label.grid(
+            row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
         self.system_builder_selected_id: str | None = None
         self.system_builder_selected_connection: dict[str, str] | None = None
         self.system_builder_pending_source: str | None = None
+        self.system_builder_pending_source_port = "out"
         self.system_builder_pending_target: str | None = None
+        self.system_builder_pending_target_port = "in"
         self.system_builder_port_drag: tuple[str, str] | None = None
         self.system_builder_hover_port: tuple[str, str] | None = None
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_library_drag_type: str | None = None
+        self._build_system_animation_tab(system_animation_page)
         self._refresh_system_component_editor()
         self._render_system_builder()
 
@@ -1756,6 +1900,7 @@ class RainwaterTkApp(tk.Tk):
             "booster_pump": "Booster pump",
             "municipal_backup": "Municipal water backup",
             "end_uses": "End-uses",
+            "first_flush_diversion": "First-flush diversion",
         }
 
     def _new_system_component_id(self, component_type: str) -> str:
@@ -1764,6 +1909,1067 @@ class RainwaterTkApp(tk.Tk):
         while f"{component_type}_{index}" in existing:
             index += 1
         return f"{component_type}_{index}"
+
+    def _refresh_system_template_library(self, select_name: str | None = None) -> None:
+        if not hasattr(self, "system_template_library"):
+            return
+        tree = self.system_template_library
+        tree.delete(*tree.get_children())
+        builtins = tree.insert("", "end", iid="template-builtins", text="Built-in templates", open=True)
+        tree.insert(builtins, "end", iid="builtin:Direct system", text="Direct system")
+        tree.insert(builtins, "end", iid="builtin:Indirect system", text="Indirect system")
+        custom_root = tree.insert("", "end", iid="template-custom", text="Custom templates", open=True)
+        self.system_custom_template_iids: dict[str, str] = {}
+        for index, name in enumerate(self.store.list_system_templates()):
+            iid = f"custom:{index}"
+            self.system_custom_template_iids[iid] = name
+            tree.insert(custom_root, "end", iid=iid, text=name)
+            if name == select_name:
+                tree.selection_set(iid)
+                tree.focus(iid)
+
+    def _selected_custom_system_template_name(self) -> str | None:
+        selected = self.system_template_library.selection()
+        if not selected:
+            return None
+        return self.system_custom_template_iids.get(selected[0])
+
+    def _system_template_payload(self) -> dict[str, object]:
+        self._apply_form_to_model()
+        cfg = self.config_model
+        return {
+            "version": 1,
+            "system_type": cfg.system_type,
+            "system_layout": copy.deepcopy(cfg.system_layout),
+            "system_connections": copy.deepcopy(cfg.system_connections),
+            "system_parameters": asdict(cfg.system_parameters),
+            "tank_parameters": asdict(cfg.tank_parameters),
+            "selected_tank_size_gal": cfg.selected_tank_size_gal,
+            "graph_start_gal": cfg.graph_start_gal,
+            "graph_end_gal": cfg.graph_end_gal,
+            "graph_step_gal": cfg.graph_step_gal,
+        }
+
+    def _create_media_control(
+        self, parent: tk.Misc, icon: str, tooltip_text: str, command, *, primary: bool = False,
+        icon_font_size: int = 15,
+    ) -> tuple[tk.Canvas, int]:
+        frame = ttk.Frame(parent)
+        canvas = tk.Canvas(
+            frame, width=46, height=46, highlightthickness=0,
+            background=ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0",
+            cursor="hand2", takefocus=True,
+        )
+        canvas.grid(row=0, column=0)
+        canvas_background = str(canvas.cget("background"))
+        foreground = "#1565c0" if primary else "#263238"
+        rounded_rectangle = canvas.create_polygon(
+            12, 3, 34, 3, 43, 3, 43, 12,
+            43, 34, 43, 43, 34, 43, 12, 43,
+            3, 43, 3, 34, 3, 12, 3, 3, 12, 3,
+            smooth=True, splinesteps=24,
+            fill=canvas_background, outline=canvas_background, width=1,
+        )
+        text_item = canvas.create_text(
+            23, 23, text=icon, fill=foreground,
+            font=("Segoe UI Symbol", icon_font_size, "bold"),
+        )
+        icon_bounds = canvas.bbox(text_item)
+        if icon_bounds is not None:
+            icon_center_x = (icon_bounds[0] + icon_bounds[2]) / 2.0
+            icon_center_y = (icon_bounds[1] + icon_bounds[3]) / 2.0
+            canvas.move(text_item, 23.0 - icon_center_x, 23.0 - icon_center_y)
+        canvas.bind("<Button-1>", lambda _event: command())
+        canvas.bind("<Return>", lambda _event: command())
+        canvas.bind("<space>", lambda _event: command())
+        hover = "#e2e5e7"
+        canvas.bind(
+            "<Enter>",
+            lambda _event: canvas.itemconfigure(
+                rounded_rectangle, fill=hover, outline=hover
+            ),
+        )
+        canvas.bind(
+            "<Leave>",
+            lambda _event: canvas.itemconfigure(
+                rounded_rectangle, fill=canvas_background, outline=canvas_background
+            ),
+        )
+        canvas.bind(
+            "<FocusIn>",
+            lambda _event: canvas.itemconfigure(
+                rounded_rectangle, outline="#1565c0", width=2
+            ),
+        )
+        canvas.bind(
+            "<FocusOut>",
+            lambda _event: canvas.itemconfigure(
+                rounded_rectangle, outline=canvas_background, width=1
+            ),
+        )
+        canvas._media_background = rounded_rectangle  # type: ignore[attr-defined]
+        canvas._media_default_fill = canvas_background  # type: ignore[attr-defined]
+        canvas._media_hover_fill = hover  # type: ignore[attr-defined]
+        self._attach_media_control_tooltip(canvas, tooltip_text)
+        return canvas, text_item
+
+    @staticmethod
+    def _set_media_control_icon(canvas: tk.Canvas, text_item: int, icon: str) -> None:
+        canvas.itemconfigure(text_item, text=icon)
+        bounds = canvas.bbox(text_item)
+        if bounds is not None:
+            center_x = (bounds[0] + bounds[2]) / 2.0
+            center_y = (bounds[1] + bounds[3]) / 2.0
+            canvas.move(text_item, 23.0 - center_x, 23.0 - center_y)
+
+    @staticmethod
+    def _draw_day_navigation_icon(canvas: tk.Canvas, *, previous: bool) -> None:
+        """Draw one triangle touching the outside day-boundary line."""
+        color = "#263238"
+        line_x = 17 if previous else 29
+        base_x = 27 if previous else 19
+        canvas.create_line(line_x, 16, line_x, 30, fill=color, width=2)
+        canvas.create_polygon(
+            line_x, 23, base_x, 16, base_x, 30,
+            fill=color, outline=color,
+        )
+
+    @staticmethod
+    def _draw_hour_navigation_icon(canvas: tk.Canvas, *, previous: bool) -> None:
+        """Draw two touching triangles matching the day-navigation triangle size."""
+        color = "#263238"
+        if previous:
+            triangles = ((13, 23, 23), (23, 23, 33))
+        else:
+            triangles = ((33, 23, 23), (23, 23, 13))
+        for tip_x, tip_y, base_x in triangles:
+            canvas.create_polygon(
+                tip_x, tip_y, base_x, 16, base_x, 30,
+                fill=color, outline=color,
+            )
+
+    def _attach_media_control_tooltip(self, canvas: tk.Canvas, text: str) -> None:
+        canvas._media_tooltip_text = text  # type: ignore[attr-defined]
+        canvas._media_tooltip_window = None  # type: ignore[attr-defined]
+        canvas._media_tooltip_canvas = None  # type: ignore[attr-defined]
+        canvas._media_tooltip_text_item = None  # type: ignore[attr-defined]
+        canvas.bind("<Enter>", lambda _event: self._show_media_control_tooltip(canvas), add="+")
+        canvas.bind("<Leave>", lambda _event: self._hide_media_control_tooltip(canvas), add="+")
+        canvas.bind("<Destroy>", lambda _event: self._hide_media_control_tooltip(canvas), add="+")
+
+    def _show_media_control_tooltip(self, canvas: tk.Canvas) -> None:
+        self._hide_media_control_tooltip(canvas)
+        tooltip = tk.Toplevel(self)
+        tooltip.overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        transparent_color = "#ff00ff"
+        tooltip.configure(background=transparent_color)
+        try:
+            tooltip.attributes("-transparentcolor", transparent_color)
+        except tk.TclError:
+            pass
+        message = str(canvas._media_tooltip_text)  # type: ignore[attr-defined]
+        tooltip_fill = "#d4d8da"
+        tooltip_canvas = tk.Canvas(
+            tooltip, width=82, height=28, highlightthickness=0,
+            background=transparent_color,
+        )
+        tooltip_canvas.pack()
+        tooltip_canvas.create_polygon(
+            8, 1, 74, 1, 81, 8, 81, 20, 74, 27, 8, 27, 1, 20, 1, 8,
+            smooth=True, splinesteps=24, fill=tooltip_fill, outline="#59666c",
+        )
+        text_item = tooltip_canvas.create_text(
+            41, 14, text=message, fill="#17242b", font=("Segoe UI", 9)
+        )
+        tooltip.update_idletasks()
+        x = canvas.winfo_rootx() + (canvas.winfo_width() - tooltip.winfo_reqwidth()) // 2
+        y = canvas.winfo_rooty() - tooltip.winfo_reqheight() - 6
+        tooltip.geometry(f"+{x}+{y}")
+        canvas._media_tooltip_window = tooltip  # type: ignore[attr-defined]
+        canvas._media_tooltip_canvas = tooltip_canvas  # type: ignore[attr-defined]
+        canvas._media_tooltip_text_item = text_item  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _hide_media_control_tooltip(canvas: tk.Canvas) -> None:
+        tooltip = getattr(canvas, "_media_tooltip_window", None)
+        if tooltip is not None:
+            tooltip.destroy()
+            canvas._media_tooltip_window = None  # type: ignore[attr-defined]
+            canvas._media_tooltip_canvas = None  # type: ignore[attr-defined]
+            canvas._media_tooltip_text_item = None  # type: ignore[attr-defined]
+
+    @staticmethod
+    def _set_media_control_tooltip(canvas: tk.Canvas, text: str) -> None:
+        canvas._media_tooltip_text = text  # type: ignore[attr-defined]
+        tooltip_canvas = getattr(canvas, "_media_tooltip_canvas", None)
+        text_item = getattr(canvas, "_media_tooltip_text_item", None)
+        if tooltip_canvas is not None and text_item is not None:
+            tooltip_canvas.itemconfigure(text_item, text=text)
+
+    def _build_system_animation_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(1, weight=1)
+        controls = ttk.Frame(parent, padding=8)
+        controls.grid(row=0, column=0, sticky="ew")
+        ttk.Label(controls, text="Simulation day").grid(row=0, column=0, sticky="w")
+        self.system_animation_date_var = tk.StringVar()
+        self.system_animation_date_combo = ttk.Combobox(
+            controls, textvariable=self.system_animation_date_var,
+            state="readonly", width=13,
+        )
+        self.system_animation_date_combo.grid(row=0, column=1, padx=(6, 10))
+        ttk.Button(
+            controls, text="Simulate day", command=self.simulate_system_animation_day
+        ).grid(row=0, column=2, padx=(0, 12))
+        self.system_animation_hour_var = tk.StringVar(value="Run a one-day simulation to begin.")
+        ttk.Label(controls, textvariable=self.system_animation_hour_var).grid(
+            row=0, column=3, sticky="w", padx=(10, 0)
+        )
+        player = ttk.LabelFrame(parent, text="Animation player", padding=(12, 8))
+        player.grid(row=2, column=0, sticky="ew", padx=8, pady=(0, 8))
+        player.columnconfigure(5, weight=1)
+        transport = ttk.Frame(player)
+        transport.grid(row=0, column=0, columnspan=7)
+        previous_day, _previous_day_text = self._create_media_control(
+            transport, "", "Previous day", lambda: self._step_system_animation_day(-1),
+            icon_font_size=11,
+        )
+        self._draw_day_navigation_icon(previous_day, previous=True)
+        previous_day.master.grid(row=0, column=0, padx=0)
+        previous_hour, _previous_hour_text = self._create_media_control(
+            transport, "", "Previous hour", lambda: self._step_system_animation(-1),
+            icon_font_size=11,
+        )
+        self._draw_hour_navigation_icon(previous_hour, previous=True)
+        previous_hour.master.grid(row=0, column=1, padx=0)
+        self.system_animation_play_button, self.system_animation_play_icon = self._create_media_control(
+            transport, "▶", "Play (K)", self._toggle_system_animation, primary=True
+        )
+        self.system_animation_play_button.master.grid(row=0, column=2, padx=0)
+        next_hour, _next_hour_text = self._create_media_control(
+            transport, "", "Next hour", lambda: self._step_system_animation(1),
+            icon_font_size=11,
+        )
+        self._draw_hour_navigation_icon(next_hour, previous=False)
+        next_hour.master.grid(row=0, column=3, padx=0)
+        next_day, _next_day_text = self._create_media_control(
+            transport, "", "Next day", lambda: self._step_system_animation_day(1),
+            icon_font_size=11,
+        )
+        self._draw_day_navigation_icon(next_day, previous=False)
+        next_day.master.grid(row=0, column=4, padx=0)
+        self.system_animation_seek_var = tk.DoubleVar(value=0.0)
+        self.system_animation_seek = ttk.Scale(
+            player, from_=0.0, to=23.0, variable=self.system_animation_seek_var,
+            command=self._seek_system_animation_hour,
+        )
+        self.system_animation_seek.grid(row=1, column=0, columnspan=6, sticky="ew", pady=(10, 0))
+        self.system_animation_progress_var = tk.StringVar(value="00:00 / 24:00")
+        ttk.Label(player, textvariable=self.system_animation_progress_var, width=14, anchor="e").grid(
+            row=1, column=6, padx=(10, 0), pady=(10, 0)
+        )
+        player_options = ttk.Frame(player)
+        player_options.grid(row=2, column=0, columnspan=7, pady=(7, 0))
+        self.system_animation_auto_next_day_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            player_options, text="Auto-play next day",
+            variable=self.system_animation_auto_next_day_var,
+        ).grid(row=0, column=0, sticky="w", padx=(0, 14))
+        ttk.Label(player_options, text="After one hour").grid(
+            row=0, column=1, sticky="e", padx=(0, 4)
+        )
+        self.system_animation_hour_end_var = tk.StringVar(value="Advance to next hour")
+        ttk.Combobox(
+            player_options, textvariable=self.system_animation_hour_end_var,
+            values=("Advance to next hour", "Loop current hour"),
+            state="readonly", width=20,
+        ).grid(row=0, column=2, sticky="w")
+        settings = ttk.LabelFrame(controls, text="Playback settings", padding=(10, 6))
+        settings.grid(row=2, column=0, columnspan=9, sticky="ew", pady=(8, 0))
+        ttk.Label(settings, text="Seconds per hour").grid(row=0, column=0, sticky="w")
+        self.system_animation_seconds_per_hour_var = tk.StringVar(value="1.0")
+        ttk.Spinbox(
+            settings, from_=0.1, to=60.0, increment=0.1,
+            textvariable=self.system_animation_seconds_per_hour_var, width=7,
+        ).grid(row=0, column=1, sticky="w", padx=(6, 14))
+        self.system_animation_auto_replay_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            settings, text="Repeat day",
+            variable=self.system_animation_auto_replay_var,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 14))
+        self.system_animation_canvas = tk.Canvas(
+            parent, background="white", highlightthickness=1,
+            highlightbackground="#b7b7b7", width=980, height=500,
+        )
+        self.system_animation_canvas.grid(row=1, column=0, sticky="nsew", padx=8, pady=(0, 8))
+        self.system_animation_canvas.bind("<Configure>", lambda _event: self._draw_system_animation())
+        self.system_animation_canvas.bind("<ButtonPress-1>", self._system_animation_drag_start)
+        self.system_animation_canvas.bind("<B1-Motion>", self._system_animation_drag_motion)
+        self.system_animation_canvas.bind("<ButtonRelease-1>", self._system_animation_drag_end)
+        self.bind_all("<KeyPress-k>", self._shortcut_toggle_system_animation, add="+")
+        self.bind_all("<KeyPress-K>", self._shortcut_toggle_system_animation, add="+")
+        self.system_animation_results = pd.DataFrame()
+        self.system_animation_hour = 0
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self.system_animation_playing = False
+        self.system_animation_play_mode = "day"
+        self.system_animation_after_id: str | None = None
+        self.system_animation_drag_state: tuple[str, float, float, float, float, float] | None = None
+
+    def _refresh_system_animation_dates(self) -> None:
+        if not hasattr(self, "system_animation_date_combo"):
+            return
+        values = [pd.Timestamp(value).strftime("%Y-%m-%d") for value in self.rainfall_df.get("Date", [])]
+        values = list(dict.fromkeys(values))
+        self.system_animation_date_combo.configure(values=values)
+        if values and self.system_animation_date_var.get() not in values:
+            self.system_animation_date_var.set(values[0])
+        elif not values:
+            self.system_animation_date_var.set("")
+
+    def simulate_system_animation_day(self) -> None:
+        self._refresh_system_animation_dates()
+        date_text = self.system_animation_date_var.get()
+        if not date_text:
+            messagebox.showinfo(APP_TITLE, "Import rainfall data before simulating a day.", parent=self)
+            return
+        self._apply_form_to_model()
+        selected_date = pd.Timestamp(date_text).normalize()
+        dates = pd.to_datetime(self.rainfall_df["Date"]).dt.normalize()
+        selected_rainfall = self.rainfall_df.loc[dates == selected_date, ["Date", "Precipitation"]].head(1)
+        if selected_rainfall.empty:
+            messagebox.showerror(APP_TITLE, "The selected rainfall day is unavailable.", parent=self)
+            return
+        try:
+            self.system_animation_results = simulate_hourly_tank(
+                self.config_model, selected_rainfall,
+                float(self.config_model.selected_tank_size_gal),
+            )
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror(APP_TITLE, f"Could not simulate the selected day:\n{exc}", parent=self)
+            return
+        self._stop_system_animation()
+        self.system_animation_hour = 0
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self._draw_system_animation()
+        self.status_var.set(f"Simulated system animation for {date_text}")
+
+    def _toggle_system_animation(self) -> None:
+        if self.system_animation_results.empty:
+            self.simulate_system_animation_day()
+            if self.system_animation_results.empty:
+                return
+        if self.system_animation_playing:
+            self._stop_system_animation("Day animation paused")
+        else:
+            duration = self._system_animation_seconds_per_hour()
+            self.system_animation_seconds_per_hour_var.set(f"{duration:.1f}")
+            if self.system_animation_hour >= 23:
+                self.system_animation_hour = 0
+                self.system_animation_phase = 0.0
+                self.system_animation_frame = 0
+            self.system_animation_playing = True
+            self.system_animation_play_mode = "day"
+            self._set_media_control_icon(
+                self.system_animation_play_button, self.system_animation_play_icon, "⏸"
+            )
+            self._set_media_control_tooltip(
+                self.system_animation_play_button, "Pause (K)"
+            )
+            self.status_var.set(
+                f"Playing whole-day animation from hour {self.system_animation_hour:02d}:00"
+            )
+            self._animate_system_frame()
+
+    def _shortcut_toggle_system_animation(self, event: tk.Event) -> str | None:
+        """Use K as play/pause only while the system Animation sub-tab is visible."""
+        if self.notebook.select() != str(self.system_parameters_tab):
+            return None
+        if self.system_parameters_notebook.select() != str(self.system_animation_page):
+            return None
+        if isinstance(
+            event.widget,
+            (tk.Entry, tk.Text, ttk.Entry, ttk.Spinbox, ttk.Combobox),
+        ):
+            return None
+        self._toggle_system_animation()
+        return "break"
+
+    def _toggle_single_hour_animation(self) -> None:
+        if self.system_animation_results.empty:
+            self.simulate_system_animation_day()
+            if self.system_animation_results.empty:
+                return
+        if self.system_animation_playing:
+            self._stop_system_animation("One-hour animation paused")
+            return
+        duration = self._system_animation_seconds_per_hour()
+        self.system_animation_seconds_per_hour_var.set(f"{duration:.1f}")
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self.system_animation_playing = True
+        self.system_animation_play_mode = "hour"
+        self._set_media_control_icon(
+            self.system_animation_play_hour_button, self.system_animation_play_hour_icon, "⏸"
+        )
+        self.status_var.set(
+            f"Playing animation for hour {self.system_animation_hour:02d}:00"
+        )
+        self._animate_system_frame()
+
+    def _stop_system_animation(self, status_message: str | None = None) -> None:
+        self.system_animation_playing = False
+        if hasattr(self, "system_animation_play_button"):
+            self._set_media_control_icon(
+                self.system_animation_play_button, self.system_animation_play_icon, "▶"
+            )
+            self._set_media_control_tooltip(
+                self.system_animation_play_button, "Play (K)"
+            )
+        if hasattr(self, "system_animation_play_hour_button"):
+            self._set_media_control_icon(
+                self.system_animation_play_hour_button, self.system_animation_play_hour_icon, "▶"
+            )
+        if self.system_animation_after_id is not None:
+            self.after_cancel(self.system_animation_after_id)
+            self.system_animation_after_id = None
+        if status_message:
+            self.status_var.set(status_message)
+
+    def _stop_system_animation_playback(self) -> None:
+        self._stop_system_animation("Animation stopped")
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self._draw_system_animation()
+
+    def _step_system_animation(self, delta: int) -> None:
+        if self.system_animation_results.empty:
+            return
+        self._stop_system_animation()
+        self.system_animation_hour = min(max(self.system_animation_hour + delta, 0), 23)
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self._draw_system_animation()
+        direction = "next" if delta > 0 else "previous"
+        self.status_var.set(
+            f"Selected {direction} animation hour: {self.system_animation_hour:02d}:00"
+        )
+
+    def _step_system_animation_day(self, delta: int) -> None:
+        raw_values = self.system_animation_date_combo.cget("values")
+        values = tuple(
+            str(value) for value in (
+                self.tk.splitlist(raw_values) if isinstance(raw_values, str) else raw_values
+            )
+        )
+        target = self._adjacent_system_animation_date(
+            values, self.system_animation_date_var.get(), delta
+        )
+        if target is None:
+            direction = "previous" if delta < 0 else "next"
+            self.status_var.set(f"No {direction} simulation day is available")
+            return
+        self.system_animation_date_var.set(target)
+        self.simulate_system_animation_day()
+        if not self.system_animation_results.empty:
+            direction = "previous" if delta < 0 else "next"
+            self.status_var.set(f"Simulated {direction} day: {target}")
+
+    def _seek_system_animation_hour(self, value: str) -> None:
+        if self.system_animation_results.empty:
+            return
+        selected_hour = min(max(int(round(float(value))), 0), 23)
+        if selected_hour == self.system_animation_hour and self.system_animation_playing:
+            return
+        self._stop_system_animation()
+        self.system_animation_hour = selected_hour
+        self.system_animation_phase = 0.0
+        self.system_animation_frame = 0
+        self._draw_system_animation()
+        self.status_var.set(f"Sought animation to hour {selected_hour:02d}:00")
+
+    def _animate_system_frame(self) -> None:
+        if not self.system_animation_playing:
+            return
+        self.system_animation_after_id = None
+        self.system_animation_phase = (
+            self.system_animation_phase
+            + SYSTEM_ANIMATION_CYCLES_PER_SECOND * SYSTEM_ANIMATION_FRAME_MS / 1000.0
+        ) % 1.0
+        self.system_animation_frame += 1
+        frames_per_hour = self._system_animation_frames_per_hour(
+            self._system_animation_seconds_per_hour()
+        )
+        if self.system_animation_frame >= frames_per_hour:
+            self.system_animation_frame = 0
+            if self.system_animation_play_mode == "hour":
+                next_hour, should_stop = self._single_hour_animation_completion(
+                    self.system_animation_hour, self.system_animation_hour_end_var.get()
+                )
+                self.system_animation_hour = next_hour
+                if not should_stop:
+                    self.system_animation_phase = 0.0
+                else:
+                    self._stop_system_animation(
+                        f"One-hour animation completed; selected hour "
+                        f"{self.system_animation_hour:02d}:00"
+                    )
+            elif self.system_animation_hour >= 23:
+                advanced_day = (
+                    self.system_animation_auto_next_day_var.get()
+                    and self._auto_play_next_system_animation_day()
+                )
+                if advanced_day:
+                    pass
+                elif self.system_animation_auto_replay_var.get():
+                    self.system_animation_hour = 0
+                    self.system_animation_phase = 0.0
+                else:
+                    self._stop_system_animation("Whole-day animation completed")
+            else:
+                self.system_animation_hour += 1
+        self._draw_system_animation()
+        if self.system_animation_playing:
+            self.system_animation_after_id = self.after(
+                SYSTEM_ANIMATION_FRAME_MS, self._animate_system_frame
+            )
+
+    @staticmethod
+    def _adjacent_system_animation_date(
+        values: list[str] | tuple[str, ...], current: str, delta: int
+    ) -> str | None:
+        if not values:
+            return None
+        try:
+            index = list(values).index(current)
+        except ValueError:
+            return values[0]
+        target_index = index + (-1 if delta < 0 else 1)
+        if 0 <= target_index < len(values):
+            return values[target_index]
+        return None
+
+    @staticmethod
+    def _next_system_animation_date(
+        values: list[str] | tuple[str, ...], current: str
+    ) -> str | None:
+        return RainwaterTkApp._adjacent_system_animation_date(values, current, 1)
+
+    def _auto_play_next_system_animation_day(self) -> bool:
+        raw_values = self.system_animation_date_combo.cget("values")
+        values = tuple(
+            str(value) for value in (
+                self.tk.splitlist(raw_values) if isinstance(raw_values, str) else raw_values
+            )
+        )
+        next_date = self._next_system_animation_date(
+            values, self.system_animation_date_var.get()
+        )
+        if next_date is None:
+            return False
+        self.system_animation_date_var.set(next_date)
+        self.simulate_system_animation_day()
+        if self.system_animation_results.empty:
+            return False
+        self.system_animation_playing = True
+        self.system_animation_play_mode = "day"
+        self._set_media_control_icon(
+            self.system_animation_play_button, self.system_animation_play_icon, "⏸"
+        )
+        self._set_media_control_tooltip(
+            self.system_animation_play_button, "Pause (K)"
+        )
+        self.status_var.set(f"Auto-playing system animation for {next_date}")
+        return True
+
+    def _system_animation_seconds_per_hour(self) -> float:
+        return self._bounded_system_animation_seconds(
+            _float(self.system_animation_seconds_per_hour_var.get(), 1.0)
+        )
+
+    @staticmethod
+    def _system_animation_drag_delta(
+        screen_dx: float, screen_dy: float, scale: float
+    ) -> tuple[float, float]:
+        safe_scale = max(float(scale), 0.001)
+        return float(screen_dx) / safe_scale, float(screen_dy) / safe_scale
+
+    def _system_animation_drag_start(self, event: tk.Event) -> str | None:
+        overlapping = self.system_animation_canvas.find_overlapping(
+            event.x - 1, event.y - 1, event.x + 1, event.y + 1
+        )
+        component_id: str | None = None
+        for canvas_item in reversed(overlapping):
+            component_tag = next(
+                (
+                    tag for tag in self.system_animation_canvas.gettags(canvas_item)
+                    if tag.startswith("animation-component:")
+                ),
+                None,
+            )
+            if component_tag:
+                component_id = component_tag.split(":", 1)[1]
+                break
+        if component_id is None:
+            return None
+        item = self._system_layout_item(component_id)
+        if item is None:
+            return None
+        self.system_animation_drag_state = (
+            component_id, float(event.x), float(event.y),
+            float(item.get("x", 0.0)), float(item.get("y", 0.0)),
+            max(float(getattr(self, "system_animation_render_scale", 1.0)), 0.001),
+        )
+        self.system_animation_canvas.configure(cursor="fleur")
+        return "break"
+
+    def _system_animation_drag_motion(self, event: tk.Event) -> str | None:
+        if self.system_animation_drag_state is None:
+            return None
+        component_id, start_x, start_y, original_x, original_y, scale = self.system_animation_drag_state
+        item = self._system_layout_item(component_id)
+        if item is None:
+            return "break"
+        dx, dy = self._system_animation_drag_delta(event.x - start_x, event.y - start_y, scale)
+        proposed_x, proposed_y = original_x + dx, original_y + dy
+        item_width = max(float(item.get("width", 124.0)), 80.0)
+        item_height = max(float(item.get("height", 60.0)), 44.0)
+        workspace_width, workspace_height = self._system_canvas_dimensions()
+        proposed_x = min(max(proposed_x, item_width / 2.0 + 3.0), workspace_width - item_width / 2.0 - 3.0)
+        proposed_y = min(max(proposed_y, item_height / 2.0 + 3.0), workspace_height - item_height / 2.0 - 3.0)
+        if not self._system_position_overlaps(
+            proposed_x, proposed_y, width=item_width, height=item_height,
+            exclude_id=component_id,
+        ):
+            item["x"], item["y"] = proposed_x, proposed_y
+            self._draw_system_animation()
+        return "break"
+
+    def _system_animation_drag_end(self, _event: tk.Event) -> str | None:
+        if self.system_animation_drag_state is None:
+            return None
+        component_id = self.system_animation_drag_state[0]
+        self.system_animation_drag_state = None
+        self.system_animation_canvas.configure(cursor="")
+        self._render_system_builder()
+        self.status_var.set(f"Moved system object in animation view: {component_id}")
+        return "break"
+
+    @staticmethod
+    def _bounded_system_animation_seconds(value: float) -> float:
+        return min(max(float(value), 0.1), 60.0)
+
+    @staticmethod
+    def _system_animation_frames_per_hour(seconds_per_hour: float) -> int:
+        bounded = RainwaterTkApp._bounded_system_animation_seconds(seconds_per_hour)
+        return max(round(bounded * 1000.0 / SYSTEM_ANIMATION_FRAME_MS), 1)
+
+    @staticmethod
+    def _single_hour_animation_completion(hour: int, behavior: str) -> tuple[int, bool]:
+        bounded_hour = min(max(int(hour), 0), 23)
+        if behavior == "Loop current hour":
+            return bounded_hour, False
+        return min(bounded_hour + 1, 23), True
+
+    @staticmethod
+    def _system_animation_connection_active(
+        source_type: str, target_type: str, row: pd.Series
+    ) -> bool:
+        if source_type == "rainwater_input":
+            return float(row.get("CollectedGallons", 0.0)) > 1e-9
+        if source_type == "municipal_backup":
+            return float(row.get("MainsMakeupGallons", 0.0)) > 1e-9
+        if target_type == "first_flush_diversion":
+            return False
+        if source_type in {"primary_tank", "filtration_pump"}:
+            return float(row.get("PumpFlowGallons", 0.0)) > 1e-9
+        if source_type == "filtration_system":
+            return float(row.get("FilterThroughputGallons", 0.0)) > 1e-9
+        if source_type in {"booster_tank", "booster_pump"}:
+            supplied = float(row.get("DemandGallons", 0.0)) - float(
+                row.get("SystemUnmetDemandGallons", 0.0)
+            )
+            return supplied > 1e-9
+        return False
+
+    @staticmethod
+    def _system_animation_rain_active(row: pd.Series) -> bool:
+        """Return whether collected rainwater enters the configured system this hour."""
+        return float(row.get("CollectedGallons", 0.0)) > 1e-9
+
+    def _load_system_weather_images(self) -> bool:
+        """Load and retain the optional CC0 weather artwork for canvas animation."""
+        if self.system_weather_assets_loaded:
+            return bool(self.system_weather_images)
+        self.system_weather_assets_loaded = True
+        root = _resource_path("assets/third_party/weather")
+        paths = {
+            "sunny": root / "weather-icon-set" / "sunnyWeather.png",
+        }
+        paths.update(
+            {
+                f"rain_drop_{index}": root / "rain-drop-animation" / f"rain_drop_{index}.png"
+                for index in range(5)
+            }
+        )
+        try:
+            loaded = {name: tk.PhotoImage(file=path) for name, path in paths.items()}
+        except (tk.TclError, OSError):
+            self.system_weather_images.clear()
+            return False
+
+        # The weather icons are 100 px square; halve them to fit inside a block.
+        loaded["sunny"] = loaded["sunny"].subsample(2, 2)
+        # Enlarge the 10 px particle frames enough to remain visible after packaging.
+        for index in range(5):
+            key = f"rain_drop_{index}"
+            loaded[key] = loaded[key].zoom(2, 2)
+        self.system_weather_images = loaded
+        return True
+
+    def _draw_weather_asset_animation(
+        self, canvas: tk.Canvas, x: float, y: float, phase: float, raining: bool
+    ) -> bool:
+        """Draw cached weather assets, returning False when fallback art is needed."""
+        if not self._load_system_weather_images():
+            return False
+        if not raining:
+            canvas.create_image(x, y, image=self.system_weather_images["sunny"])
+            return True
+
+        frame = min(int((phase % 1.0) * 5.0), 4)
+        particle = self.system_weather_images[f"rain_drop_{frame}"]
+        # Three particles fill the block while remaining inside its 124 x 60 bounds.
+        canvas.create_image(x - 30, y, image=particle)
+        canvas.create_image(x, y, image=particle)
+        canvas.create_image(x + 30, y, image=particle)
+        return True
+
+    def _system_animation_irrigation_active(
+        self, item: dict[str, object], timestamp: pd.Timestamp
+    ) -> bool:
+        assigned = _normalized_demand_object_indices(
+            item.get("demand_object_indices"),
+            len(self.config_model.demand.demand_objects),
+        )
+        day_key = WEEKDAY_KEYS[timestamp.weekday()]
+        for index in assigned:
+            demand_object = self.config_model.demand.demand_objects[index]
+            if demand_object.object_type.casefold() != "irrigation system":
+                continue
+            schedule = self.config_model.demand.hourly_schedule_library.get(
+                demand_object.schedule_name
+            )
+            if schedule is None:
+                continue
+            values = schedule.get(day_key, [])
+            if timestamp.hour < len(values) and float(values[timestamp.hour]) > 0.0:
+                return True
+        return False
+
+    @staticmethod
+    def _draw_pixel_irrigation_animation(
+        canvas: tk.Canvas, x: float, y: float, width: float, height: float, phase: float
+    ) -> None:
+        """Draw a tiny original pixel-art gardener, hose, flower and water spray."""
+        pixel = max(min(int(min(width / 34.0, height / 18.0)), 4), 1)
+        scene_w, scene_h = 34 * pixel, 18 * pixel
+        left, top = x - scene_w / 2.0, y - scene_h / 2.0
+        def rect(px: int, py: int, pw: int, ph: int, color: str) -> None:
+            canvas.create_rectangle(
+                left + px * pixel, top + py * pixel,
+                left + (px + pw) * pixel, top + (py + ph) * pixel,
+                fill=color, outline="",
+            )
+        # Grass and flower.
+        rect(0, 15, 34, 3, "#55a630")
+        for blade in (1, 5, 9, 20, 24, 30):
+            rect(blade, 13 + blade % 2, 1, 2, "#2f7d32")
+        rect(27, 10, 1, 5, "#2f7d32")
+        rect(25, 8, 2, 2, "#ff70a6"); rect(28, 8, 2, 2, "#ff70a6")
+        rect(27, 7, 1, 1, "#ffd166"); rect(27, 9, 1, 1, "#ffd166")
+        # Gardener: hat, head, shirt, trousers and boots.
+        rect(5, 3, 6, 1, "#f4a261"); rect(7, 2, 4, 1, "#e76f51")
+        rect(7, 4, 4, 4, "#f2c6a0"); rect(10, 5, 1, 1, "#263238")
+        rect(6, 8, 6, 5, "#4361ee"); rect(6, 13, 2, 3, "#37474f")
+        rect(10, 13, 2, 3, "#37474f"); rect(5, 16, 4, 1, "#6d4c41")
+        rect(10, 16, 4, 1, "#6d4c41")
+        # Arm, hose handle and a slightly wiggly green hose.
+        rect(11, 9, 4, 2, "#f2c6a0"); rect(14, 10, 4, 1, "#455a64")
+        hose_y = 13 + (1 if phase >= 0.5 else 0)
+        rect(15, 12, 1, hose_y - 11, "#2d6a4f")
+        rect(15, hose_y, 8, 1, "#2d6a4f"); rect(22, 12, 1, 2, "#2d6a4f")
+        # Three looping droplets travel toward the flower.
+        for index in range(3):
+            progress = (phase + index / 3.0) % 1.0
+            drop_x = 18 + int(progress * 8)
+            arc = int(3.0 * (4.0 * progress * (1.0 - progress)))
+            drop_y = 9 - arc + (index % 2)
+            rect(drop_x, drop_y, 1, 1, "#29b6f6")
+
+    @staticmethod
+    def _draw_pixel_weather_animation(
+        canvas: tk.Canvas, x: float, y: float, width: float, height: float,
+        phase: float, raining: bool,
+    ) -> None:
+        """Draw an original animated pixel sun or drifting rain cloud."""
+        pixel = max(min(int(min(width / 30.0, height / 16.0)), 4), 1)
+        scene_w, scene_h = 30 * pixel, 16 * pixel
+        left, top = x - scene_w / 2.0, y - scene_h / 2.0
+
+        def rect(px: int, py: int, pw: int, ph: int, color: str) -> None:
+            canvas.create_rectangle(
+                left + px * pixel, top + py * pixel,
+                left + (px + pw) * pixel, top + (py + ph) * pixel,
+                fill=color, outline="",
+            )
+
+        if not raining:
+            pulse = 1 if phase >= 0.5 else 0
+            rect(12, 4, 6, 6, "#ffd43b"); rect(10, 6, 10, 2, "#ffd43b")
+            ray_color = "#ffb703" if pulse else "#ffc300"
+            for ray in (
+                (14, 1 - pulse), (14, 12 + pulse),
+                (7 - pulse, 6), (21 + pulse, 6),
+                (9 - pulse, 2 - pulse), (19 + pulse, 2 - pulse),
+                (9 - pulse, 10 + pulse), (19 + pulse, 10 + pulse),
+            ):
+                rect(ray[0], ray[1], 2, 2, ray_color)
+            return
+
+        cloud_shift = 1 if phase >= 0.5 else 0
+        rect(5 + cloud_shift, 4, 20, 5, "#90a4ae")
+        rect(8 + cloud_shift, 2, 7, 4, "#b0bec5")
+        rect(15 + cloud_shift, 3, 7, 4, "#c5d0d5")
+        rect(7 + cloud_shift, 8, 16, 2, "#78909c")
+        rain_step = int(phase * 4.0) % 4
+        for index, drop_x in enumerate((7, 12, 17, 22)):
+            rect(drop_x, 10 + ((rain_step + index * 2) % 4), 1, 2, "#29b6f6")
+
+    def _draw_system_animation(self) -> None:
+        if not hasattr(self, "system_animation_canvas"):
+            return
+        canvas = self.system_animation_canvas
+        canvas.delete("all")
+        if self.system_animation_results.empty:
+            if hasattr(self, "system_animation_seek_var"):
+                self.system_animation_seek_var.set(0.0)
+                self.system_animation_progress_var.set("00:00 / 24:00")
+            canvas.create_text(
+                max(canvas.winfo_width(), 300) / 2, max(canvas.winfo_height(), 200) / 2,
+                text="Select a rainfall day and choose Simulate day.", fill="#667278",
+                font=("Segoe UI", 12),
+            )
+            return
+        hour = min(max(self.system_animation_hour, 0), len(self.system_animation_results) - 1)
+        row = self.system_animation_results.iloc[hour]
+        frames_per_hour = self._system_animation_frames_per_hour(
+            self._system_animation_seconds_per_hour()
+        )
+        hour_progress = min(self.system_animation_frame / max(frames_per_hour, 1), 0.999)
+        timeline_hour = hour + hour_progress
+        self.system_animation_seek_var.set(timeline_hour)
+        progress_minutes = min(int(timeline_hour * 60.0), 24 * 60)
+        self.system_animation_progress_var.set(
+            f"{progress_minutes // 60:02d}:{progress_minutes % 60:02d} / 24:00"
+        )
+        animation_timestamp = pd.Timestamp(row.get("Date"))
+        displayed_rain = volume_to_display(float(row.get("CollectedGallons", 0.0)), self.config_model)
+        displayed_demand = volume_to_display(float(row.get("DemandGallons", 0.0)), self.config_model)
+        self.system_animation_hour_var.set(
+            f"Hour {hour:02d}:00-{hour:02d}:59  |  "
+            f"rain {displayed_rain:.1f} {volume_unit(self.config_model)}  |  "
+            f"demand {displayed_demand:.1f} {volume_unit(self.config_model)}"
+        )
+        layout = self.config_model.system_layout
+        if not layout:
+            canvas.create_text(30, 30, anchor="nw", text="Apply or build a system first.")
+            return
+        width, height = max(canvas.winfo_width(), 200), max(canvas.winfo_height(), 160)
+        xs = [float(item.get("x", 0.0)) for item in layout]
+        ys = [float(item.get("y", 0.0)) for item in layout]
+        min_x, max_x = min(xs) - 80.0, max(xs) + 80.0
+        min_y, max_y = min(ys) - 60.0, max(ys) + 60.0
+        scale = min((width - 30.0) / max(max_x - min_x, 1.0), (height - 30.0) / max(max_y - min_y, 1.0))
+        self.system_animation_render_scale = scale
+        def point(item: dict[str, object]) -> tuple[float, float]:
+            return (15.0 + (float(item.get("x", 0.0)) - min_x) * scale,
+                    15.0 + (float(item.get("y", 0.0)) - min_y) * scale)
+        by_id = {str(item.get("id")): item for item in layout}
+        for connection in self.config_model.system_connections:
+            source, target = by_id.get(connection.get("source_component", "")), by_id.get(connection.get("target_component", ""))
+            if source is None or target is None:
+                continue
+            sx, sy = point(source); tx, ty = point(target)
+            canvas.create_line(sx, sy, tx, ty, fill="#7b878d", width=3, arrow=tk.LAST)
+            if self._system_animation_connection_active(
+                str(source.get("component_type", "")), str(target.get("component_type", "")), row
+            ):
+                for offset in (0.0, 0.33, 0.66):
+                    fraction = (self.system_animation_phase + offset) % 1.0
+                    px, py = sx + (tx - sx) * fraction, sy + (ty - sy) * fraction
+                    canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#1687d9", outline="")
+        primary_begin = (
+            self.config_model.selected_tank_size_gal * self.config_model.tank_parameters.initial_fill_percent / 100.0
+            if hour == 0 else float(self.system_animation_results.iloc[hour - 1].get("WaterInTankGallons", 0.0))
+        )
+        booster_begin = (
+            self.config_model.system_parameters.booster_tank_size_gallons
+            * self.config_model.system_parameters.booster_initial_fill_percent / 100.0
+            if hour == 0 else float(self.system_animation_results.iloc[hour - 1].get("BoosterTankGallons", 0.0))
+        )
+        for item in layout:
+            x, y = point(item); component_type = str(item.get("component_type", ""))
+            component_id = str(item.get("id", ""))
+            component_tag = f"animation-component:{component_id}"
+            block_w, block_h = 124.0 * scale, 60.0 * scale
+            canvas.create_rectangle(x - block_w / 2, y - block_h / 2, x + block_w / 2, y + block_h / 2,
+                                    fill="#f7f9fa", outline="#30363a", width=2,
+                                    tags=(component_tag,))
+            if component_type in {"primary_tank", "booster_tank"}:
+                capacity = (self.config_model.selected_tank_size_gal if component_type == "primary_tank"
+                            else self.config_model.system_parameters.booster_tank_size_gallons)
+                volume = primary_begin if component_type == "primary_tank" else booster_begin
+                fraction = min(max(volume / capacity, 0.0), 1.0) if capacity > 0 else 0.0
+                inner_h = max(block_h - 6.0, 0.0) * fraction
+                canvas.create_rectangle(x - block_w / 2 + 3, y + block_h / 2 - 3 - inner_h,
+                                        x + block_w / 2 - 3, y + block_h / 2 - 3,
+                                        fill="#70b7e6", outline="")
+            if component_type in {"filtration_pump", "booster_pump"}:
+                running = (float(row.get("PumpFlowGallons", 0.0)) > 1e-9 if component_type == "filtration_pump"
+                           else float(row.get("DemandGallons", 0.0)) - float(row.get("SystemUnmetDemandGallons", 0.0)) > 1e-9)
+                angle = self.system_animation_phase * math.tau if running else 0.0
+                radius = min(block_w, block_h) * 0.23
+                canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline="#455a64", width=2)
+                for spoke in range(6):
+                    theta = angle + spoke * math.tau / 6.0
+                    canvas.create_line(x, y, x + math.cos(theta) * radius, y + math.sin(theta) * radius,
+                                       fill="#455a64", width=2)
+            if component_type == "rainwater_input":
+                raining = self._system_animation_rain_active(row)
+                if not self._draw_weather_asset_animation(
+                    canvas, x, y, self.system_animation_phase, raining
+                ):
+                    self._draw_pixel_weather_animation(
+                        canvas, x, y, max(block_w - 6.0, 1.0), max(block_h - 6.0, 1.0),
+                        self.system_animation_phase, raining,
+                    )
+            if (
+                component_type == "end_uses"
+                and self._system_animation_irrigation_active(item, animation_timestamp)
+                and float(row.get("DemandGallons", 0.0)) > 1e-9
+            ):
+                self._draw_pixel_irrigation_animation(
+                    canvas, x, y, max(block_w - 6.0, 1.0), max(block_h - 6.0, 1.0),
+                    self.system_animation_phase,
+                )
+            canvas.create_text(x, y + block_h / 2 + 11, text=str(item.get("name", component_type)),
+                               font=("Segoe UI", 8, "bold"), tags=(component_tag,))
+
+    def save_custom_system_template(self) -> None:
+        if not self.config_model.system_layout:
+            messagebox.showwarning(APP_TITLE, "Add system objects before saving a template.", parent=self)
+            return
+        name = simpledialog.askstring(APP_TITLE, "Custom template name:", parent=self)
+        if name is None:
+            return
+        try:
+            self.store.save_system_template(name, self._system_template_payload())
+        except ValueError as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+        clean_name = name.strip()
+        self._refresh_system_template_library(select_name=clean_name)
+        self.status_var.set(f"Saved custom system template: {clean_name}")
+
+    def apply_selected_system_template(self) -> None:
+        selected = self.system_template_library.selection()
+        if not selected:
+            return
+        iid = selected[0]
+        if iid.startswith("builtin:"):
+            self.apply_system_template(iid.split(":", 1)[1])
+            return
+        name = self.system_custom_template_iids.get(iid)
+        if name is None:
+            return
+        try:
+            payload = self.store.load_system_template(name)
+            layout = payload.get("system_layout", [])
+            connections = payload.get("system_connections", [])
+            if not isinstance(layout, list) or not isinstance(connections, list):
+                raise ValueError(f"System template '{name}' is invalid.")
+            cfg = self.config_model
+            cfg.system_type = (
+                payload.get("system_type")
+                if payload.get("system_type") in {"Direct system", "Indirect system"}
+                else "Direct system"
+            )
+            cfg.system_layout = [copy.deepcopy(item) for item in layout if isinstance(item, dict)]
+            cfg.system_connections = [
+                {str(key): str(value) for key, value in item.items()}
+                for item in connections if isinstance(item, dict)
+            ]
+            if isinstance(payload.get("system_parameters"), dict):
+                cfg.system_parameters = SystemComponentParameters(**payload["system_parameters"])
+            if isinstance(payload.get("tank_parameters"), dict):
+                cfg.tank_parameters = TankParameters(**payload["tank_parameters"])
+            if "selected_tank_size_gal" in payload:
+                cfg.selected_tank_size_gal = float(payload["selected_tank_size_gal"])
+            for field_name in ("graph_start_gal", "graph_end_gal", "graph_step_gal"):
+                if field_name in payload:
+                    setattr(cfg, field_name, int(float(payload[field_name])))
+        except (TypeError, ValueError) as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+        self.system_builder_selected_id = None
+        self.system_builder_selected_ids.clear()
+        self.system_builder_selected_connection = None
+        self.system_builder_pending_source = None
+        self.system_builder_pending_target = None
+        self.system_builder_pending_target_port = "in"
+        self._populate_from_model()
+        self._render_system_builder()
+        self.status_var.set(f"Applied custom system template: {name}")
+
+    def _apply_selected_system_template_event(self, _event: tk.Event) -> str:
+        self.apply_selected_system_template()
+        return "break"
+
+    def rename_custom_system_template(self) -> None:
+        old_name = self._selected_custom_system_template_name()
+        if old_name is None:
+            messagebox.showinfo(APP_TITLE, "Select a custom template to rename.", parent=self)
+            return
+        new_name = simpledialog.askstring(
+            APP_TITLE, "New custom template name:", initialvalue=old_name, parent=self
+        )
+        if new_name is None:
+            return
+        try:
+            self.store.rename_system_template(old_name, new_name)
+        except ValueError as exc:
+            messagebox.showerror(APP_TITLE, str(exc), parent=self)
+            return
+        clean_name = new_name.strip()
+        self._refresh_system_template_library(select_name=clean_name)
+        self.status_var.set(f"Renamed custom system template to: {clean_name}")
+
+    def delete_custom_system_template(self) -> None:
+        name = self._selected_custom_system_template_name()
+        if name is None:
+            messagebox.showinfo(APP_TITLE, "Select a custom template to delete.", parent=self)
+            return
+        if not messagebox.askyesno(
+            APP_TITLE, f"Delete custom system template '{name}'?", parent=self
+        ):
+            return
+        self.store.delete_system_template(name)
+        self._refresh_system_template_library()
+        self.status_var.set(f"Deleted custom system template: {name}")
 
     def apply_system_template(self, system_type: str) -> None:
         if system_type == "Direct system":
@@ -1816,6 +3022,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_connection = None
         self.system_builder_pending_source = None
         self.system_builder_pending_target = None
+        self.system_builder_pending_target_port = "in"
         self.system_builder_port_drag = None
         self._render_system_builder()
         self.status_var.set(f"Applied {system_type.lower()} template")
@@ -1861,7 +3068,8 @@ class RainwaterTkApp(tk.Tk):
         canvas_x = pointer_x - self.system_builder_canvas.winfo_rootx()
         canvas_y = pointer_y - self.system_builder_canvas.winfo_rooty()
         if 0 <= canvas_x <= self.system_builder_canvas.winfo_width() and 0 <= canvas_y <= self.system_builder_canvas.winfo_height():
-            self._add_system_component(self.system_library_drag_type, canvas_x, canvas_y)
+            model_x, model_y = self._system_model_point(canvas_x, canvas_y)
+            self._add_system_component(self.system_library_drag_type, model_x, model_y)
         self.system_library_drag_type = None
 
     def _system_layout_item(self, component_id: str) -> dict[str, object] | None:
@@ -1920,15 +3128,92 @@ class RainwaterTkApp(tk.Tk):
         return False
 
     def _system_canvas_dimensions(self) -> tuple[float, float]:
+        maximum_zoom_out = 0.7
         width = max(
             float(self.system_builder_canvas.winfo_width()),
             float(self.system_builder_canvas.cget("width")),
-        )
+        ) / maximum_zoom_out
         height = max(
             float(self.system_builder_canvas.winfo_height()),
             float(self.system_builder_canvas.cget("height")),
-        )
+        ) / maximum_zoom_out
         return width, height
+
+    def _change_system_builder_zoom(self, delta: float) -> None:
+        self.system_builder_zoom = self._bounded_system_builder_zoom(
+            self.system_builder_zoom, delta
+        )
+        self._clamp_system_builder_pan()
+        new_steps = round(self.system_builder_zoom * 10)
+        self.system_builder_zoom_var.set(f"{new_steps * 10}%")
+        self._render_system_builder()
+
+    @staticmethod
+    def _bounded_system_builder_zoom(current: float, delta: float) -> float:
+        current_steps = round(float(current) * 10)
+        delta_steps = 1 if delta > 0 else -1
+        return min(max(current_steps + delta_steps, 7), 13) / 10.0
+
+    def _system_model_point(self, x: float, y: float) -> tuple[float, float]:
+        zoom = max(float(getattr(self, "system_builder_zoom", 1.0)), 0.01)
+        return (
+            float(x) / zoom - self.system_builder_pan_x,
+            float(y) / zoom - self.system_builder_pan_y,
+        )
+
+    @staticmethod
+    def _bounded_system_builder_pan(
+        canvas_width: float, canvas_height: float, zoom: float,
+        pan_x: float, pan_y: float,
+    ) -> tuple[float, float]:
+        zoom = min(max(float(zoom), 0.7), 1.3)
+        world_width = float(canvas_width) / 0.7
+        world_height = float(canvas_height) / 0.7
+        minimum_x = min(float(canvas_width) / zoom - world_width, 0.0)
+        minimum_y = min(float(canvas_height) / zoom - world_height, 0.0)
+        return (
+            min(max(float(pan_x), minimum_x), 0.0),
+            min(max(float(pan_y), minimum_y), 0.0),
+        )
+
+    def _clamp_system_builder_pan(self) -> None:
+        canvas = self.system_builder_canvas
+        self.system_builder_pan_x, self.system_builder_pan_y = self._bounded_system_builder_pan(
+            max(float(canvas.winfo_width()), float(canvas.cget("width"))),
+            max(float(canvas.winfo_height()), float(canvas.cget("height"))),
+            self.system_builder_zoom,
+            self.system_builder_pan_x,
+            self.system_builder_pan_y,
+        )
+
+    def _system_canvas_pan_start(self, event: tk.Event) -> str:
+        self.system_builder_pan_state = (
+            float(event.x), float(event.y),
+            self.system_builder_pan_x, self.system_builder_pan_y,
+        )
+        self.system_builder_canvas.configure(cursor="fleur")
+        return "break"
+
+    def _system_canvas_pan_drag(self, event: tk.Event) -> str:
+        if self.system_builder_pan_state is None:
+            return "break"
+        start_x, start_y, original_pan_x, original_pan_y = self.system_builder_pan_state
+        zoom = max(self.system_builder_zoom, 0.01)
+        self.system_builder_pan_x = original_pan_x + (float(event.x) - start_x) / zoom
+        self.system_builder_pan_y = original_pan_y + (float(event.y) - start_y) / zoom
+        self._clamp_system_builder_pan()
+        self._render_system_builder()
+        return "break"
+
+    def _system_canvas_pan_end(self, _event: tk.Event) -> str:
+        self.system_builder_pan_state = None
+        self.system_builder_canvas.configure(cursor="")
+        self.status_var.set("System builder view panned")
+        return "break"
+
+    def _system_builder_canvas_resized(self, _event: tk.Event) -> None:
+        self._clamp_system_builder_pan()
+        self._render_system_builder()
 
     def _nearest_available_system_position(self, x: float, y: float) -> tuple[float, float] | None:
         width, height = self._system_canvas_dimensions()
@@ -1963,16 +3248,23 @@ class RainwaterTkApp(tk.Tk):
     @staticmethod
     def _system_component_ports(component_type: str) -> tuple[bool, bool]:
         has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
-        has_outlet = component_type != "end_uses"
+        has_outlet = component_type not in {"end_uses", "first_flush_diversion"}
         return has_inlet, has_outlet
 
-    def _connect_system_components(self, source_id: str, target_id: str) -> None:
+    def _connect_system_components(
+        self, source_id: str, target_id: str, target_port: str = "in",
+        source_port: str = "out",
+    ) -> None:
         if source_id == target_id:
             self.system_builder_pending_source = None
             self.system_builder_pending_target = None
             self._render_system_builder()
             return
         connection = {"source_component": source_id, "target_component": target_id}
+        if source_port == "out2":
+            connection["source_port"] = "out2"
+        if target_port == "in2":
+            connection["target_port"] = "in2"
         if connection not in self.config_model.system_connections:
             self.config_model.system_connections.append(connection)
         self.system_builder_pending_source = None
@@ -1982,19 +3274,100 @@ class RainwaterTkApp(tk.Tk):
         self._render_system_builder()
 
     def _system_canvas_press(self, event: tk.Event) -> None:
+        model_x, model_y = self._system_model_point(event.x, event.y)
         current = self.system_builder_canvas.find_withtag("current")
         tags = self.system_builder_canvas.gettags(current[0]) if current else ()
         port_tag = next((tag for tag in tags if tag.startswith("port:")), None)
+        add_inlet_tag = next((tag for tag in tags if tag.startswith("add-inlet:")), None)
+        remove_inlet_tag = next((tag for tag in tags if tag.startswith("remove-inlet:")), None)
+        add_outlet_tag = next((tag for tag in tags if tag.startswith("add-outlet:")), None)
+        remove_outlet_tag = next((tag for tag in tags if tag.startswith("remove-outlet:")), None)
+        if remove_outlet_tag is not None:
+            component_id = remove_outlet_tag.split(":", 1)[1]
+            item = self._system_layout_item(component_id)
+            if item is not None and item.get("component_type") == "primary_tank":
+                linked = any(
+                    connection.get("source_component") == component_id
+                    and connection.get("source_port", "out") == "out2"
+                    for connection in self.config_model.system_connections
+                )
+                if linked:
+                    self.status_var.set(
+                        "Disconnect the second primary-tank output before removing it"
+                    )
+                    return
+                item.pop("extra_output_node", None)
+                self.system_builder_pending_source = None
+                self.system_builder_pending_source_port = "out"
+                self.system_builder_port_drag = None
+                self.system_builder_selected_id = component_id
+                self.status_var.set("Removed the second primary-tank output node")
+                self._render_system_builder()
+            return
+        if add_outlet_tag is not None:
+            component_id = add_outlet_tag.split(":", 1)[1]
+            item = self._system_layout_item(component_id)
+            if item is not None and item.get("component_type") == "primary_tank":
+                item["extra_output_node"] = True
+                self.system_builder_selected_id = component_id
+                self.status_var.set("Added a second primary-tank output node")
+                self._render_system_builder()
+            return
+        if remove_inlet_tag is not None:
+            component_id = remove_inlet_tag.split(":", 1)[1]
+            item = self._system_layout_item(component_id)
+            if item is not None and item.get("component_type") == "booster_tank":
+                linked = any(
+                    connection.get("target_component") == component_id
+                    and connection.get("target_port", "in") == "in2"
+                    for connection in self.config_model.system_connections
+                )
+                if linked:
+                    self.status_var.set(
+                        "Disconnect the second booster-tank input before removing it"
+                    )
+                    return
+                before = len(self.config_model.system_connections)
+                self.config_model.system_connections = self._connections_after_node_disconnect(
+                    self.config_model.system_connections, component_id, "in2"
+                )
+                item.pop("extra_input_node", None)
+                removed = before - len(self.config_model.system_connections)
+                self.system_builder_pending_target = None
+                self.system_builder_pending_target_port = "in"
+                self.system_builder_port_drag = None
+                self.system_builder_selected_id = component_id
+                self.status_var.set(
+                    f"Removed the second booster-tank input node and {removed} connection(s)"
+                )
+                self._render_system_builder()
+            return
+        if add_inlet_tag is not None:
+            component_id = add_inlet_tag.split(":", 1)[1]
+            item = self._system_layout_item(component_id)
+            if item is not None and item.get("component_type") == "booster_tank":
+                item["extra_input_node"] = True
+                self.system_builder_selected_id = component_id
+                self.status_var.set("Added a second booster-tank input node")
+                self._render_system_builder()
+            return
         if port_tag is not None:
             _prefix, component_id, direction = port_tag.split(":", 2)
-            if direction == "out" and self.system_builder_pending_target is not None:
-                self._connect_system_components(component_id, self.system_builder_pending_target)
+            if direction.startswith("out") and self.system_builder_pending_target is not None:
+                self._connect_system_components(
+                    component_id, self.system_builder_pending_target,
+                    self.system_builder_pending_target_port, direction,
+                )
                 self.system_builder_port_drag = None
-            elif direction == "in" and self.system_builder_pending_source is not None:
-                self._connect_system_components(self.system_builder_pending_source, component_id)
+            elif direction.startswith("in") and self.system_builder_pending_source is not None:
+                self._connect_system_components(
+                    self.system_builder_pending_source, component_id, direction,
+                    self.system_builder_pending_source_port,
+                )
                 self.system_builder_port_drag = None
-            elif direction == "out":
+            elif direction.startswith("out"):
                 self.system_builder_pending_source = component_id
+                self.system_builder_pending_source_port = direction
                 self.system_builder_pending_target = None
                 self.system_builder_selected_id = component_id
                 self.system_builder_selected_connection = None
@@ -2002,6 +3375,7 @@ class RainwaterTkApp(tk.Tk):
                 self.system_builder_port_drag = (component_id, direction)
             else:
                 self.system_builder_pending_target = component_id
+                self.system_builder_pending_target_port = direction
                 self.system_builder_pending_source = None
                 self.system_builder_selected_id = component_id
                 self.system_builder_selected_connection = None
@@ -2032,14 +3406,14 @@ class RainwaterTkApp(tk.Tk):
                 x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
                 item_width = float(item.get("width", 124.0))
                 item_height = float(item.get("height", 60.0))
-                horizontal = "w" if event.x < x else "e"
-                vertical = "n" if event.y < y else "s"
+                horizontal = "w" if model_x < x else "e"
+                vertical = "n" if model_y < y else "s"
                 corner_x = x - item_width / 2.0 if horizontal == "w" else x + item_width / 2.0
                 corner_y = y - item_height / 2.0 if vertical == "n" else y + item_height / 2.0
-                if abs(event.x - corner_x) <= 10.0 and abs(event.y - corner_y) <= 10.0:
+                if abs(model_x - corner_x) <= 10.0 and abs(model_y - corner_y) <= 10.0:
                     self.system_builder_resize_state = (
                         clicked_id, vertical + horizontal, x, y, item_width, item_height,
-                        float(event.x), float(event.y),
+                        model_x, model_y,
                     )
                     return
         if self.system_multi_select_var.get():
@@ -2063,7 +3437,9 @@ class RainwaterTkApp(tk.Tk):
         if self.system_builder_selected_id:
             item = self._system_layout_item(self.system_builder_selected_id)
             if item is not None:
-                self.system_builder_drag_offset = (event.x - float(item["x"]), event.y - float(item["y"]))
+                self.system_builder_drag_offset = (
+                    model_x - float(item["x"]), model_y - float(item["y"])
+                )
             self.system_builder_side_tabs.select(self.system_component_edit_tab)
         self.system_builder_canvas.focus_set()
         self._render_system_builder()
@@ -2076,10 +3452,16 @@ class RainwaterTkApp(tk.Tk):
                 return
             x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
             half_width = max(float(item.get("width", 124.0)), 80.0) / 2.0
-            start_x = x + half_width + 3.0 if direction == "out" else x - half_width - 3.0
+            start_x = x + half_width + 3.0 if direction.startswith("out") else x - half_width - 3.0
+            start_y = y + (14.0 if direction == "in2" else (-14.0 if direction == "in" and item.get("extra_input_node") else 0.0))
+            if direction.startswith("out") and item.get("extra_output_node"):
+                start_y = y + (14.0 if direction == "out2" else -14.0)
             self.system_builder_canvas.delete("pending-link-preview")
+            zoom = self.system_builder_zoom
             self.system_builder_canvas.create_line(
-                start_x, y, event.x, event.y,
+                (start_x + self.system_builder_pan_x) * zoom,
+                (start_y + self.system_builder_pan_y) * zoom,
+                event.x, event.y,
                 fill="#9aa4a9", width=2, dash=(5, 3), arrow=tk.LAST,
                 tags=("pending-link-preview",),
             )
@@ -2094,11 +3476,12 @@ class RainwaterTkApp(tk.Tk):
         if item is None:
             return
         offset_x, offset_y = self.system_builder_drag_offset
+        model_x, model_y = self._system_model_point(event.x, event.y)
         item_width = max(float(item.get("width", 124.0)), 80.0)
         item_height = max(float(item.get("height", 60.0)), 44.0)
         width, height = self._system_canvas_dimensions()
-        proposed_x = min(max(event.x - offset_x, item_width / 2.0 + 3.0), max(width - item_width / 2.0 - 3.0, item_width / 2.0 + 3.0))
-        proposed_y = min(max(event.y - offset_y, item_height / 2.0 + 3.0), max(height - item_height / 2.0 - 3.0, item_height / 2.0 + 3.0))
+        proposed_x = min(max(model_x - offset_x, item_width / 2.0 + 3.0), max(width - item_width / 2.0 - 3.0, item_width / 2.0 + 3.0))
+        proposed_y = min(max(model_y - offset_y, item_height / 2.0 + 3.0), max(height - item_height / 2.0 - 3.0, item_height / 2.0 + 3.0))
         current_x, current_y = float(item["x"]), float(item["y"])
         if not self._system_position_overlaps(
             proposed_x, proposed_y, width=item_width, height=item_height,
@@ -2137,10 +3520,14 @@ class RainwaterTkApp(tk.Tk):
             self._clear_system_port_drag_hover()
             self.system_builder_canvas.delete("pending-link-preview")
             if target_port is not None and target_port[1] != origin_direction:
-                if origin_direction == "out":
-                    self._connect_system_components(origin_id, target_port[0])
+                if origin_direction.startswith("out"):
+                    self._connect_system_components(
+                        origin_id, target_port[0], target_port[1], origin_direction
+                    )
                 else:
-                    self._connect_system_components(target_port[0], origin_id)
+                    self._connect_system_components(
+                        target_port[0], origin_id, origin_direction, target_port[1]
+                    )
                 return
         self.system_builder_drag_offset = (0.0, 0.0)
         self.system_builder_resize_state = None
@@ -2149,7 +3536,7 @@ class RainwaterTkApp(tk.Tk):
         if self.system_builder_hover_port is None:
             return
         component_id, direction = self.system_builder_hover_port
-        base_fill = "#1565c0" if direction == "in" else "#c62828"
+        base_fill = "#1565c0" if direction.startswith("in") else "#c62828"
         for canvas_item in self.system_builder_canvas.find_withtag(
             f"port:{component_id}:{direction}"
         ):
@@ -2160,7 +3547,7 @@ class RainwaterTkApp(tk.Tk):
         self, x: float, y: float, origin_id: str, origin_direction: str
     ) -> None:
         self._clear_system_port_drag_hover()
-        expected_direction = "in" if origin_direction == "out" else "out"
+        expected_direction = "in" if origin_direction.startswith("out") else "out"
         overlapping = self.system_builder_canvas.find_overlapping(x - 2, y - 2, x + 2, y + 2)
         for canvas_item in reversed(overlapping):
             port_tag = next(
@@ -2170,9 +3557,11 @@ class RainwaterTkApp(tk.Tk):
             if not port_tag:
                 continue
             _prefix, component_id, direction = port_tag.split(":", 2)
-            if direction != expected_direction or component_id == origin_id:
+            if ((expected_direction == "in" and not direction.startswith("in"))
+                    or (expected_direction == "out" and not direction.startswith("out"))
+                    or component_id == origin_id):
                 continue
-            hover_fill = "#90caf9" if direction == "in" else "#ef9a9a"
+            hover_fill = "#90caf9" if direction.startswith("in") else "#ef9a9a"
             self.system_builder_canvas.itemconfigure(canvas_item, fill=hover_fill)
             self.system_builder_hover_port = (component_id, direction)
             break
@@ -2185,7 +3574,8 @@ class RainwaterTkApp(tk.Tk):
         item = self._system_layout_item(str(component_id))
         if item is None:
             return
-        dx, dy = float(event.x) - float(press_x), float(event.y) - float(press_y)
+        model_x, model_y = self._system_model_point(event.x, event.y)
+        dx, dy = model_x - float(press_x), model_y - float(press_y)
         left = float(original_x) - float(original_width) / 2.0
         right = float(original_x) + float(original_width) / 2.0
         top = float(original_y) - float(original_height) / 2.0
@@ -2219,9 +3609,29 @@ class RainwaterTkApp(tk.Tk):
         connections: list[dict[str, str]], component_id: str, direction: str | None
     ) -> list[dict[str, str]]:
         if direction == "in":
-            return [item for item in connections if item.get("target_component") != component_id]
+            return [
+                item for item in connections
+                if item.get("target_component") != component_id
+                or item.get("target_port", "in") != "in"
+            ]
+        if direction == "in2":
+            return [
+                item for item in connections
+                if item.get("target_component") != component_id
+                or item.get("target_port", "in") != "in2"
+            ]
         if direction == "out":
-            return [item for item in connections if item.get("source_component") != component_id]
+            return [
+                item for item in connections
+                if item.get("source_component") != component_id
+                or item.get("source_port", "out") != "out"
+            ]
+        if direction == "out2":
+            return [
+                item for item in connections
+                if item.get("source_component") != component_id
+                or item.get("source_port", "out") != "out2"
+            ]
         return [
             item for item in connections
             if item.get("source_component") != component_id
@@ -2232,11 +3642,13 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_id = component_id
         self.system_builder_selected_connection = None
         self.system_builder_port_drag = None
-        if direction == "out":
+        if direction.startswith("out"):
             self.system_builder_pending_source = component_id
+            self.system_builder_pending_source_port = direction
             self.system_builder_pending_target = None
         else:
             self.system_builder_pending_target = component_id
+            self.system_builder_pending_target_port = direction
             self.system_builder_pending_source = None
         self._render_system_builder()
 
@@ -2251,7 +3663,10 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_pending_target = None
         self.system_builder_port_drag = None
         self._clear_system_port_drag_hover()
-        node_label = {"in": "input node", "out": "output node", None: "object"}[direction]
+        node_label = {
+            "in": "input node", "in2": "second input node",
+            "out": "output node", "out2": "second output node", None: "object",
+        }[direction]
         self.status_var.set(f"Disconnected {removed} connection(s) from the {node_label}")
         self._render_system_builder()
 
@@ -2272,9 +3687,13 @@ class RainwaterTkApp(tk.Tk):
         if port is None:
             return None
         component_id, direction = port
-        node_key = "source_component" if direction == "out" else "target_component"
+        node_key = "source_component" if direction.startswith("out") else "target_component"
         node_connections = sum(
             connection.get(node_key) == component_id
+            and (
+                (direction.startswith("out") and connection.get("source_port", "out") == direction)
+                or (direction.startswith("in") and connection.get("target_port", "in") == direction)
+            )
             for connection in self.config_model.system_connections
         )
         object_connections = sum(
@@ -2525,9 +3944,14 @@ class RainwaterTkApp(tk.Tk):
         target_height: float = 60.0,
     ) -> tuple[float, ...]:
         """Route a connection to the target's left port without crossing either object."""
-        start_x = source_x + source_width / 2.0 + 6.0
-        end_x = target_x - target_width / 2.0 - 6.0
-        if end_x >= start_x + 24.0:
+        # Use the centers of the visible port circles. Keeping the former extra
+        # six-pixel extension made normally adjacent ports geometrically cross,
+        # which incorrectly selected the backward/U-shaped route.
+        start_x = source_x + source_width / 2.0 + 3.0
+        end_x = target_x - target_width / 2.0 - 3.0
+        if target_x > source_x:
+            if abs(target_y - source_y) < 0.001:
+                return (start_x, source_y, end_x, target_y)
             midpoint = (start_x + end_x) / 2.0
             return (start_x, source_y, midpoint, source_y, midpoint, target_y, end_x, target_y)
 
@@ -2577,6 +4001,10 @@ class RainwaterTkApp(tk.Tk):
                 continue
             source_x, source_y = float(source.get("x", 0.0)), float(source.get("y", 0.0))
             target_x, target_y = float(target.get("x", 0.0)), float(target.get("y", 0.0))
+            if source.get("component_type") == "primary_tank" and source.get("extra_output_node"):
+                source_y += 14.0 if connection.get("source_port") == "out2" else -14.0
+            if target.get("component_type") == "booster_tank" and target.get("extra_input_node"):
+                target_y += 14.0 if connection.get("target_port") == "in2" else -14.0
             selected = connection is self.system_builder_selected_connection
             canvas.create_line(
                 *self._system_connection_points(
@@ -2584,7 +4012,7 @@ class RainwaterTkApp(tk.Tk):
                     source_y,
                     target_x,
                     target_y,
-                    canvas.winfo_height(),
+                    self._system_canvas_dimensions()[1],
                     float(source.get("width", 124.0)),
                     float(target.get("width", 124.0)),
                     float(source.get("height", 60.0)),
@@ -2631,23 +4059,145 @@ class RainwaterTkApp(tk.Tk):
             )
             has_inlet, has_outlet = self._system_component_ports(component_type)
             if has_inlet:
-                pending = component_id == self.system_builder_pending_target
+                extra_inlet = component_type == "booster_tank" and bool(item.get("extra_input_node"))
+                inlet_y = y - 14.0 if extra_inlet else y
+                pending = (
+                    component_id == self.system_builder_pending_target
+                    and self.system_builder_pending_target_port == "in"
+                )
                 canvas.create_oval(
-                    x - half_width - 10, y - 7, x - half_width + 4, y + 7,
+                    x - half_width - 10, inlet_y - 7, x - half_width + 4, inlet_y + 7,
                     fill="#90caf9" if pending else "#1565c0",
                     outline="#0d47a1", width=3 if pending else 2,
                     tags=(f"port:{component_id}:in",),
                 )
+                if component_type == "booster_tank":
+                    second_y = y + 14.0
+                    if extra_inlet:
+                        second_pending = (
+                            component_id == self.system_builder_pending_target
+                            and self.system_builder_pending_target_port == "in2"
+                        )
+                        canvas.create_oval(
+                            x - half_width - 10, second_y - 7,
+                            x - half_width + 4, second_y + 7,
+                            fill="#90caf9" if second_pending else "#1565c0",
+                            outline="#0d47a1", width=3 if second_pending else 2,
+                            tags=(f"port:{component_id}:in2",),
+                        )
+                        second_inlet_linked = any(
+                            connection.get("target_component") == component_id
+                            and connection.get("target_port", "in") == "in2"
+                            for connection in self.config_model.system_connections
+                        )
+                        if not second_inlet_linked:
+                            remove_tag = f"remove-inlet:{component_id}"
+                            canvas.create_text(
+                                x - half_width - 19, second_y, text="−",
+                                fill="#c62828", font=("Segoe UI", 12, "bold"),
+                                tags=(remove_tag,),
+                            )
+                    else:
+                        affordance_tag = f"add-inlet:{component_id}"
+                        canvas.create_oval(
+                            x - half_width - 10, second_y - 7,
+                            x - half_width + 4, second_y + 7,
+                            fill="#dceaf5", outline="#6f9fbe", width=2,
+                            dash=(3, 2), tags=(affordance_tag,),
+                        )
+                        canvas.create_text(
+                            x - half_width - 19, second_y, text="+",
+                            fill="#6f9fbe", font=("Segoe UI", 11, "bold"),
+                            tags=(affordance_tag,),
+                        )
             if has_outlet:
-                pending = component_id == self.system_builder_pending_source
+                extra_outlet = component_type == "primary_tank" and bool(item.get("extra_output_node"))
+                outlet_y = y - 14.0 if extra_outlet else y
+                pending = (
+                    component_id == self.system_builder_pending_source
+                    and self.system_builder_pending_source_port == "out"
+                )
                 canvas.create_oval(
-                    x + half_width - 4, y - 7, x + half_width + 10, y + 7,
+                    x + half_width - 4, outlet_y - 7, x + half_width + 10, outlet_y + 7,
                     fill="#ef9a9a" if pending else "#c62828",
                     outline="#8e0000",
                     width=3 if pending else 2,
                     tags=(f"port:{component_id}:out",),
                 )
+                if component_type == "primary_tank":
+                    second_y = y + 14.0
+                    if extra_outlet:
+                        second_pending = (
+                            component_id == self.system_builder_pending_source
+                            and self.system_builder_pending_source_port == "out2"
+                        )
+                        canvas.create_oval(
+                            x + half_width - 4, second_y - 7,
+                            x + half_width + 10, second_y + 7,
+                            fill="#ef9a9a" if second_pending else "#c62828",
+                            outline="#8e0000", width=3 if second_pending else 2,
+                            tags=(f"port:{component_id}:out2",),
+                        )
+                        second_outlet_linked = any(
+                            connection.get("source_component") == component_id
+                            and connection.get("source_port", "out") == "out2"
+                            for connection in self.config_model.system_connections
+                        )
+                        if not second_outlet_linked:
+                            remove_tag = f"remove-outlet:{component_id}"
+                            canvas.create_text(
+                                x + half_width + 19, second_y, text="-",
+                                fill="#c62828", font=("Segoe UI", 12, "bold"),
+                                tags=(remove_tag,),
+                            )
+                    else:
+                        affordance_tag = f"add-outlet:{component_id}"
+                        canvas.create_oval(
+                            x + half_width - 4, second_y - 7,
+                            x + half_width + 10, second_y + 7,
+                            fill="#f5dede", outline="#b86f6f", width=2,
+                            dash=(3, 2), tags=(affordance_tag,),
+                        )
+                        canvas.create_text(
+                            x + half_width + 19, second_y, text="+",
+                            fill="#b86f6f", font=("Segoe UI", 11, "bold"),
+                            tags=(affordance_tag,),
+                        )
+        if self.system_builder_zoom != 1.0:
+            canvas.scale("all", 0.0, 0.0, self.system_builder_zoom, self.system_builder_zoom)
+        if self.system_builder_pan_x or self.system_builder_pan_y:
+            canvas.move(
+                "all",
+                self.system_builder_pan_x * self.system_builder_zoom,
+                self.system_builder_pan_y * self.system_builder_zoom,
+            )
         self._refresh_system_component_editor()
+        self._refresh_system_builder_warnings()
+
+    def _refresh_system_builder_warnings(self) -> list[str]:
+        warnings = validate_builder_system(
+            self.config_model.system_layout,
+            self.config_model.system_connections,
+            municipal_backup_enabled=self.config_model.system_parameters.municipal_backup_enabled,
+        )
+        if hasattr(self, "system_builder_warning_var"):
+            if warnings:
+                visible = warnings[:4]
+                suffix = f"\n...and {len(warnings) - 4} more warning(s)." if len(warnings) > 4 else ""
+                self.system_builder_warning_var.set(
+                    "System warnings:\n" + "\n".join(f"- {warning}" for warning in visible) + suffix
+                )
+            else:
+                self.system_builder_warning_var.set("System configuration is ready for simulation.")
+            if hasattr(self, "system_builder_scroll_canvas"):
+                self.after_idle(self._update_system_builder_scroll_region)
+        return warnings
+
+    def _system_builder_backup_setting_changed(self) -> None:
+        self.config_model.system_parameters.municipal_backup_enabled = bool(
+            self.municipal_backup_enabled_var.get()
+        )
+        self._refresh_system_builder_warnings()
 
     def _show_indirect_system_schematic(self) -> None:
         dialog = tk.Toplevel(self)
@@ -4500,6 +6050,11 @@ class RainwaterTkApp(tk.Tk):
             self.saved_project_var.set(projects[0])
 
     def _populate_from_model(self) -> None:
+        if hasattr(self, "system_animation_results"):
+            self._stop_system_animation()
+            self.system_animation_results = pd.DataFrame()
+            self.system_animation_hour_var.set("Run a one-day simulation to begin.")
+            self._draw_system_animation()
         cfg = self.config_model
         self.project_name_var.set(cfg.name)
         self.author_name_var.set(cfg.author_name)
@@ -4587,6 +6142,7 @@ class RainwaterTkApp(tk.Tk):
         self._populate_comparison_tanks()
         self._update_multitank_comparison_state()
         self._update_rainfall_summary()
+        self._refresh_system_animation_dates()
         self._refresh_optimization_assumptions()
 
     def _update_setting_unit_labels(self) -> None:
@@ -4777,11 +6333,13 @@ class RainwaterTkApp(tk.Tk):
     def _update_rainfall_summary(self) -> None:
         if self.rainfall_df.empty:
             self.rainfall_summary_var.set("No rainfall file loaded")
+            self._refresh_system_animation_dates()
             return
         start = pd.Timestamp(self.rainfall_df["Date"].min()).strftime("%Y-%m-%d")
         end = pd.Timestamp(self.rainfall_df["Date"].max()).strftime("%Y-%m-%d")
         source = f" from {self.rainfall_source_label}" if self.rainfall_source_label else ""
         self.rainfall_summary_var.set(f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}")
+        self._refresh_system_animation_dates()
 
     def _change_units(self) -> None:
         new_unit = self.unit_var.get()
@@ -5265,6 +6823,7 @@ class RainwaterTkApp(tk.Tk):
             self._set_progress(50, "Opening project: loading project data", "OpenProject.Horizontal.TProgressbar")
             self.project_file_path = selected_path
             self.store = selected_store
+            self._refresh_system_template_library()
             self.saved_project_var.set(projects[0])
             self._load_project_list()
             self.load_selected_project()
@@ -5275,6 +6834,7 @@ class RainwaterTkApp(tk.Tk):
             self.project_file_path = previous_path
             self.store = previous_store
             self._load_project_list()
+            self._refresh_system_template_library()
             self.analysis_progress_var.set(0)
             messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
 
@@ -5307,6 +6867,7 @@ class RainwaterTkApp(tk.Tk):
             return
         self.project_file_path = Path(path)
         self.store = SQLiteStore(str(self.project_file_path))
+        self._refresh_system_template_library()
         self.config_model.name = name
         self.project_name_var.set(name)
         self._save_current_project()
@@ -5374,6 +6935,8 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = rainfall
             self.rainfall_source_label = None
             self.config_model.rainfall_source_label = None
+            self.config_model.weather_station_latitude = None
+            self.config_model.weather_station_longitude = None
             self.curve_df = pd.DataFrame()
             self.results_df = pd.DataFrame()
             self.reliability_var.set("Reliability: --")
@@ -5602,6 +7165,14 @@ class RainwaterTkApp(tk.Tk):
                 f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
             )
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self.config_model.weather_station_latitude = None
+            self.config_model.weather_station_longitude = None
+            station_coordinates = self._station_coordinates(station)
+            if station_coordinates is not None:
+                (
+                    self.config_model.weather_station_latitude,
+                    self.config_model.weather_station_longitude,
+                ) = station_coordinates
             self.config_model.country_code = "USA"
             self.config_model.acis_precipitation_field = precipitation_field
             self.curve_df = pd.DataFrame()
@@ -5658,6 +7229,14 @@ class RainwaterTkApp(tk.Tk):
                 f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
             )
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self.config_model.weather_station_latitude = None
+            self.config_model.weather_station_longitude = None
+            station_coordinates = self._station_coordinates(station)
+            if station_coordinates is not None:
+                (
+                    self.config_model.weather_station_latitude,
+                    self.config_model.weather_station_longitude,
+                ) = station_coordinates
             self.config_model.country_code = "CAN"
             self.config_model.canadian_precipitation_field = precipitation_field
             self.curve_df = pd.DataFrame()
@@ -6345,6 +7924,17 @@ class RainwaterTkApp(tk.Tk):
             return
         self._apply_form_to_model()
         cfg = self.config_model
+        compiled_system = compile_builder_system(
+            cfg.system_type, cfg.system_layout, cfg.system_connections
+        )
+        warnings = self._refresh_system_builder_warnings()
+        if compiled_system.uses_builder_graph and warnings:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Correct the system builder configuration before running analysis:\n\n"
+                + "\n".join(f"- {warning}" for warning in warnings[:6]),
+            )
+            return
         if self.rainfall_df.empty:
             messagebox.showwarning(APP_TITLE, "Load rainfall data before running the analysis.")
             return
@@ -6733,6 +8323,10 @@ class RainwaterTkApp(tk.Tk):
             "include_multitank_charts": bool(metadata.get("include_multitank_charts", False)),
             "include_system_visualization": bool(metadata.get("include_system_visualization", False)),
             "system_type": cfg.system_type,
+            "project_latitude": cfg.latitude,
+            "project_longitude": cfg.longitude,
+            "weather_station_latitude": cfg.weather_station_latitude,
+            "weather_station_longitude": cfg.weather_station_longitude,
             "multitank_charts": self._multitank_report_chart_data(),
         }
 
@@ -7223,6 +8817,40 @@ coordinates {{{yearly_marker_coordinates}}};
         report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
         multitank_html = RainwaterTkApp._build_multitank_report_html(report)
         system_visualization_html = RainwaterTkApp._build_system_visualization_html(report)
+        station_latitude = report.get("weather_station_latitude")
+        station_longitude = report.get("weather_station_longitude")
+        project_latitude = report.get("project_latitude")
+        project_longitude = report.get("project_longitude")
+        project_location_map_html = ""
+        if station_latitude is not None and station_longitude is not None:
+            map_points = [
+                {
+                    "latitude": float(station_latitude),
+                    "longitude": float(station_longitude),
+                    "color": "#d71920",
+                    "label": "Weather station",
+                }
+            ]
+            if project_latitude is not None and project_longitude is not None:
+                map_points.append(
+                    {
+                        "latitude": float(project_latitude),
+                        "longitude": float(project_longitude),
+                        "color": "#1565c0",
+                        "label": "Project location",
+                    }
+                )
+            project_legend = (
+                '<span class="project-star">★</span> Project location '
+                if len(map_points) > 1 else ""
+            )
+            project_location_map_html = (
+                '<div id="project-location-map" class="location-map" '
+                f'data-points="{escape(json.dumps(map_points), quote=True)}" '
+                'aria-label="Project and weather-station location map"></div>'
+                f'<div class="map-legend">{project_legend}'
+                '<span class="station-star">★</span> Weather station</div>'
+            )
         multitank_toc_html = "".join(
             f'<li><a href="#multitank-chart-{index}">{escape(chart.get("title", f"Multitank chart {index}"))}</a></li>'
             for index, chart in enumerate(report.get("multitank_charts", []), start=1)
@@ -7410,6 +9038,8 @@ coordinates {{{yearly_marker_coordinates}}};
         )
         return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
 <style>
 :root {{ color-scheme: light; --ink:#17242b; --muted:#64747c; --line:#dce5e8; --green:#18795b; --blue:#176b9c; --paper:#fff; --wash:#f2f6f5; }}
@@ -7422,6 +9052,7 @@ h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:
 main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
 .fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
+.location-map {{ height:230px; margin-top:20px; border:1px solid var(--line); border-radius:6px; }} .map-star {{ width:24px!important; height:24px!important; margin:-12px 0 0 -12px!important; background:transparent; border:0; font-size:25px; line-height:24px; text-align:center; text-shadow:0 1px 2px #fff,0 0 2px #fff; }} .map-legend {{ margin-top:7px; color:var(--muted); font-size:12px; }} .map-legend span {{ margin-left:12px; font-size:17px; }} .map-legend span:first-child {{ margin-left:0; }} .project-star {{ color:#1565c0; }} .station-star {{ color:#d71920; }}
 .toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
@@ -7440,7 +9071,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
-<section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl></section>
+<section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th></tr></thead><tbody>{surface_rows}</tbody></table></section>
 <section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
@@ -7487,6 +9118,19 @@ if('IntersectionObserver' in window){{
   tocTargets.forEach((target)=>tocObserver.observe(target));
 }}
 const chartTooltip=document.getElementById('chart-tooltip');
+const locationMapElement=document.getElementById('project-location-map');
+if(locationMapElement&&window.L){{
+  const points=JSON.parse(locationMapElement.dataset.points);
+  const map=L.map(locationMapElement,{{scrollWheelZoom:false}});
+  L.tileLayer({json.dumps(OSM_TILE_URL)},{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);
+  const bounds=[];
+  points.forEach((point)=>{{
+    const icon=L.divIcon({{className:'map-star',html:'<span style="color:'+point.color+'">★</span>',iconSize:[24,24],iconAnchor:[12,12]}});
+    L.marker([point.latitude,point.longitude],{{icon}}).addTo(map).bindTooltip(point.label);
+    bounds.push([point.latitude,point.longitude]);
+  }});
+  if(bounds.length>1)map.fitBounds(bounds,{{padding:[35,35],maxZoom:13}});else map.setView(bounds[0],10);
+}}
 document.querySelectorAll('[data-tooltip]').forEach((element)=>{{
   element.addEventListener('mouseenter',()=>{{chartTooltip.textContent=element.dataset.tooltip;chartTooltip.style.display='block';}});
   element.addEventListener('mousemove',(event)=>{{

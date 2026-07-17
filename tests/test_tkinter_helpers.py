@@ -3,7 +3,7 @@ import pytest
 from pypdf import PdfReader
 
 from rainwater_app.defaults import default_project_config
-from rainwater_app.models import Surface
+from rainwater_app.models import DemandObject, Surface, WEEKDAY_KEYS
 from tkinter_app import (
     RainwaterTkApp,
     _demand_flow_from_gallons_per_minute,
@@ -469,18 +469,18 @@ def test_reverse_system_connection_routes_around_object_bodies() -> None:
 
     coordinate_pairs = list(zip(points[::2], points[1::2]))
     assert len(coordinate_pairs) == 6
-    assert coordinate_pairs[0] == (568.0, 180.0)
-    assert coordinate_pairs[-1] == (152.0, 180.0)
+    assert coordinate_pairs[0] == (565.0, 180.0)
+    assert coordinate_pairs[-1] == (155.0, 180.0)
     assert any(y < 150.0 for _x, y in coordinate_pairs)
-    assert coordinate_pairs[-2][0] < 158.0
+    assert coordinate_pairs[-2][0] < 155.0
 
 
 def test_forward_system_connection_uses_compact_orthogonal_route() -> None:
     points = RainwaterTkApp._system_connection_points(100.0, 100.0, 400.0, 220.0, 420.0)
 
     assert len(points) == 8
-    assert points[:2] == (168.0, 100.0)
-    assert points[-2:] == (332.0, 220.0)
+    assert points[:2] == (165.0, 100.0)
+    assert points[-2:] == (335.0, 220.0)
 
 
 def test_reverse_connection_uses_gap_when_source_is_above_target() -> None:
@@ -488,13 +488,28 @@ def test_reverse_connection_uses_gap_when_source_is_above_target() -> None:
     coordinate_pairs = list(zip(points[::2], points[1::2]))
 
     assert coordinate_pairs == [
-        (568.0, 100.0),
-        (592.0, 100.0),
-        (592.0, 180.0),
-        (128.0, 180.0),
-        (128.0, 260.0),
-        (152.0, 260.0),
+        (565.0, 100.0),
+        (589.0, 100.0),
+        (589.0, 180.0),
+        (131.0, 180.0),
+        (131.0, 260.0),
+        (155.0, 260.0),
     ]
+
+
+def test_close_forward_connection_never_uses_loop_route() -> None:
+    points = RainwaterTkApp._system_connection_points(
+        100.0, 100.0, 232.0, 125.0, 420.0
+    )
+    coordinate_pairs = list(zip(points[::2], points[1::2]))
+
+    assert len(coordinate_pairs) == 4
+    assert coordinate_pairs[0] == (165.0, 100.0)
+    assert coordinate_pairs[-1] == (167.0, 125.0)
+    assert all(
+        coordinate_pairs[index][0] <= coordinate_pairs[index + 1][0]
+        for index in range(len(coordinate_pairs) - 1)
+    )
 
 
 def test_system_block_collision_includes_visual_spacing() -> None:
@@ -519,3 +534,165 @@ def test_node_disconnect_only_removes_connections_for_selected_direction() -> No
         {"source_component": "d", "target_component": "b"},
     ]
     assert RainwaterTkApp._connections_after_node_disconnect(connections, "b", None) == []
+
+
+def test_booster_input_nodes_disconnect_independently() -> None:
+    connections = [
+        {"source_component": "rain", "target_component": "booster"},
+        {
+            "source_component": "mains", "target_component": "booster",
+            "target_port": "in2",
+        },
+    ]
+
+    assert RainwaterTkApp._connections_after_node_disconnect(
+        connections, "booster", "in"
+    ) == [connections[1]]
+    assert RainwaterTkApp._connections_after_node_disconnect(
+        connections, "booster", "in2"
+    ) == [connections[0]]
+
+
+def test_primary_output_nodes_disconnect_independently() -> None:
+    connections = [
+        {"source_component": "primary", "target_component": "pump"},
+        {
+            "source_component": "primary", "source_port": "out2",
+            "target_component": "first_flush",
+        },
+    ]
+
+    assert RainwaterTkApp._connections_after_node_disconnect(
+        connections, "primary", "out"
+    ) == [connections[1]]
+    assert RainwaterTkApp._connections_after_node_disconnect(
+        connections, "primary", "out2"
+    ) == [connections[0]]
+
+
+def test_first_flush_diversion_has_an_input_only() -> None:
+    assert RainwaterTkApp._system_component_ports("first_flush_diversion") == (True, False)
+
+
+def test_system_builder_zoom_moves_in_ten_percent_steps_with_three_step_limits() -> None:
+    zoom = 1.0
+    for _ in range(4):
+        zoom = RainwaterTkApp._bounded_system_builder_zoom(zoom, -0.1)
+    assert zoom == pytest.approx(0.7)
+
+    zoom = 1.0
+    for _ in range(4):
+        zoom = RainwaterTkApp._bounded_system_builder_zoom(zoom, 0.1)
+    assert zoom == pytest.approx(1.3)
+
+
+def test_system_builder_pan_is_limited_to_maximum_zoom_out_workspace() -> None:
+    assert RainwaterTkApp._bounded_system_builder_pan(
+        700.0, 420.0, 0.7, -100.0, -100.0
+    ) == pytest.approx((0.0, 0.0))
+
+    pan = RainwaterTkApp._bounded_system_builder_pan(
+        700.0, 420.0, 1.0, -1000.0, 100.0
+    )
+    assert pan == pytest.approx((-300.0, 0.0))
+
+
+def test_animation_flow_activity_uses_hourly_component_results() -> None:
+    row = pd.Series({
+        "CollectedGallons": 10.0,
+        "PumpFlowGallons": 5.0,
+        "FilterThroughputGallons": 4.0,
+        "MainsMakeupGallons": 2.0,
+        "DemandGallons": 3.0,
+        "SystemUnmetDemandGallons": 0.0,
+    })
+
+    assert RainwaterTkApp._system_animation_connection_active(
+        "rainwater_input", "primary_tank", row
+    )
+    assert RainwaterTkApp._system_animation_connection_active(
+        "filtration_pump", "filtration_system", row
+    )
+    assert RainwaterTkApp._system_animation_connection_active(
+        "municipal_backup", "booster_tank", row
+    )
+    assert RainwaterTkApp._system_animation_connection_active(
+        "booster_pump", "end_uses", row
+    )
+    assert not RainwaterTkApp._system_animation_connection_active(
+        "primary_tank", "first_flush_diversion", row
+    )
+
+
+def test_animation_weather_uses_collected_rainwater_for_current_hour() -> None:
+    assert RainwaterTkApp._system_animation_rain_active(
+        pd.Series({"CollectedGallons": 0.01})
+    )
+    assert not RainwaterTkApp._system_animation_rain_active(
+        pd.Series({"CollectedGallons": 0.0})
+    )
+
+
+def test_animation_seconds_per_hour_are_bounded() -> None:
+    assert RainwaterTkApp._bounded_system_animation_seconds(0.0) == pytest.approx(0.1)
+    assert RainwaterTkApp._bounded_system_animation_seconds(2.5) == pytest.approx(2.5)
+    assert RainwaterTkApp._bounded_system_animation_seconds(100.0) == pytest.approx(60.0)
+
+
+def test_single_hour_animation_can_advance_or_loop() -> None:
+    assert RainwaterTkApp._single_hour_animation_completion(
+        5, "Advance to next hour"
+    ) == (6, True)
+    assert RainwaterTkApp._single_hour_animation_completion(
+        5, "Loop current hour"
+    ) == (5, False)
+    assert RainwaterTkApp._single_hour_animation_completion(
+        23, "Advance to next hour"
+    ) == (23, True)
+
+
+def test_animation_uses_smooth_but_bounded_frame_count() -> None:
+    assert RainwaterTkApp._system_animation_frames_per_hour(1.0) == 25
+    assert RainwaterTkApp._system_animation_frames_per_hour(2.0) == 50
+
+
+def test_animation_can_select_the_next_available_day() -> None:
+    dates = ("2025-01-01", "2025-01-02", "2025-01-04")
+
+    assert RainwaterTkApp._next_system_animation_date(
+        dates, "2025-01-01"
+    ) == "2025-01-02"
+    assert RainwaterTkApp._next_system_animation_date(
+        dates, "2025-01-04"
+    ) is None
+    assert RainwaterTkApp._adjacent_system_animation_date(
+        dates, "2025-01-02", -1
+    ) == "2025-01-01"
+    assert RainwaterTkApp._adjacent_system_animation_date(
+        dates, "2025-01-01", -1
+    ) is None
+
+
+def test_irrigation_end_use_animation_follows_assignment_and_schedule() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.demand.demand_objects = [
+        DemandObject("Garden", "Irrigation system", 2.0, "Morning")
+    ]
+    app.config_model.demand.hourly_schedule_library["Morning"] = {
+        day: [1.0] + [0.0] * 23 for day in WEEKDAY_KEYS
+    }
+    end_use = {"demand_object_indices": [0]}
+
+    assert app._system_animation_irrigation_active(
+        end_use, pd.Timestamp("2025-01-01 00:00")
+    )
+    assert not app._system_animation_irrigation_active(
+        end_use, pd.Timestamp("2025-01-01 01:00")
+    )
+
+
+def test_animation_drag_converts_screen_distance_to_model_distance() -> None:
+    assert RainwaterTkApp._system_animation_drag_delta(
+        100.0, -50.0, 2.0
+    ) == pytest.approx((50.0, -25.0))

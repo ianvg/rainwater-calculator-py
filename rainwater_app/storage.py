@@ -54,6 +54,16 @@ class SQLiteStore:
                 )
                 """
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS system_templates (
+                    name TEXT PRIMARY KEY COLLATE NOCASE,
+                    template_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
             columns = {row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()}
             if "curve_json" not in columns:
                 conn.execute("ALTER TABLE projects ADD COLUMN curve_json TEXT")
@@ -69,6 +79,76 @@ class SQLiteStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT name FROM projects ORDER BY updated_at DESC, name ASC").fetchall()
         return [r["name"] for r in rows]
+
+    def list_system_templates(self) -> list[str]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name FROM system_templates ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        return [str(row["name"]) for row in rows]
+
+    def save_system_template(
+        self, name: str, template: dict[str, Any], *, replace: bool = False
+    ) -> None:
+        clean_name = name.strip()
+        if not clean_name:
+            raise ValueError("Template name cannot be blank.")
+        with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT name FROM system_templates WHERE name = ? COLLATE NOCASE", (clean_name,)
+            ).fetchone()
+            if existing is not None and not replace:
+                raise ValueError(f"A system template named '{clean_name}' already exists.")
+            if existing is None:
+                conn.execute(
+                    "INSERT INTO system_templates (name, template_json) VALUES (?, ?)",
+                    (clean_name, json.dumps(template)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE system_templates SET name = ?, template_json = ?, "
+                    "updated_at = CURRENT_TIMESTAMP WHERE name = ? COLLATE NOCASE",
+                    (clean_name, json.dumps(template), str(existing["name"])),
+                )
+            conn.commit()
+
+    def load_system_template(self, name: str) -> dict[str, Any]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT template_json FROM system_templates WHERE name = ? COLLATE NOCASE", (name,)
+            ).fetchone()
+        if row is None:
+            raise ValueError(f"System template '{name}' not found.")
+        payload = json.loads(row["template_json"])
+        if not isinstance(payload, dict):
+            raise ValueError(f"System template '{name}' is invalid.")
+        return payload
+
+    def rename_system_template(self, old_name: str, new_name: str) -> None:
+        clean_name = new_name.strip()
+        if not clean_name:
+            raise ValueError("Template name cannot be blank.")
+        with self._connect() as conn:
+            collision = conn.execute(
+                "SELECT name FROM system_templates WHERE name = ? COLLATE NOCASE "
+                "AND name <> ? COLLATE NOCASE", (clean_name, old_name)
+            ).fetchone()
+            if collision is not None:
+                raise ValueError(f"A system template named '{clean_name}' already exists.")
+            cursor = conn.execute(
+                "UPDATE system_templates SET name = ?, updated_at = CURRENT_TIMESTAMP "
+                "WHERE name = ? COLLATE NOCASE", (clean_name, old_name)
+            )
+            if cursor.rowcount == 0:
+                raise ValueError(f"System template '{old_name}' not found.")
+            conn.commit()
+
+    def delete_system_template(self, name: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "DELETE FROM system_templates WHERE name = ? COLLATE NOCASE", (name,)
+            )
+            conn.commit()
 
     def save_project(
         self,

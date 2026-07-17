@@ -8,7 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .models import DemandProfile, MONTH_KEYS, ProjectConfig, TankParameters, WEEKDAY_KEYS
-from .system_model import build_system_template
+from .system_model import compile_builder_system
 
 GAL_PER_CUBIC_FOOT = 7.48052
 
@@ -279,7 +279,12 @@ def simulate_tank(
 
     params = tank_parameters or config.tank_parameters
     data = _validate_rainfall(rainfall_df)
+    system = compile_builder_system(
+        config.system_type, config.system_layout, config.system_connections
+    )
     collected = collected_water_series(config, data)
+    if not system.rain_reaches_primary:
+        collected = collected * 0.0
     demand = demand_series(config, data)
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
@@ -305,10 +310,33 @@ def simulate_tank(
         water = min(max(water, 0.0), tank_size_gallons)
         demand_today = max(float(demand.iloc[i]), 0.0)
         available_for_withdrawal = max(water - minimum_operating_volume, 0.0)
-        supplied_today = min(available_for_withdrawal, demand_today)
+        supplied_today = 0.0
+        withdrawn_today = 0.0
+        if system.primary_reaches_end_uses:
+            if system.filtration_path:
+                recovery = min(
+                    max(config.system_parameters.filter_recovery_percent / 100.0, 0.0), 1.0
+                )
+                requested_input = demand_today / recovery if recovery > 0.0 else 0.0
+                daily_capacity = max(
+                    config.system_parameters.filtration_pump_capacity_gallons_per_hour, 0.0
+                ) * 24.0
+                withdrawn_today = min(available_for_withdrawal, requested_input)
+                if daily_capacity > 0.0:
+                    withdrawn_today = min(withdrawn_today, daily_capacity)
+                supplied_today = min(withdrawn_today * recovery, demand_today)
+            else:
+                supplied_today = min(available_for_withdrawal, demand_today)
+                if system.distribution_pump_path:
+                    daily_capacity = max(
+                        config.system_parameters.pump_capacity_gallons_per_hour, 0.0
+                    ) * 24.0
+                    if daily_capacity > 0.0:
+                        supplied_today = min(supplied_today, daily_capacity)
+                withdrawn_today = supplied_today
         met_today = supplied_today >= demand_today
         unmet_today = max(demand_today - supplied_today, 0.0)
-        water = max(water - supplied_today, 0.0)
+        water = max(water - withdrawn_today, 0.0)
         water += float(collected.iloc[i])
         overflow_today = max(water - tank_size_gallons, 0.0)
         water = min(max(water, 0.0), tank_size_gallons)
@@ -350,15 +378,20 @@ def simulate_hourly_tank(
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
     data = _validate_rainfall(rainfall_df)
-    system = build_system_template(config.system_type)
-    indirect = system.system_type == "Indirect system"
+    system = compile_builder_system(
+        config.system_type, config.system_layout, config.system_connections
+    )
+    indirect = system.filtration_path or system.booster_storage_path
     component_params = config.system_parameters
     pump_capacity = max(float(component_params.pump_capacity_gallons_per_hour), 0.0)
     filtration_pump_capacity = max(
         float(component_params.filtration_pump_capacity_gallons_per_hour), 0.0
     )
     filter_recovery = min(max(float(component_params.filter_recovery_percent) / 100.0, 0.0), 1.0)
-    booster_capacity = max(float(component_params.booster_tank_size_gallons), 0.0) if indirect else 0.0
+    booster_capacity = (
+        max(float(component_params.booster_tank_size_gallons), 0.0)
+        if system.booster_storage_path else 0.0
+    )
     booster_fill = min(max(float(component_params.booster_initial_fill_percent) / 100.0, 0.0), 1.0)
     booster_water = booster_capacity * booster_fill
     booster_rainwater = booster_water
@@ -369,6 +402,8 @@ def simulate_hourly_tank(
     booster_refill_target = booster_capacity * booster_refill_level
     refill_active = booster_capacity > 0.0 and booster_water < booster_refill_target
     collected = collected_water_series(config, data)
+    if not system.rain_reaches_primary:
+        collected = collected * 0.0
     base_daily_demand = pd.Series(
         [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
         index=data.index,
@@ -416,7 +451,8 @@ def simulate_hourly_tank(
             filter_loss = 0.0
             mains_makeup = 0.0
             mains_supplied = 0.0
-            if indirect:
+            rainwater_supplied = 0.0
+            if indirect and system.primary_reaches_end_uses:
                 if booster_capacity > 0.0:
                     if refill_active:
                         booster_space = max(booster_capacity - booster_water, 0.0)
@@ -436,7 +472,7 @@ def simulate_hourly_tank(
                         filter_throughput = pump_flow * filter_recovery
                         filter_loss = pump_flow - filter_throughput
                         water = max(water - pump_flow, 0.0)
-                        if component_params.municipal_backup_enabled:
+                        if component_params.municipal_backup_enabled and system.municipal_reaches_booster:
                             mains_makeup = max(requested_delivery - filter_throughput, 0.0)
                         booster_rainwater += filter_throughput
                         booster_municipal_water += mains_makeup
@@ -465,17 +501,21 @@ def simulate_hourly_tank(
                     filter_loss = pump_flow - filter_throughput
                     water = max(water - pump_flow, 0.0)
                     rainwater_supplied = min(filter_throughput, demand_hour)
-            else:
+            elif system.primary_reaches_end_uses:
                 available_primary_water = max(water - minimum_operating_volume, 0.0)
                 rainwater_supplied = min(available_primary_water, demand_hour)
-                if pump_capacity > 0.0:
+                if system.distribution_pump_path and pump_capacity > 0.0:
                     rainwater_supplied = min(rainwater_supplied, pump_capacity)
                 pump_flow = rainwater_supplied
                 water = max(water - rainwater_supplied, 0.0)
             met = rainwater_supplied >= demand_hour
             unmet = max(demand_hour - rainwater_supplied, 0.0)
             if not (indirect and booster_capacity > 0.0):
-                mains_makeup = unmet if component_params.municipal_backup_enabled else 0.0
+                mains_makeup = (
+                    unmet
+                    if component_params.municipal_backup_enabled and system.municipal_reaches_end_uses
+                    else 0.0
+                )
                 mains_supplied = mains_makeup
                 system_unmet = max(unmet - mains_makeup, 0.0)
             else:
@@ -488,7 +528,7 @@ def simulate_hourly_tank(
             rows.append(
                 {
                     "Date": pd.Timestamp(date) + pd.Timedelta(hours=hour),
-                    "SystemType": system.system_type,
+                    "SystemType": system.display_type,
                     "CollectedGallons": collected_hour,
                     "DemandGallons": demand_hour,
                     "DemandMet": met,

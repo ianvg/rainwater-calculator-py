@@ -1,4 +1,6 @@
-from rainwater_app.system_model import Connection, build_system_template
+from rainwater_app.system_model import (
+    Connection, build_system_template, compile_builder_system, validate_builder_system,
+)
 
 
 def test_direct_system_template_is_valid() -> None:
@@ -25,3 +27,99 @@ def test_system_validation_rejects_invalid_flow_direction() -> None:
     system.connections.append(Connection("primary", "in", "end_uses", "in"))
 
     assert any("invalid flow direction" in error for error in system.validate())
+
+
+def test_builder_graph_compiles_indirect_hydraulic_capabilities() -> None:
+    component_types = [
+        "rainwater_input", "primary_tank", "filtration_pump", "filtration_system",
+        "booster_tank", "booster_pump", "end_uses", "municipal_backup",
+    ]
+    layout = [
+        {"id": f"c{index}", "component_type": component_type}
+        for index, component_type in enumerate(component_types)
+    ]
+    connections = [
+        {"source_component": "c0", "target_component": "c1"},
+        {"source_component": "c1", "target_component": "c2"},
+        {"source_component": "c2", "target_component": "c3"},
+        {"source_component": "c3", "target_component": "c4"},
+        {"source_component": "c4", "target_component": "c5"},
+        {"source_component": "c5", "target_component": "c6"},
+        {"source_component": "c7", "target_component": "c4"},
+    ]
+
+    compiled = compile_builder_system("Direct system", layout, connections)
+
+    assert compiled.uses_builder_graph
+    assert compiled.rain_reaches_primary
+    assert compiled.primary_reaches_end_uses
+    assert compiled.filtration_path
+    assert compiled.booster_storage_path
+    assert compiled.municipal_reaches_booster
+    assert compiled.display_type == "Custom indirect system"
+
+
+def test_builder_graph_does_not_invent_missing_connections() -> None:
+    compiled = compile_builder_system(
+        "Indirect system",
+        [
+            {"id": "rain", "component_type": "rainwater_input"},
+            {"id": "tank", "component_type": "primary_tank"},
+            {"id": "uses", "component_type": "end_uses"},
+        ],
+        [],
+    )
+
+    assert not compiled.rain_reaches_primary
+    assert not compiled.primary_reaches_end_uses
+
+
+def test_builder_graph_accepts_first_flush_diversion_sink() -> None:
+    compiled = compile_builder_system(
+        "Direct system",
+        [
+            {"id": "tank", "component_type": "primary_tank"},
+            {"id": "flush", "component_type": "first_flush_diversion"},
+        ],
+        [{
+            "source_component": "tank", "source_port": "out2",
+            "target_component": "flush",
+        }],
+    )
+
+    assert compiled.uses_builder_graph
+    assert not compiled.primary_reaches_end_uses
+
+
+def test_builder_validation_reports_missing_required_flow_paths() -> None:
+    warnings = validate_builder_system(
+        [
+            {"id": "rain", "component_type": "rainwater_input"},
+            {"id": "tank", "component_type": "primary_tank"},
+            {"id": "uses", "component_type": "end_uses"},
+        ],
+        [],
+    )
+
+    assert "Connect rainwater input to the primary tank." in warnings
+    assert "Connect the primary tank to end-uses through a valid supply path." in warnings
+
+
+def test_builder_validation_accepts_direct_template_layout() -> None:
+    layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "pump", "component_type": "booster_pump"},
+        {"id": "uses", "component_type": "end_uses"},
+        {"id": "mains", "component_type": "municipal_backup"},
+    ]
+    connections = [
+        {"source_component": "rain", "target_component": "tank"},
+        {"source_component": "tank", "target_component": "pump"},
+        {"source_component": "pump", "target_component": "uses"},
+        {"source_component": "mains", "target_component": "uses"},
+    ]
+
+    assert validate_builder_system(
+        layout, connections, municipal_backup_enabled=True
+    ) == []
