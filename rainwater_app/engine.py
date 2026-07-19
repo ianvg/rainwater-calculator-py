@@ -79,8 +79,12 @@ def _demand_object_daily_value_for_date(
         return 0.0
     mode = getattr(demand_object, "demand_mode", "scheduled_flow")
     if mode == "recurring_daily":
-        operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
-        if date.weekday() >= operating_days:
+        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
+        if operating_weekdays is None:
+            operating_weekdays = range(
+                min(max(int(demand_object.operating_days_per_week), 0), 7)
+            )
+        if date.weekday() not in operating_weekdays:
             return 0.0
         month_value = demand_object.monthly_daily_demand_gallons.get(
             _month_index_key(date), demand_object.recurring_daily_gallons
@@ -137,8 +141,12 @@ def _demand_object_hourly_for_date(
         return np.asarray(multipliers, dtype=np.float64) * flow * 60.0
     daily_volume = 0.0
     if mode == "recurring_daily":
-        operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
-        if date.weekday() < operating_days:
+        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
+        if operating_weekdays is None:
+            operating_weekdays = range(
+                min(max(int(demand_object.operating_days_per_week), 0), 7)
+            )
+        if date.weekday() in operating_weekdays:
             daily_volume = max(float(demand_object.monthly_daily_demand_gallons.get(
                 _month_index_key(date), demand_object.recurring_daily_gallons
             )), 0.0)

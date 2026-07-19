@@ -8,7 +8,7 @@ import pandas as pd
 
 from .models import ProjectConfig
 
-ANALYSIS_ALGORITHM_VERSION = 11
+ANALYSIS_ALGORITHM_VERSION = 12
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:

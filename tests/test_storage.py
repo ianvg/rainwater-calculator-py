@@ -206,6 +206,26 @@ def test_instantaneous_demand_object_flow_is_loaded() -> None:
     assert config.demand.demand_objects[0].instantaneous_demand_gallons_per_minute == 12.5
 
 
+def test_demand_object_operating_weekdays_are_loaded() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "Weekend demand",
+        "demand": {
+            "demand_objects": [{
+                "name": "Weekend irrigation",
+                "object_type": "Irrigation system",
+                "demand_mode": "recurring_daily",
+                "recurring_daily_gallons": 50.0,
+                "operating_days_per_week": 2,
+                "operating_weekdays": [5, 6],
+            }],
+        },
+    })
+
+    demand_object = config.demand.demand_objects[0]
+    assert demand_object.operating_weekdays == [5, 6]
+    assert demand_object.operating_days_per_week == 2
+
+
 def test_system_builder_layout_is_loaded() -> None:
     layout = [
         {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80},

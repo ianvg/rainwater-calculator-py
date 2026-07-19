@@ -57,10 +57,25 @@ class DemandObject:
     monthly_demand_gallons: Dict[str, float] = field(default_factory=dict)
     sewer_eligible: bool | None = None
     uses_legacy_sewer_eligibility: bool = False
+    operating_weekdays: List[int] | None = None
 
     def __post_init__(self) -> None:
         if self.sewer_eligible is None:
             self.sewer_eligible = default_sewer_eligible_for_object_type(self.object_type)
+        if self.operating_weekdays is None:
+            day_count = min(max(int(self.operating_days_per_week), 0), 7)
+            self.operating_weekdays = list(range(day_count))
+        else:
+            normalized_weekdays: set[int] = set()
+            for day in self.operating_weekdays:
+                try:
+                    value = int(day)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= value <= 6:
+                    normalized_weekdays.add(value)
+            self.operating_weekdays = sorted(normalized_weekdays)
+            self.operating_days_per_week = len(self.operating_weekdays)
 
 
 @dataclass

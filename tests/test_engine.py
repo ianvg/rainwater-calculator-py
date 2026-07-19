@@ -422,6 +422,23 @@ def test_migrated_demand_object_uses_legacy_sewer_percentage() -> None:
     assert result.loc[0, "SewerEligibleRainwaterSuppliedGallons"] == pytest.approx(35.0)
 
 
+def test_recurring_demand_uses_explicit_operating_weekdays() -> None:
+    cfg = default_project_config()
+    schedule_name = "Always on"
+    cfg.demand.hourly_schedule_library[schedule_name] = common_hourly_schedule_templates()[schedule_name]
+    cfg.demand.demand_objects = [DemandObject(
+        "Weekend demand", "Other", schedule_name=schedule_name,
+        demand_mode="recurring_daily", recurring_daily_gallons=25.0,
+        operating_weekdays=[5, 6],
+    )]
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-03", periods=4, freq="D"),
+        "Precipitation": [0.0] * 4,
+    })
+
+    assert demand_series(cfg, rainfall).tolist() == pytest.approx([0.0, 25.0, 25.0, 0.0])
+
+
 def test_minimum_operating_level_protects_primary_tank_storage() -> None:
     cfg = default_project_config()
     cfg.demand.simple_daily_demand_gallons = 100.0

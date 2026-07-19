@@ -379,6 +379,11 @@ def _validated_demand_object_library(payload: object) -> dict[str, DemandObject]
             demand_mode=str(raw_object.get("demand_mode", "scheduled_flow")),
             recurring_daily_gallons=max(_float(raw_object.get("recurring_daily_gallons")), 0.0),
             operating_days_per_week=min(max(int(_float(raw_object.get("operating_days_per_week"), 7)), 0), 7),
+            operating_weekdays=(
+                [int(day) for day in raw_object.get("operating_weekdays", [])]
+                if isinstance(raw_object.get("operating_weekdays"), list)
+                else None
+            ),
             monthly_daily_demand_gallons={
                 month: max(_float(dict(raw_object.get("monthly_daily_demand_gallons", {})).get(month)), 0.0)
                 for month in MONTH_KEYS
@@ -1297,6 +1302,12 @@ class RainwaterTkApp(tk.Tk):
             name: {
                 "object_type": demand_object.object_type,
                 "instantaneous_demand_gallons_per_minute": demand_object.instantaneous_demand_gallons_per_minute,
+                "demand_mode": demand_object.demand_mode,
+                "recurring_daily_gallons": demand_object.recurring_daily_gallons,
+                "operating_days_per_week": demand_object.operating_days_per_week,
+                "operating_weekdays": demand_object.operating_weekdays,
+                "monthly_daily_demand_gallons": demand_object.monthly_daily_demand_gallons,
+                "monthly_demand_gallons": demand_object.monthly_demand_gallons,
                 "sewer_eligible": demand_object.sewer_eligible,
             }
             for name, demand_object in self.custom_demand_object_templates.items()
@@ -11644,11 +11655,12 @@ class DemandObjectDialog(tk.Toplevel):
         "Recurring daily volume": "recurring_daily",
         "Monthly volume": "monthly_volume",
     }
+    DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
     def __init__(self, parent: RainwaterTkApp, config: ProjectConfig, demand_object: DemandObject) -> None:
         super().__init__(parent)
         self.title("Edit Demand Object")
-        self.resizable(False, False)
+        self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
         self.config_model = config
@@ -11666,7 +11678,11 @@ class DemandObjectDialog(tk.Toplevel):
             value=f"{_demand_flow_from_gallons_per_minute(demand_object.instantaneous_demand_gallons_per_minute, initial_flow_unit):.8g}"
         )
         schedule_names = list(config.demand.hourly_schedule_library)
-        selected_schedule = demand_object.schedule_name if demand_object.schedule_name in schedule_names else schedule_names[0]
+        selected_schedule = (
+            demand_object.schedule_name
+            if demand_object.schedule_name in schedule_names
+            else (schedule_names[0] if schedule_names else "")
+        )
         self.schedule_var = tk.StringVar(value=selected_schedule)
         mode_label = next(
             (label for label, value in self.MODE_LABELS.items() if value == demand_object.demand_mode),
@@ -11674,35 +11690,89 @@ class DemandObjectDialog(tk.Toplevel):
         )
         self.mode_var = tk.StringVar(value=mode_label)
         self.daily_volume_var = tk.StringVar(value=f"{volume_to_display(demand_object.recurring_daily_gallons, config):.8g}")
-        self.operating_days_var = tk.StringVar(value=str(demand_object.operating_days_per_week))
-        self.monthly_values = dict(
+        selected_weekdays = set(
+            demand_object.operating_weekdays
+            if demand_object.operating_weekdays is not None
+            else range(min(max(demand_object.operating_days_per_week, 0), 7))
+        )
+        self.weekday_vars = [tk.BooleanVar(value=index in selected_weekdays) for index in range(7)]
+        existing_monthly_values = dict(
             demand_object.monthly_daily_demand_gallons
             if demand_object.demand_mode == "recurring_daily"
             else demand_object.monthly_demand_gallons
         )
+        self.use_monthly_overrides_var = tk.BooleanVar(
+            value=bool(demand_object.monthly_daily_demand_gallons)
+        )
+        self.monthly_vars = {
+            month: tk.StringVar(
+                value=f"{volume_to_display(float(existing_monthly_values.get(month, 0.0)), config):.8g}"
+            )
+            for month in MONTH_KEYS
+        }
+        self.identity_error_var = tk.StringVar()
+        self.demand_error_var = tk.StringVar()
+        self.schedule_help_var = tk.StringVar()
+        self.summary_var = tk.StringVar()
 
-        body = ttk.Frame(self, padding=12)
+        body = ttk.Frame(self, padding=8)
         body.grid(sticky="nsew")
-        ttk.Label(body, text="Name").grid(row=0, column=0, sticky="w", pady=3)
-        self.name_entry = ttk.Entry(body, textvariable=self.name_var, width=34)
+        body.columnconfigure(0, weight=1)
+
+        identity = ttk.LabelFrame(body, text="Identity", padding=8)
+        identity.grid(row=0, column=0, sticky="ew")
+        identity.columnconfigure(1, weight=1)
+        ttk.Label(identity, text="Name").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
+        self.name_entry = ttk.Entry(identity, textvariable=self.name_var, width=42)
         self.name_entry.grid(row=0, column=1, sticky="ew", pady=3)
-        ttk.Label(body, text="Type").grid(row=1, column=0, sticky="w", pady=3)
+        ttk.Label(identity, text="Type").grid(row=1, column=0, sticky="w", pady=3, padx=(0, 8))
         type_combo = ttk.Combobox(
-            body,
+            identity,
             textvariable=self.type_var,
             values=self.OBJECT_TYPES,
             state="readonly",
-            width=31,
+            width=39,
         )
         type_combo.grid(row=1, column=1, sticky="ew", pady=3)
         type_combo.bind("<<ComboboxSelected>>", self._demand_type_changed)
-        ttk.Label(body, text="Instantaneous demand").grid(row=2, column=0, sticky="w", pady=3)
-        demand_row = ttk.Frame(body)
-        demand_row.grid(row=2, column=1, sticky="ew", pady=3)
-        demand_row.columnconfigure(0, weight=1)
-        ttk.Entry(demand_row, textvariable=self.instantaneous_demand_var).grid(row=0, column=0, sticky="ew")
+        ttk.Label(identity, text="Demand mode").grid(row=2, column=0, sticky="w", pady=3, padx=(0, 8))
+        mode_combo = ttk.Combobox(
+            identity, textvariable=self.mode_var, values=tuple(self.MODE_LABELS),
+            state="readonly", width=39,
+        )
+        mode_combo.grid(row=2, column=1, sticky="ew", pady=3)
+        mode_combo.bind("<<ComboboxSelected>>", self._mode_changed)
+        ttk.Label(identity, textvariable=self.identity_error_var, foreground="#c62828").grid(
+            row=3, column=1, sticky="w", pady=(2, 0)
+        )
+
+        demand = ttk.LabelFrame(body, text="Demand calculation", padding=8)
+        demand.grid(row=1, column=0, sticky="ew", pady=(6, 0))
+        demand.columnconfigure(1, weight=1)
+        ttk.Label(demand, text="Schedule").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
+        schedule_combo = ttk.Combobox(
+            demand, textvariable=self.schedule_var, values=schedule_names,
+            state="readonly" if schedule_names else "disabled", width=39,
+        )
+        schedule_combo.grid(row=0, column=1, sticky="ew", pady=3)
+        schedule_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_dialog_state())
+        ttk.Label(
+            demand, textvariable=self.schedule_help_var, foreground="#667278",
+            wraplength=560, justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 7))
+
+        self.scheduled_frame = ttk.Frame(demand)
+        self.scheduled_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.scheduled_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.scheduled_frame, text="Instantaneous demand").grid(
+            row=0, column=0, sticky="w", pady=3, padx=(0, 8)
+        )
+        flow_row = ttk.Frame(self.scheduled_frame)
+        flow_row.grid(row=0, column=1, sticky="ew", pady=3)
+        flow_row.columnconfigure(0, weight=1)
+        ttk.Entry(flow_row, textvariable=self.instantaneous_demand_var).grid(row=0, column=0, sticky="ew")
         demand_unit_combo = ttk.Combobox(
-            demand_row,
+            flow_row,
             textvariable=self.instantaneous_demand_unit_var,
             values=DEMAND_FLOW_UNITS,
             state="readonly",
@@ -11710,42 +11780,89 @@ class DemandObjectDialog(tk.Toplevel):
         )
         demand_unit_combo.grid(row=0, column=1, padx=(8, 0))
         demand_unit_combo.bind("<<ComboboxSelected>>", self._change_instantaneous_demand_unit)
-        ttk.Label(body, text="Schedule").grid(row=3, column=0, sticky="w", pady=3)
-        ttk.Combobox(
-            body,
-            textvariable=self.schedule_var,
-            values=schedule_names,
-            state="readonly",
-            width=31,
-        ).grid(row=3, column=1, sticky="ew", pady=3)
-        ttk.Label(body, text="Demand mode").grid(row=4, column=0, sticky="w", pady=3)
-        ttk.Combobox(
-            body, textvariable=self.mode_var, values=tuple(self.MODE_LABELS),
-            state="readonly", width=31,
-        ).grid(row=4, column=1, sticky="ew", pady=3)
-        ttk.Label(body, text=f"Recurring volume ({volume_unit(config)}/day)").grid(
-            row=5, column=0, sticky="w", pady=3
+
+        self.recurring_frame = ttk.Frame(demand)
+        self.recurring_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.recurring_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.recurring_frame, text=f"Recurring volume ({volume_unit(config)}/day)").grid(
+            row=0, column=0, sticky="w", pady=3, padx=(0, 8)
         )
-        ttk.Entry(body, textvariable=self.daily_volume_var).grid(row=5, column=1, sticky="ew", pady=3)
-        ttk.Label(body, text="Operating days/week").grid(row=6, column=0, sticky="w", pady=3)
-        ttk.Combobox(
-            body, textvariable=self.operating_days_var,
-            values=tuple(str(value) for value in range(8)), state="readonly", width=31,
-        ).grid(row=6, column=1, sticky="ew", pady=3)
+        ttk.Entry(self.recurring_frame, textvariable=self.daily_volume_var).grid(
+            row=0, column=1, sticky="ew", pady=3
+        )
+        ttk.Label(self.recurring_frame, text="Operating weekdays").grid(
+            row=1, column=0, sticky="nw", pady=3, padx=(0, 8)
+        )
+        weekdays = ttk.Frame(self.recurring_frame)
+        weekdays.grid(row=1, column=1, sticky="w", pady=3)
+        for index, label in enumerate(self.DAY_LABELS):
+            ttk.Checkbutton(
+                weekdays, text=label, variable=self.weekday_vars[index],
+                command=self._refresh_dialog_state,
+            ).grid(row=0, column=index, padx=(0 if index == 0 else 5, 0))
         ttk.Checkbutton(
-            body,
-            text="Eligible for sewer-charge savings",
-            variable=self.sewer_eligible_var,
-        ).grid(row=7, column=1, sticky="w", pady=3)
-        ttk.Button(
-            body, text="Edit January-December values...", command=self._edit_monthly_values
-        ).grid(row=8, column=1, sticky="w", pady=3)
+            self.recurring_frame, text="Use January-December daily-volume overrides",
+            variable=self.use_monthly_overrides_var, command=self._refresh_dialog_state,
+        ).grid(row=2, column=1, sticky="w", pady=(5, 3))
+
+        self.monthly_mode_frame = ttk.Frame(demand)
+        self.monthly_mode_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        ttk.Label(
+            self.monthly_mode_frame,
+            text="Enter the total demand volume for each month.",
+            foreground="#667278",
+        ).grid(row=0, column=0, sticky="w")
+
+        self.monthly_table_frame = ttk.LabelFrame(
+            demand, text=f"January-December values ({volume_unit(config)})", padding=8
+        )
+        self.monthly_table_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(7, 0))
+        for offset, month in enumerate(MONTH_KEYS):
+            group = 0 if offset < 6 else 1
+            row = offset if offset < 6 else offset - 6
+            column = group * 2
+            ttk.Label(self.monthly_table_frame, text=MONTH_LABELS[month]).grid(
+                row=row, column=column, sticky="w", padx=(0 if group == 0 else 18, 6), pady=2
+            )
+            ttk.Entry(
+                self.monthly_table_frame, textvariable=self.monthly_vars[month], width=13,
+            ).grid(row=row, column=column + 1, sticky="ew", pady=2)
+        ttk.Label(demand, textvariable=self.demand_error_var, foreground="#c62828").grid(
+            row=4, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
+        billing = ttk.LabelFrame(body, text="Billing", padding=8)
+        billing.grid(row=2, column=0, sticky="ew", pady=(6, 0))
+        ttk.Checkbutton(
+            billing, text="Eligible for sewer-charge savings",
+            variable=self.sewer_eligible_var, command=self._refresh_dialog_state,
+        ).grid(row=0, column=0, sticky="w")
+        self.billing_help_var = tk.StringVar()
+        ttk.Label(
+            billing, textvariable=self.billing_help_var, foreground="#667278",
+            wraplength=560, justify="left",
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        summary = ttk.LabelFrame(body, text="Calculated summary", padding=8)
+        summary.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        ttk.Label(summary, textvariable=self.summary_var, justify="left").grid(
+            row=0, column=0, sticky="w"
+        )
+
         buttons = ttk.Frame(body)
-        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=4, column=0, sticky="e", pady=(6, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=(0, 6))
-        ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
+        self.save_button = ttk.Button(buttons, text="Save", command=self._save)
+        self.save_button.grid(row=0, column=1)
         self.bind("<Escape>", lambda _event: self.destroy())
         self.bind("<Return>", lambda _event: self._save())
+        for variable in (
+            self.name_var, self.mode_var, self.schedule_var, self.instantaneous_demand_var,
+            self.daily_volume_var, self.sewer_eligible_var, self.use_monthly_overrides_var,
+            *self.monthly_vars.values(),
+        ):
+            variable.trace_add("write", lambda *_args: self._refresh_dialog_state())
+        self._refresh_dialog_state()
         self.after_idle(self._focus_dialog)
 
     def _focus_dialog(self) -> None:
@@ -11759,33 +11876,146 @@ class DemandObjectDialog(tk.Toplevel):
         self.name_entry.focus_set()
         self.name_entry.selection_range(0, tk.END)
 
-    def _edit_monthly_values(self) -> None:
-        values = [
-            volume_to_display(float(self.monthly_values.get(month, 0.0)), self.config_model)
-            for month in MONTH_KEYS
-        ]
-        entered = simpledialog.askstring(
-            APP_TITLE,
-            "Enter Jan-Dec volumes separated by commas:\n" + ", ".join(MONTH_LABELS[month] for month in MONTH_KEYS),
-            initialvalue=", ".join(f"{value:g}" for value in values),
-            parent=self,
-        )
-        if entered is None:
-            return
-        parts = [part.strip() for part in entered.split(",")]
-        if len(parts) != 12:
-            messagebox.showwarning(APP_TITLE, "Enter exactly 12 comma-separated values.", parent=self)
-            return
-        try:
-            converted = [volume_to_internal(max(float(part), 0.0), self.config_model) for part in parts]
-        except ValueError:
-            messagebox.showwarning(APP_TITLE, "Monthly values must be numeric.", parent=self)
-            return
-        self.monthly_values = dict(zip(MONTH_KEYS, converted))
-
     def _demand_type_changed(self, _event: tk.Event | None = None) -> None:
         self.sewer_eligible_var.set(
             default_sewer_eligible_for_object_type(self.type_var.get())
+        )
+        self._refresh_dialog_state()
+
+    def _mode_changed(self, _event: tk.Event | None = None) -> None:
+        self._refresh_dialog_state()
+
+    def _parsed_nonnegative(self, variable: tk.StringVar) -> float | None:
+        try:
+            value = float(variable.get())
+        except ValueError:
+            return None
+        return value if value >= 0.0 else None
+
+    def _monthly_display_values(self) -> dict[str, float] | None:
+        values: dict[str, float] = {}
+        for month, variable in self.monthly_vars.items():
+            value = self._parsed_nonnegative(variable)
+            if value is None:
+                return None
+            values[month] = value
+        return values
+
+    def _refresh_dialog_state(self) -> None:
+        mode = self.MODE_LABELS.get(self.mode_var.get(), "scheduled_flow")
+        for frame in (self.scheduled_frame, self.recurring_frame, self.monthly_mode_frame):
+            frame.grid_remove()
+        if mode == "scheduled_flow":
+            self.scheduled_frame.grid()
+            self.monthly_table_frame.grid_remove()
+            self.schedule_help_var.set(
+                "Schedule values multiply the instantaneous flow in each hour."
+            )
+        elif mode == "recurring_daily":
+            self.recurring_frame.grid()
+            if self.use_monthly_overrides_var.get():
+                self.monthly_table_frame.grid()
+            else:
+                self.monthly_table_frame.grid_remove()
+            self.monthly_table_frame.configure(
+                text=f"January-December daily-volume overrides ({volume_unit(self.config_model)}/day)"
+            )
+            self.schedule_help_var.set(
+                "The selected daily volume is distributed across the schedule's active hours on checked weekdays."
+            )
+        else:
+            self.monthly_mode_frame.grid()
+            self.monthly_table_frame.grid()
+            self.monthly_table_frame.configure(
+                text=f"January-December monthly volumes ({volume_unit(self.config_model)}/month)"
+            )
+            self.schedule_help_var.set(
+                "Each monthly total is divided across calendar days, then distributed across the schedule's active hours."
+            )
+
+        self.billing_help_var.set(
+            "This type normally avoids both water and sewer charges. Confirm the local utility tariff."
+            if self.sewer_eligible_var.get()
+            else "This type normally avoids water charges only. Irrigation defaults to sewer-exempt; confirm the local utility tariff."
+        )
+        identity_error = "" if self.name_var.get().strip() else "Enter a demand object name."
+        if not self.schedule_var.get() or self.schedule_var.get() not in self.config_model.demand.hourly_schedule_library:
+            demand_error = "Add or select a project schedule before saving."
+        elif mode == "scheduled_flow":
+            flow = self._parsed_nonnegative(self.instantaneous_demand_var)
+            demand_error = (
+                "Instantaneous demand must be a non-negative number."
+                if flow is None else ("Enter an instantaneous demand greater than zero." if flow == 0.0 else "")
+            )
+        elif mode == "recurring_daily":
+            daily = self._parsed_nonnegative(self.daily_volume_var)
+            monthly = self._monthly_display_values() if self.use_monthly_overrides_var.get() else {}
+            if daily is None or monthly is None:
+                demand_error = "Recurring and monthly override values must be non-negative numbers."
+            elif not any(variable.get() for variable in self.weekday_vars):
+                demand_error = "Select at least one operating weekday."
+            elif self.use_monthly_overrides_var.get() and not any(monthly.values()):
+                demand_error = "Enter at least one monthly daily-volume override greater than zero."
+            elif not self.use_monthly_overrides_var.get() and daily == 0.0:
+                demand_error = "Enter a recurring volume greater than zero."
+            else:
+                demand_error = ""
+        else:
+            monthly = self._monthly_display_values()
+            if monthly is None:
+                demand_error = "Monthly values must be non-negative numbers."
+            elif not any(monthly.values()):
+                demand_error = "Enter at least one monthly volume greater than zero."
+            else:
+                demand_error = ""
+        self.identity_error_var.set(identity_error)
+        self.demand_error_var.set(demand_error)
+        self.save_button.state(["disabled"] if identity_error or demand_error else ["!disabled"])
+        self._update_calculated_summary()
+
+    def _update_calculated_summary(self) -> None:
+        mode = self.MODE_LABELS.get(self.mode_var.get(), "scheduled_flow")
+        schedule = self.config_model.demand.hourly_schedule_library.get(self.schedule_var.get(), {})
+        typical_day = 0.0
+        typical_week = 0.0
+        january = 0.0
+        if mode == "scheduled_flow":
+            display_flow = self._parsed_nonnegative(self.instantaneous_demand_var) or 0.0
+            flow = _demand_flow_to_gallons_per_minute(
+                display_flow, self.instantaneous_demand_unit_var.get()
+            )
+            daily_values = [
+                flow * 60.0 * sum(float(value) for value in schedule.get(day, [])[:24])
+                for day in WEEKDAY_KEYS
+            ]
+            typical_day = sum(daily_values[:5]) / 5.0
+            typical_week = sum(daily_values)
+            january = typical_week * 31.0 / 7.0
+        elif mode == "recurring_daily":
+            daily = volume_to_internal(
+                self._parsed_nonnegative(self.daily_volume_var) or 0.0, self.config_model
+            )
+            selected_days = sum(variable.get() for variable in self.weekday_vars)
+            typical_day = daily
+            typical_week = daily * selected_days
+            monthly = self._monthly_display_values() or {}
+            january_daily = (
+                volume_to_internal(monthly.get("jan", 0.0), self.config_model)
+                if self.use_monthly_overrides_var.get() else daily
+            )
+            january = january_daily * selected_days * 31.0 / 7.0
+        else:
+            monthly = self._monthly_display_values() or {}
+            january = volume_to_internal(monthly.get("jan", 0.0), self.config_model)
+            typical_day = january / 31.0
+            typical_week = typical_day * 7.0
+        unit = volume_unit(self.config_model)
+        eligibility = "Yes" if self.sewer_eligible_var.get() else "No"
+        self.summary_var.set(
+            f"Typical weekday: {volume_to_display(typical_day, self.config_model):,.1f} {unit}    |    "
+            f"Typical week: {volume_to_display(typical_week, self.config_model):,.1f} {unit}\n"
+            f"January estimate: {volume_to_display(january, self.config_model):,.1f} {unit}    |    "
+            f"Sewer-charge eligible: {eligibility}"
         )
 
     def _change_instantaneous_demand_unit(self, _event: tk.Event | None = None) -> None:
@@ -11803,16 +12033,24 @@ class DemandObjectDialog(tk.Toplevel):
         converted = _demand_flow_from_gallons_per_minute(internal_flow, new_unit)
         self.instantaneous_demand_var.set(f"{converted:.8g}")
         self._instantaneous_demand_unit = new_unit
+        self._refresh_dialog_state()
 
     def _save(self) -> None:
+        self._refresh_dialog_state()
+        if "disabled" in self.save_button.state():
+            self.bell()
+            return
         name = self.name_var.get().strip()
-        if not name:
-            messagebox.showwarning(APP_TITLE, "Demand object name cannot be blank.", parent=self)
-            return
         schedule_name = self.schedule_var.get()
-        if schedule_name not in self.config_model.demand.hourly_schedule_library:
-            messagebox.showwarning(APP_TITLE, "Select a schedule that is in the current project.", parent=self)
-            return
+        mode = self.MODE_LABELS[self.mode_var.get()]
+        monthly_display = self._monthly_display_values() or {}
+        monthly_internal = {
+            month: volume_to_internal(value, self.config_model)
+            for month, value in monthly_display.items()
+        }
+        operating_weekdays = [
+            index for index, variable in enumerate(self.weekday_vars) if variable.get()
+        ]
         self.result = DemandObject(
             name=name,
             object_type=self.type_var.get() or "Other",
@@ -11821,18 +12059,18 @@ class DemandObjectDialog(tk.Toplevel):
                 self.instantaneous_demand_unit_var.get(),
             ),
             schedule_name=schedule_name,
-            demand_mode=self.MODE_LABELS[self.mode_var.get()],
+            demand_mode=mode,
             recurring_daily_gallons=volume_to_internal(
                 max(_float(self.daily_volume_var.get()), 0.0), self.config_model
             ),
-            operating_days_per_week=min(max(int(_float(self.operating_days_var.get(), 7)), 0), 7),
+            operating_days_per_week=len(operating_weekdays),
+            operating_weekdays=operating_weekdays,
             monthly_daily_demand_gallons=(
-                dict(self.monthly_values)
-                if self.MODE_LABELS[self.mode_var.get()] == "recurring_daily" else {}
+                monthly_internal
+                if mode == "recurring_daily" and self.use_monthly_overrides_var.get() else {}
             ),
             monthly_demand_gallons=(
-                dict(self.monthly_values)
-                if self.MODE_LABELS[self.mode_var.get()] == "monthly_volume" else {}
+                monthly_internal if mode == "monthly_volume" else {}
             ),
             sewer_eligible=bool(self.sewer_eligible_var.get()),
         )
