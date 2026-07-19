@@ -123,3 +123,25 @@ def test_builder_validation_accepts_direct_template_layout() -> None:
     assert validate_builder_system(
         layout, connections, municipal_backup_enabled=True
     ) == []
+
+
+def test_builder_validation_requires_a_valid_demand_assignment_for_each_end_use() -> None:
+    layout = [
+        {"id": "uses-1", "component_type": "end_uses", "name": "Building uses"},
+        {
+            "id": "uses-2", "component_type": "end_uses", "name": "Irrigation uses",
+            "demand_object_indices": [4, "invalid"],
+        },
+        {
+            "id": "uses-3", "component_type": "end_uses", "name": "Washdown uses",
+            "demand_object_indices": [1],
+        },
+    ]
+
+    warnings = validate_builder_system(
+        layout, [], demand_object_count=2
+    )
+
+    assert "Assign at least one demand object to Building uses." in warnings
+    assert "Assign at least one demand object to Irrigation uses." in warnings
+    assert "Assign at least one demand object to Washdown uses." not in warnings

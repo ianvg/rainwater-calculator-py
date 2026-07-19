@@ -16,7 +16,7 @@ The Yearly Demand Reliability plot appears immediately after the reliability cur
 
 The Tank Level Distribution plot follows the yearly reliability plot. It groups the selected-tank simulation into six tank-level ranges and reports the number of days in each range.
 
-The surface-area summary includes only collection surfaces whose configured area is greater than zero. Zero-area default and custom surfaces are omitted from PDF, HTML, and LaTeX report output.
+The surface-area summary includes only collection surfaces whose configured area is greater than zero. It reports each surface's runoff coefficient and first-flush depth, followed by the antecedent dry period, detected event count, and total diverted volume. Daily and hourly result exports retain gross runoff, first-flush loss, and net collection separately. Zero-area default and custom surfaces are omitted from PDF, HTML, and LaTeX report output.
 
 The tank summary appears below the surface-area summary and identifies the selected tank size using the project's current volume units. Additional tank properties, such as tank type, may be added in future versions.
 

@@ -18,6 +18,7 @@ from .models import (
     Surface,
     SystemComponentParameters,
     TankParameters,
+    migrate_legacy_demand_inputs,
 )
 
 
@@ -298,6 +299,16 @@ class SQLiteStore:
             }
         if demand.hourly_schedule_library and demand.active_hourly_schedule_name not in demand.hourly_schedule_library:
             demand.active_hourly_schedule_name = next(iter(demand.hourly_schedule_library))
+        migrated_indices = migrate_legacy_demand_inputs(demand)
+        system_layout = [
+            dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
+        ]
+        if migrated_indices:
+            for item in system_layout:
+                if item.get("component_type") != "end_uses":
+                    continue
+                assigned = list(item.get("demand_object_indices", []))
+                item["demand_object_indices"] = list(dict.fromkeys([*assigned, *migrated_indices]))
         tank_payload = payload.get("tank_parameters", {})
         tank_params = TankParameters(
             initial_fill_percent=float(tank_payload.get("initial_fill_percent", 50.0)),
@@ -328,9 +339,7 @@ class SQLiteStore:
                 if payload.get("system_type") in {"Direct system", "Indirect system"}
                 else "Direct system"
             ),
-            system_layout=[
-                dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
-            ],
+            system_layout=system_layout,
             system_connections=[
                 {str(key): str(value) for key, value in item.items()}
                 for item in payload.get("system_connections", [])
@@ -339,6 +348,9 @@ class SQLiteStore:
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,
+            first_flush_antecedent_dry_days=max(
+                float(payload.get("first_flush_antecedent_dry_days", 1.0)), 0.0
+            ),
             demand=demand,
             graph_start_gal=int(payload.get("graph_start_gal", 500)),
             graph_end_gal=int(payload.get("graph_end_gal", 20000)),
@@ -350,6 +362,8 @@ class SQLiteStore:
                 float(value) for value in payload.get("comparison_tank_sizes_gal", []) if float(value) > 0
             ],
             rainfall_source_label=payload.get("rainfall_source_label"),
+            weather_station_latitude=_optional_float(payload.get("weather_station_latitude")),
+            weather_station_longitude=_optional_float(payload.get("weather_station_longitude")),
             analysis_input_signature=payload.get("analysis_input_signature"),
             analysis_unit_system=payload.get("analysis_unit_system"),
             tank_parameters=tank_params,

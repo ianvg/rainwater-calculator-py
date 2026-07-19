@@ -4,13 +4,15 @@ Water demand describes how stored rainwater is consumed. Enter only end uses sup
 
 ## Demand settings
 
-Open **Demand parameters** to use the **Overall demand settings**, **Daily demand only settings**, and **Hourly demand only settings** subtabs. Overall settings contain the simple daily controls and detailed monthly end-use table. The daily-only and hourly-only tabs provide synchronized views of the project demand objects and reusable demand-object library, so a change made from either view updates the same project data. Available monthly categories include occupancy-related fixtures, indoor processes, irrigation, vehicle washing, and other uses.
+Open **Demand parameters** to manage the project's demand objects and reusable demand-object library in one object-centered workspace. Separate simple, daily-only, hourly-only, and monthly-input pages are no longer required.
 
 Unit labels appear beside input fields and in monthly-demand table headings. Confirm whether the project is using imperial or metric units before entering values.
 
 ## Demand objects
 
-The **Demand objects** section adds individually scheduled loads alongside simple daily and monthly demand. Each object has a name, descriptive type, daily design demand, and assigned schedule. Initial types include irrigation system, toilet, cooling tower, and other; the type does not alter the calculation yet.
+Each demand object has a name, descriptive type, schedule, and one of three calculation modes: scheduled instantaneous flow, recurring daily volume, or January-December monthly volumes. Built-in library templates cover simple recurring demand, toilets, urinals, ice making, cooling towers, ice skating, indoor processes, spray and drip irrigation, vehicle washing, and other outdoor uses.
+
+When an older project is opened, its simple recurring, occupancy-derived toilet/urinal, and monthly category inputs are converted once into equivalent demand objects. The legacy fields are then cleared, preserving calculated daily and hourly totals without double counting. Newly added objects are assigned automatically to every End-uses block; newly added End-uses blocks receive all existing project demand objects.
 
 Only schedules already present in the current project's Schedules list can be assigned. Copy a template or custom library schedule into the project before creating an object. Each demand object has an instantaneous on-flow that can be entered in **gpm**, **gal/hr**, **lpm**, or **liter/hr**. Switching the unit in the editor converts the current value without changing the physical flow. For every hour, demand equals the on-flow multiplied by the schedule value and the appropriate time conversion. Daily analysis sums those hourly volumes; hourly analysis applies each hourly volume directly. A project schedule cannot be deleted while a demand object references it, and renaming the schedule updates those references automatically.
 
@@ -32,11 +34,11 @@ This follows the general [OpenStudio ScheduleRuleset](https://openstudio-sdk-doc
 
 ## Rainwater system topology
 
-Hourly analysis uses validated component-and-connection templates derived from the applied system type. A direct system routes the primary tank through a distribution pump to the end uses. An indirect system routes it through a filtration pump, filter, booster tank, and unlimited-capacity booster pump. Both templates include collection, overflow discharge, end uses, and municipal backup paths.
+Hourly analysis uses validated component-and-connection templates derived from the applied system type. A direct system routes the primary tank through a distribution pump to the end uses. An indirect system routes it through a filtration pump, filter, buffer tank, and unlimited-capacity booster pump. Both templates include collection, overflow discharge, end uses, and municipal backup paths.
 
-For an indirect system, end-use demand draws from the booster tank. When the booster level falls below the configured **Booster refill level**, a refill cycle starts and remains active until the booster tank is full. The filtration pump transfers available primary-tank water at no more than its configured flow capacity; the default is 20 gal/min. Filter recovery is applied to this flow. If primary-tank water cannot meet the commanded refill flow and municipal backup is enabled, unlimited-capacity municipal water supplies the difference directly to the booster tank. The simulation tracks municipal and rainwater volumes separately so municipal makeup does not count as rainwater reliability. Rainfall enters the primary tank at the end of each simulated day.
+For an indirect system, end-use demand draws from the buffer tank. When the buffer level falls below the configured **Buffer refill level**, a refill cycle starts and remains active until the buffer tank is full. The filtration pump transfers available primary-tank water at no more than its configured flow capacity; the default is 20 gal/min. Filter recovery is applied to this flow. If primary-tank water cannot meet the commanded refill flow and municipal backup is enabled, unlimited-capacity municipal water supplies the difference directly to the buffer tank. The simulation tracks municipal and rainwater volumes separately so municipal makeup does not count as rainwater reliability. Rainfall enters the primary tank at the end of each simulated day.
 
-Hourly results include primary-tank and booster-tank levels, pump delivery, filter throughput and loss where applicable, municipal makeup, rainwater shortfall, system unmet demand, and overflow. Distribution-pump capacity, filtration-pump capacity, filtration recovery, booster storage, initial booster fill, refill level, and municipal backup availability are configured under **System parameters**. A zero pump capacity means unlimited flow; a zero booster size keeps the indirect path in pass-through mode without refill control.
+Hourly results include primary-tank and buffer-tank levels, pump delivery, filter throughput and loss where applicable, municipal makeup, rainwater shortfall, system unmet demand, and overflow. Distribution-pump capacity, filtration-pump capacity, filtration recovery, buffer storage, initial buffer fill, refill level, and municipal backup availability are configured under **System parameters**. A zero pump capacity means unlimited flow; a zero buffer size keeps the indirect path in pass-through mode without refill control.
 
 ## Monthly demand
 

@@ -63,6 +63,34 @@ def calculate_financial_results(
     maintenance_percent: float,
     analysis_period_years: int,
 ) -> FinancialResults:
+    supplied = average_annual_rainwater_supplied(results_df)
+    return calculate_financial_results_from_annual_supply(
+        supplied,
+        water_rate=water_rate,
+        sewer_rate=sewer_rate,
+        billing_unit=billing_unit,
+        sewer_eligible_percent=sewer_eligible_percent,
+        installed_cost=installed_cost,
+        incentives=incentives,
+        fixed_annual_maintenance=fixed_annual_maintenance,
+        maintenance_percent=maintenance_percent,
+        analysis_period_years=analysis_period_years,
+    )
+
+
+def calculate_financial_results_from_annual_supply(
+    average_annual_supplied_gallons: float,
+    *,
+    water_rate: float,
+    sewer_rate: float,
+    billing_unit: str,
+    sewer_eligible_percent: float,
+    installed_cost: float,
+    incentives: float,
+    fixed_annual_maintenance: float,
+    maintenance_percent: float,
+    analysis_period_years: int,
+) -> FinancialResults:
     monetary_inputs = (installed_cost, incentives, fixed_annual_maintenance)
     if any(value < 0 for value in monetary_inputs):
         raise ValueError("Costs and incentives cannot be negative.")
@@ -73,7 +101,9 @@ def calculate_financial_results(
     if analysis_period_years <= 0:
         raise ValueError("Analysis period must be greater than zero.")
 
-    supplied = average_annual_rainwater_supplied(results_df)
+    if average_annual_supplied_gallons < 0:
+        raise ValueError("Annual rainwater supply cannot be negative.")
+    supplied = float(average_annual_supplied_gallons)
     water_value = supplied * tariff_rate_per_gallon(water_rate, billing_unit)
     sewer_value = (
         supplied

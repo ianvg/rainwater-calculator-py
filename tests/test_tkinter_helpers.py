@@ -203,6 +203,10 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
         "include_multitank_charts": True,
         "include_system_visualization": True,
         "system_type": "Indirect system",
+        "project_latitude": 33.95,
+        "project_longitude": -83.33,
+        "weather_station_latitude": 33.94773,
+        "weather_station_longitude": -83.32736,
         "multitank_charts": [
             {
                 "title": "Yearly demand reliability - multitank",
@@ -284,6 +288,10 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "Filtration pump" in html
     assert "Booster pump" in html
     assert "Municipal water backup" in html
+    assert 'id="project-location-map"' in html
+    assert "Project location" in html
+    assert "Weather station" in html
+    assert "tile.openstreetmap.org" in html
     assert html.index('id="tank-summary"') < html.index('id="system-visualization"') < html.index('id="demand-summary"')
     assert "750 gal" in html
     assert "<h2>Demand summary</h2>" in html
@@ -696,3 +704,25 @@ def test_animation_drag_converts_screen_distance_to_model_distance() -> None:
     assert RainwaterTkApp._system_animation_drag_delta(
         100.0, -50.0, 2.0
     ) == pytest.approx((50.0, -25.0))
+
+
+def test_new_demand_object_is_assigned_to_every_end_uses_block() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.demand.demand_objects = [
+        DemandObject("Existing"), DemandObject("New demand")
+    ]
+    app.config_model.system_layout = [
+        {
+            "id": "uses-1", "component_type": "end_uses",
+            "demand_object_indices": [0],
+        },
+        {"id": "uses-2", "component_type": "end_uses"},
+        {"id": "tank", "component_type": "primary_tank"},
+    ]
+
+    app._assign_demand_object_to_end_uses(1)
+
+    assert app.config_model.system_layout[0]["demand_object_indices"] == [0, 1]
+    assert app.config_model.system_layout[1]["demand_object_indices"] == [1]
+    assert "demand_object_indices" not in app.config_model.system_layout[2]

@@ -27,7 +27,7 @@ Implementation requirements include:
 
 ## Payback-driven indirect-system optimization
 
-Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, filtration pump, and booster tank together. These variables interact: primary storage controls available rainwater, the filtration pump controls booster refill rate, and the booster tank buffers peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
+Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, filtration pump, and buffer tank together. These variables interact: primary storage controls available rainwater, the filtration pump controls buffer refill rate, and the buffer tank serves peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
 
 **Initial implementation:** Analysis settings now includes a deterministic exhaustive search using an editable, explicitly illustrative catalog with three initial choices for each component. Users can bulk-edit catalog names, capacities, installed costs, and pump power; choose simple payback, net annual savings, rainwater reliability, or analysis-period net benefit as the objective; and constrain minimum reliability, maximum annual municipal makeup, maximum installed cost, and positive net savings. The workflow reuses the hourly indirect-system and financial inputs, estimates filtration-pump energy, reports aggregate municipal makeup and overflow in backend results, and saves its inputs with the project. Replacing placeholder products with a maintained vendor catalog and adding the remaining constraints and performance improvements below remain roadmap work.
 
@@ -39,25 +39,25 @@ simple payback
     / (annual utility savings - annual maintenance - annual energy cost)
 ```
 
-Before optimization is enabled, add component cost curves for primary tanks, filtration pumps, and booster tanks; pump head and efficiency; electricity tariffs; component-specific maintenance; and replacement assumptions. Without size-dependent costs and energy, an optimizer would incorrectly favor oversized equipment whenever it produces even a small increase in rainwater delivery.
+Before optimization is enabled, add component cost curves for primary tanks, filtration pumps, and buffer tanks; pump head and efficiency; electricity tariffs; component-specific maintenance; and replacement assumptions. Without size-dependent costs and energy, an optimizer would incorrectly favor oversized equipment whenever it produces even a small increase in rainwater delivery.
 
 The optimizer should minimize payback subject to explicit engineering constraints, including:
 
 - Minimum rainwater reliability or annual rainwater supply.
 - Maximum municipal makeup.
 - Required peak end-use flow.
-- Maximum booster refill time.
+- Maximum buffer refill time.
 - Minimum primary-tank operating level.
 - Maximum equipment footprint or available tank volume.
 - Acceptable pump cycling and water residence time.
 - Positive net annual savings; otherwise payback is not achieved.
 
-A brute-force search can become expensive because candidate counts multiply. For example, 30 primary tank sizes, 15 filtration-pump sizes, and 15 booster-tank sizes require 6,750 full hourly simulations. Use a staged, coarse-to-fine workflow instead:
+A brute-force search can become expensive because candidate counts multiply. For example, 30 primary tank sizes, 15 filtration-pump sizes, and 15 buffer-tank sizes require 6,750 full hourly simulations. Use a staged, coarse-to-fine workflow instead:
 
 1. Run the daily model across primary-tank sizes and remove clearly uneconomic or hydraulically unsuitable capacities.
 2. Retain a small group near the reliability and savings knee.
 3. Derive feasible filtration-pump ranges from peak flow and refill-time requirements.
-4. Eliminate booster sizes that cannot satisfy peak-period demand.
+4. Eliminate buffer sizes that cannot satisfy peak-period demand.
 5. Run aggregate-only hourly simulations for the surviving combinations.
 6. Run detailed timestep simulations only for shortlisted designs.
 7. Refine the search around the best candidates and report nearby alternatives rather than only one winner.
@@ -79,17 +79,17 @@ Genetic results do not prove a global optimum. Save the random seed, population 
 
 ## First-flush diversion and event losses
 
-Add an explicit first-flush diversion model instead of requiring users to fold this loss into the runoff coefficient. First flush should be triggered by a new rainfall event, not subtracted independently from every wet calendar day.
+The initial explicit first-flush model is implemented using the rainfall-history criterion favored by Khan (2026). Each collection surface has a unit-aware diversion depth, and a project-wide antecedent dry period identifies new events. Remaining diversion capacity carries across wet timesteps in the same event. Daily and hourly results keep gross runoff, first-flush loss, and net collection separate.
 
 Implementation requirements include:
 
-- Add first-flush depth or volume to collection-surface parameters, with automatic Imperial and Metric conversion.
-- Define a rainfall event using a configurable antecedent dry period. Consecutive wet timesteps within the same event should share one first-flush allowance.
-- Track remaining diversion volume through the event and apply it before runoff enters storage.
-- Define behavior for multiple collection surfaces and permit either per-surface diverters or one shared downstream diverter.
-- Keep first-flush loss separate from runoff coefficient, surface wetting loss, filter loss, tank overflow, and conveyance loss in calculations and reports.
-- Report diverted volume by timestep, event, year, and full analysis period.
-- Add tests for rainfall below the diversion threshold, multi-timestep storms, storms spanning midnight, dry-period reset, zero diversion, and unit conversion.
+- [Implemented] Add first-flush depth to collection-surface parameters, with automatic Imperial and Metric conversion.
+- [Implemented] Define a rainfall event using a configurable antecedent dry period. Consecutive wet timesteps within the same event share one first-flush allowance.
+- [Implemented] Track remaining diversion volume through the event and apply it before runoff enters storage.
+- [Implemented per surface] Multiple surfaces have independent diverter allowances. A shared downstream diverter remains planned.
+- [Implemented] Keep first-flush loss separate from runoff coefficient, filter loss, tank overflow, and net collection in calculations and reports.
+- [Partially implemented] Report diverted volume by timestep and full analysis period, with event identifiers retained in results. Dedicated event and yearly summary tables remain planned.
+- [Implemented] Add tests for rainfall below the diversion threshold, multi-timestep storms, storms spanning midnight, dry-period reset, zero diversion, and persistence compatibility.
 
 ## Unusable tank volume and operating levels
 
@@ -100,23 +100,23 @@ Implementation requirements include:
 - [Implemented as percentage of capacity] Add a minimum operating level normalized internally to volume. Absolute-volume entry remains planned.
 - [Implemented] Prevent normal demand and pump withdrawals from reducing tank level below the minimum operating volume while still including that water in the displayed physical tank level.
 - Define whether emergency withdrawal, maintenance drain-down, and overflow calculations use total or usable capacity.
-- Apply the same concept consistently to primary and booster tanks where configured.
+- Apply the same concept consistently to primary and buffer tanks where configured.
 - Report total capacity, unusable volume, usable capacity, physical water level, usable water available, and unmet demand attributable to the operating limit.
 - Migrate existing projects with zero unusable volume so prior results remain unchanged.
 - Add boundary tests for empty, partially filled, exactly-at-minimum, full, and oversized minimum-volume configurations.
 
 ## Candidate tank performance comparison
 
-Expand the reliability curve dataset into an auditable performance table for every candidate tank size. In addition to reliability, each row should include total demand, rainwater supplied, unmet demand, municipal makeup, overflow, first-flush loss, other treatment losses, and final storage. Economic analysis should add annual savings and payback columns when its inputs are configured.
+The reliability curve now includes an auditable, sortable, and CSV-exportable performance row for every candidate tank size. In addition to reliability, each row includes total demand, rainwater supplied, unmet demand, municipal makeup, system unmet demand, overflow, first-flush loss, other treatment losses, and final storage. Economic analysis adds annual savings and payback columns when its inputs are configured.
 
 Implementation requirements include:
 
-- Extend the reliability-curve engine to aggregate the same mass-balance outputs used by the selected-tank simulation rather than running a separate simplified interpretation.
+- [Implemented] Extend the reliability-curve engine to aggregate the same mass-balance outputs used by the selected-tank simulation rather than running a separate simplified interpretation.
 - Preserve cancellation and progress reporting because additional candidate metrics increase calculation cost.
-- Add a sortable/exportable comparison table and allow users to promote a candidate to the primary tank without re-entering its size.
+- [Implemented] Add a sortable/exportable comparison table and allow users to promote a candidate to the primary tank without re-entering its size.
 - Add a recommendation aid that identifies diminishing reliability gains, but expose the threshold as a user-controlled assumption and avoid presenting it as a universally optimal tank size.
-- Include candidate metrics in saved analysis results and invalidate them when rainfall, demand, loss, operating-level, system, or economic inputs change.
-- Add reconciliation tests proving that each candidate row matches an independent simulation of the same tank size.
+- [Implemented] Include candidate hydraulic metrics in saved analysis results and invalidate them when rainfall, demand, loss, operating-level, or system inputs change. Economic columns are recalculated from the saved annual supply when financial inputs change.
+- [Implemented] Add reconciliation tests proving that each candidate row matches an independent simulation of the same tank size.
 
 ## Rainfall timing and data-resolution clarity
 

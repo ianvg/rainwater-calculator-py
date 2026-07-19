@@ -10,7 +10,9 @@ This page documents the formulas and calculation order used by the calculator's 
 | `f_init` | Initial-fill percentage divided by 100 | fraction |
 | `f_min` | Minimum operating level percentage divided by 100 | fraction |
 | `S[t-1]` | Physical water stored at the end of the previous day | gal |
-| `I[t]` | Rainwater collected on day `t` | gal/day |
+| `G[t]` | Gross runoff from collection surfaces on day `t` | gal/day |
+| `F[t]` | First-flush volume diverted on day `t` | gal/day |
+| `I[t]` | Net rainwater collected on day `t`, `G[t] - F[t]` | gal/day |
 | `D[t]` | Total rainwater demand on day `t` | gal/day |
 | `O[t]` | Tank overflow on day `t` | gal/day |
 | `Q[t]` | Rainwater supplied to demand on day `t` | gal/day |
@@ -33,19 +35,20 @@ surface collection[j,t]
   = area[j] x runoff coefficient[j] x precipitation[t] / 12 x 7.48052
 ```
 
-The factors `/ 12` and `7.48052` convert rainfall depth in inches to feet and cubic feet to gallons. Collection from all surfaces is summed:
+The factors `/ 12` and `7.48052` convert rainfall depth in inches to feet and cubic feet to gallons. Gross runoff from all surfaces is summed.
 
 ```text
-I[t] = sum(surface collection[j,t])
+G[t] = sum(surface runoff[j,t])
 ```
 
-Areas are constrained to zero or greater, and runoff coefficients are constrained from 0 through 1. Starting with the fifth valid imported record, if the preceding three imported days are dry, the engine reduces each effective collection area by 0.138% before calculating that record's collection:
+Areas are constrained to zero or greater, and runoff coefficients are constrained from 0 through 1. A rainfall-history event starts after the configured antecedent dry period. At the start of each event, the diverted runoff from surface `j` is:
 
 ```text
-effective area[j] = area[j] x (1 - 0.00138)
+F[j,t] = runoff coefficient[j] x area[j] x min(rainfall[t], first-flush depth[j]) / 12 x 7.48052
+I[t] = G[t] - sum(F[j,t])
 ```
 
-This small dry-period adjustment is part of the current daily engine. It is not the future event-based first-flush model described on the roadmap.
+`F[j,t]` is evaluated only on the first wet observation after the configured antecedent dry period. On consecutive wet observations it is zero, even when rainfall on the event's first day was less than the configured first-flush depth. The default is one antecedent dry day, matching Model 2 in Khan (2026). Gross runoff, first-flush loss, and net collection are retained as separate result fields.
 
 ## 3. Calculate daily demand
 
@@ -175,6 +178,8 @@ reliability (%)
 
 The reliability curve and comparison analysis repeat the complete procedure independently for every candidate capacity. Each tank receives the same rainfall, collection surfaces, demand record, initial-fill percentage, and minimum-operating-level percentage. Water does not flow between candidate tanks, and the end state from one candidate is never used to initialize another.
 
+Each reliability-curve row aggregates the candidate's detailed daily result rather than using a separate approximation. The saved candidate dataset retains total demand, rainwater supplied, rainwater shortfall, municipal makeup, system unmet demand, overflow, first-flush loss, treatment loss, final storage, and average annual rainwater supply. The annual value is the basis for candidate savings and payback calculations.
+
 ## Daily versus hourly system behavior
 
 The daily analysis is a primary-tank storage balance governed by the saved system-builder topology. Collection reaches storage only through a connected rainwater-input-to-primary-tank path, and rainwater reaches demand only through a connected primary-tank-to-end-uses path. A direct pump on that path applies its hourly capacity over 24 hours. A filtration-pump and filter path applies the filtration-pump capacity over 24 hours and the configured recovery; raw pumped water, including filter loss, is removed from primary storage. Beginning-of-hour booster controls and municipal-backup flow remain exclusive to the hourly simulation because they require subdaily state and flow ordering.
@@ -188,9 +193,13 @@ Both resolutions use a conservative end-of-day rainfall convention. The daily an
 | `CollectedGallons` | `I[t]`, rainwater collected that day |
 | `DemandGallons` | `D[t]`, total requested rainwater demand |
 | `DemandMet` | Whether `Q[t] >= D[t]` |
+| `RainwaterSuppliedGallons` | `Q[t]`, demand supplied by rainwater |
 | `MinimumOperatingVolumeGallons` | `M`, protected physical storage |
 | `UsableWaterAvailableGallons` | Water above `M` in closing storage after collection and overflow |
 | `UnmetDemandGallons` | `U[t]`, requested demand not supplied by rainwater |
+| `MainsMakeupGallons` | Municipal backup supplied against `U[t]` |
+| `SystemUnmetDemandGallons` | Demand remaining after rainwater and municipal backup |
+| `FilterLossGallons` | Raw water withdrawn but lost through configured treatment recovery |
 | `OverflowGallons` | `O[t]`, water discharged above physical capacity |
 | `WaterInTankGallons` | `S[t]`, end-of-day physical tank storage |
 | `ReliabilityPercent` | Full-period reliability repeated on each result row |

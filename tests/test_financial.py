@@ -5,6 +5,7 @@ from rainwater_app.financial import (
     GALLONS_PER_CUBIC_METRE,
     average_annual_rainwater_supplied,
     calculate_financial_results,
+    calculate_financial_results_from_annual_supply,
     tariff_rate_per_gallon,
 )
 
@@ -46,6 +47,24 @@ def test_financial_results_reconcile_savings_maintenance_and_payback() -> None:
     assert results.net_installed_cost == pytest.approx(80.0)
     assert results.simple_payback_years == pytest.approx(64.0)
     assert results.analysis_period_net_benefit == pytest.approx(-55.0)
+
+
+def test_financial_results_can_be_calculated_from_candidate_annual_supply() -> None:
+    results = calculate_financial_results_from_annual_supply(
+        162.5,
+        water_rate=10.0,
+        sewer_rate=20.0,
+        billing_unit="per 1,000 gal",
+        sewer_eligible_percent=50.0,
+        installed_cost=100.0,
+        incentives=20.0,
+        fixed_annual_maintenance=1.0,
+        maintenance_percent=1.0,
+        analysis_period_years=20,
+    )
+
+    assert results.net_annual_savings == pytest.approx(1.25)
+    assert results.simple_payback_years == pytest.approx(64.0)
 
 
 def test_non_positive_net_savings_reports_payback_not_achieved() -> None:

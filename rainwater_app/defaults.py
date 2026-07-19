@@ -26,7 +26,15 @@ def default_surface_runoff(surface_name: str) -> float:
 
 
 def default_project_config(name: str = "My Project") -> ProjectConfig:
-    surfaces = [Surface(surface.name, surface.area, surface.runoff_coefficient) for surface in DEFAULT_SURFACES]
+    surfaces = [
+        Surface(
+            surface.name,
+            surface.area,
+            surface.runoff_coefficient,
+            surface.first_flush_depth_inches,
+        )
+        for surface in DEFAULT_SURFACES
+    ]
 
     demand = DemandProfile(
         male_occupancy=_month_zero_map(),

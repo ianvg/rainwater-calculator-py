@@ -8,7 +8,7 @@ import pandas as pd
 
 from .models import ProjectConfig
 
-ANALYSIS_ALGORITHM_VERSION = 8
+ANALYSIS_ALGORITHM_VERSION = 10
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:
@@ -26,9 +26,14 @@ def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -
     payload = {
         "algorithm_version": ANALYSIS_ALGORITHM_VERSION,
         "surfaces": [
-            {"area": float(surface.area), "runoff_coefficient": float(surface.runoff_coefficient)}
+            {
+                "area": float(surface.area),
+                "runoff_coefficient": float(surface.runoff_coefficient),
+                "first_flush_depth_inches": float(surface.first_flush_depth_inches),
+            }
             for surface in config.surfaces
         ],
+        "first_flush_antecedent_dry_days": float(config.first_flush_antecedent_dry_days),
         "demand": asdict(config.demand),
         "graph_start_gal": int(config.graph_start_gal),
         "graph_end_gal": int(config.graph_end_gal),

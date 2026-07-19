@@ -52,6 +52,19 @@ def fetch_station_options_bbox(
     return _station_options_from_meta(_post_json(ACIS_STATION_META_URL, payload))
 
 
+def fetch_station_by_id(station_id: str) -> dict[str, Any] | None:
+    """Return one ACIS station, including coordinates, for saved-project migration."""
+    response = _post_json(
+        ACIS_STATION_META_URL,
+        {"sids": station_id.strip(), "meta": ["name", "sids", "state", "ll", "elev"]},
+    )
+    metadata = response.get("meta")
+    if isinstance(metadata, dict):
+        response = {"meta": [metadata]}
+    stations = _station_options_from_meta(response)
+    return stations[0] if stations else None
+
+
 def _station_options_from_meta(response: dict[str, Any], default_state: str = "") -> list[dict[str, Any]]:
     stations: list[dict[str, Any]] = []
     for item in response.get("meta", []):

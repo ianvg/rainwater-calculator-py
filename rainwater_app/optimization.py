@@ -114,7 +114,8 @@ def optimize_indirect_system(
             )
             booster_tanks = tuple(
                 BoosterTankProduct(str(row["name"]), float(row["capacity"]), float(row["cost"]))
-                for row in catalog if row.get("category") == "Booster tank"
+                for row in catalog
+                if row.get("category") in {"Buffer tank", "Booster tank"}
             )
         else:
             primary_tanks = PRIMARY_TANK_CATALOG
@@ -143,7 +144,7 @@ def optimize_indirect_system(
     if any(item.capacity_gallons_per_hour <= 0.0 or item.power_kw < 0.0 or item.installed_cost < 0.0 for item in filtration_pumps):
         raise ValueError("Filtration pump catalog values must have positive capacity and non-negative power and cost.")
     if any(item.capacity_gallons <= 0.0 or item.installed_cost < 0.0 for item in booster_tanks):
-        raise ValueError("Booster tank catalog values must have positive capacity and non-negative cost.")
+        raise ValueError("Buffer tank catalog values must have positive capacity and non-negative cost.")
     financial = config.financial_parameters
     if any(value < 0.0 for value in (
         financial.installed_cost, financial.incentives, financial.fixed_annual_maintenance

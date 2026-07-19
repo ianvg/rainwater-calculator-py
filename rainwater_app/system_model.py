@@ -207,6 +207,7 @@ def validate_builder_system(
     connections: Iterable[dict[str, str]],
     *,
     municipal_backup_enabled: bool = False,
+    demand_object_count: int | None = None,
 ) -> list[str]:
     """Return actionable warnings for a saved builder graph."""
     items = [dict(item) for item in layout]
@@ -248,6 +249,28 @@ def validate_builder_system(
 
     def ids_of(component_type: str) -> list[str]:
         return [item_id for item_id, value in types.items() if value == component_type]
+
+    if demand_object_count is not None:
+        available_demand_objects = max(int(demand_object_count), 0)
+        for item in items:
+            if str(item.get("component_type", "")) != "end_uses":
+                continue
+            assigned = item.get("demand_object_indices", [])
+            if not isinstance(assigned, (list, tuple, set)):
+                assigned = []
+            valid_assignments: set[int] = set()
+            for value in assigned:
+                try:
+                    index = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= index < available_demand_objects:
+                    valid_assignments.add(index)
+            if not valid_assignments:
+                name = str(item.get("name") or item.get("id") or "End uses")
+                warnings.append(
+                    f"Assign at least one demand object to {name}."
+                )
 
     def reachable(source_types: set[str], target_types: set[str]) -> bool:
         pending = [item_id for item_id, value in types.items() if value in source_types]
@@ -345,7 +368,7 @@ def validate_builder_system(
                 warnings.append("Connect or remove the primary tank's second outlet.")
         if item.get("component_type") == "booster_tank" and item.get("extra_input_node"):
             if not any(target == item_id and target_port == "in2" for _source, target, _port, target_port in valid_connections):
-                warnings.append("Connect or remove the booster tank's second inlet.")
+                warnings.append("Connect or remove the buffer tank's second inlet.")
     return list(dict.fromkeys(warnings))
 
 
@@ -376,7 +399,7 @@ def build_system_template(system_type: str) -> RWHSystem:
             {
                 "filtration_pump": _component("filtration_pump", "pump", "Filtration pump"),
                 "filtration": _component("filtration", "filter", "Filtration"),
-                "booster": _component("booster", "booster_tank", "Booster tank"),
+                "booster": _component("booster", "booster_tank", "Buffer tank"),
                 "booster_pump": _component("booster_pump", "pump", "Booster pump"),
             }
         )

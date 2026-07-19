@@ -5,12 +5,15 @@ from rainwater_app.acis import _parse_acis_number, default_complete_calendar_ran
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.engine import (
     AnalysisCancelledError,
+    collection_balance_series,
     demand_series,
     reliability_curve,
     simulate_hourly_tank,
     simulate_tank,
 )
-from rainwater_app.models import DemandObject, Surface, common_hourly_schedule_templates
+from rainwater_app.models import (
+    DemandObject, Surface, common_hourly_schedule_templates, migrate_legacy_demand_inputs,
+)
 from rainwater_app.storage import SQLiteStore
 
 
@@ -65,6 +68,110 @@ def test_simulate_tank_returns_expected_columns() -> None:
         "WaterInTankGallons",
         "ReliabilityPercent",
     }.issubset(out.columns)
+
+
+def test_first_flush_is_only_diverted_on_first_day_of_multi_day_event() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [
+        Surface(
+            "Roof", area=1200.0, runoff_coefficient=1.0,
+            first_flush_depth_inches=0.1,
+        )
+    ]
+    cfg.first_flush_antecedent_dry_days = 3.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=3, freq="D"),
+        "Precipitation": [0.05, 0.10, 0.20],
+    })
+
+    balance = collection_balance_series(cfg, rainfall)
+    first_day_runoff = 1200.0 * 0.05 / 12.0 * 7.48052
+
+    assert balance["RainfallEventStart"].tolist() == [True, False, False]
+    assert balance["RainfallEventId"].tolist() == [1, 1, 1]
+    assert balance["FirstFlushLossGallons"].sum() == pytest.approx(first_day_runoff)
+    assert balance.loc[0, "CollectedGallons"] == pytest.approx(0.0)
+    assert balance.loc[1, "FirstFlushLossGallons"] == pytest.approx(0.0)
+    assert balance.loc[2, "FirstFlushLossGallons"] == pytest.approx(0.0)
+
+
+def test_first_flush_applies_runoff_coefficient_after_subtracting_depth() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 0.8, 0.05)]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.10]})
+
+    balance = collection_balance_series(cfg, rainfall)
+    expected_loss = 1000.0 * 0.8 * 0.05 / 12.0 * 7.48052
+    expected_net = 1000.0 * 0.8 * (0.10 - 0.05) / 12.0 * 7.48052
+
+    assert balance.loc[0, "FirstFlushLossGallons"] == pytest.approx(expected_loss)
+    assert balance.loc[0, "CollectedGallons"] == pytest.approx(expected_net)
+
+
+def test_default_first_flush_event_resets_after_one_dry_day() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.05)]
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=4, freq="D"),
+        "Precipitation": [0.10, 0.10, 0.0, 0.10],
+    })
+
+    balance = collection_balance_series(cfg, rainfall)
+
+    assert cfg.first_flush_antecedent_dry_days == 1.0
+    assert balance["RainfallEventStart"].tolist() == [True, False, False, True]
+    assert balance["FirstFlushLossGallons"].iloc[[0, 3]].tolist() == pytest.approx(
+        [1000.0 * 0.05 / 12.0 * 7.48052] * 2
+    )
+
+
+def test_first_flush_resets_after_antecedent_dry_period() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.05)]
+    cfg.first_flush_antecedent_dry_days = 2.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=5, freq="D"),
+        "Precipitation": [0.2, 0.0, 0.0, 0.2, 0.1],
+    })
+
+    balance = collection_balance_series(cfg, rainfall)
+
+    assert balance["RainfallEventStart"].tolist() == [True, False, False, True, False]
+    assert balance["FirstFlushLossGallons"].iloc[0] == pytest.approx(
+        balance["FirstFlushLossGallons"].iloc[3]
+    )
+    assert balance["FirstFlushLossGallons"].iloc[4] == pytest.approx(0.0)
+
+
+def test_first_flush_is_separate_and_reconciles_to_gross_runoff() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [
+        Surface("Small diverter", 500.0, 0.8, 0.02),
+        Surface("Large diverter", 700.0, 0.9, 0.50),
+    ]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.1]})
+
+    balance = collection_balance_series(cfg, rainfall)
+
+    assert balance.loc[0, "GrossCollectedGallons"] == pytest.approx(
+        balance.loc[0, "FirstFlushLossGallons"] + balance.loc[0, "CollectedGallons"]
+    )
+    assert balance.loc[0, "FirstFlushLossGallons"] > 0.0
+    assert balance.loc[0, "CollectedGallons"] > 0.0
+
+
+def test_hourly_first_flush_is_allocated_at_daily_rainfall_boundary() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.05)]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.1]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+    assert result["FirstFlushLossGallons"].iloc[:23].sum() == pytest.approx(0.0)
+    assert result["FirstFlushLossGallons"].iloc[23] > 0.0
+    assert result["GrossCollectedGallons"].sum() == pytest.approx(
+        result["FirstFlushLossGallons"].sum() + result["CollectedGallons"].sum()
+    )
 
 
 def test_simulate_tank_records_water_above_capacity_as_overflow() -> None:
@@ -192,6 +299,53 @@ def test_reliability_curve_bounds() -> None:
     assert curve["ReliabilityPercent"].between(0, 100).all()
 
 
+def test_reliability_curve_candidate_metrics_reconcile_with_simulation() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 800.0, 0.9, 0.04)]
+    cfg.demand.simple_daily_demand_gallons = 60.0
+    cfg.system_parameters.filter_recovery_percent = 80.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2024-12-30", periods=5, freq="D"),
+        "Precipitation": [0.2, 0.0, 0.1, 0.0, 0.3],
+    })
+
+    curve = reliability_curve(cfg, rainfall, [100.0, 250.0])
+    candidate = curve.loc[curve["TankSizeGallons"] == 100.0].iloc[0]
+    detailed = simulate_tank(cfg, rainfall, 100.0)
+
+    assert candidate["ReliabilityPercent"] == pytest.approx(detailed["ReliabilityPercent"].iloc[0])
+    assert candidate["TotalDemandGallons"] == pytest.approx(detailed["DemandGallons"].sum())
+    assert candidate["RainwaterSuppliedGallons"] == pytest.approx(detailed["RainwaterSuppliedGallons"].sum())
+    assert candidate["UnmetDemandGallons"] == pytest.approx(detailed["UnmetDemandGallons"].sum())
+    assert candidate["MunicipalMakeupGallons"] == pytest.approx(detailed["MainsMakeupGallons"].sum())
+    assert candidate["SystemUnmetDemandGallons"] == pytest.approx(detailed["SystemUnmetDemandGallons"].sum())
+    assert candidate["OverflowGallons"] == pytest.approx(detailed["OverflowGallons"].sum())
+    assert candidate["FirstFlushLossGallons"] == pytest.approx(detailed["FirstFlushLossGallons"].sum())
+    assert candidate["TreatmentLossGallons"] == pytest.approx(detailed["FilterLossGallons"].sum())
+    assert candidate["FinalStorageGallons"] == pytest.approx(detailed["WaterInTankGallons"].iloc[-1])
+    assert candidate["AverageAnnualRainwaterSuppliedGallons"] == pytest.approx(
+        detailed["RainwaterSuppliedGallons"].sum() / 2.0
+    )
+
+
+def test_reliability_curve_reports_numeric_candidate_progress() -> None:
+    cfg = default_project_config()
+    rainfall = pd.DataFrame({
+        "Date": [pd.Timestamp("2025-01-01")],
+        "Precipitation": [0.0],
+    })
+    progress: list[tuple[int, int, float]] = []
+
+    reliability_curve(
+        cfg,
+        rainfall,
+        [100.0, 200.0],
+        progress_callback=lambda index, count, size: progress.append((index, count, size)),
+    )
+
+    assert progress == [(1, 2, 100.0), (2, 2, 200.0)]
+
+
 def test_minimum_operating_level_protects_primary_tank_storage() -> None:
     cfg = default_project_config()
     cfg.demand.simple_daily_demand_gallons = 100.0
@@ -244,6 +398,34 @@ def test_simple_daily_demand_is_added_to_daily_demand() -> None:
     demand = demand_series(cfg, rainfall)
 
     assert demand.tolist() == [125.0, 125.0, 125.0]
+
+
+def test_legacy_aggregate_demand_migrates_without_changing_daily_totals() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 25.0
+    cfg.demand.daily_demand_days_per_week = 5
+    cfg.demand.avg_flush_per_person = 3.0
+    cfg.demand.gallons_per_flush_toilet = 1.2
+    cfg.demand.gallons_per_flush_urinal = 0.5
+    cfg.demand.male_occupancy["jan"] = 4.0
+    cfg.demand.female_occupancy["jan"] = 5.0
+    cfg.demand.spray_irrigation["jan"] = 310.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=7),
+        "Precipitation": [0.0] * 7,
+    })
+    before = demand_series(cfg, rainfall)
+
+    created = migrate_legacy_demand_inputs(cfg.demand)
+    after = demand_series(cfg, rainfall)
+
+    assert created
+    assert after.tolist() == pytest.approx(before.tolist())
+    hourly = simulate_hourly_tank(cfg, rainfall, tank_size_gallons=1000.0)
+    assert hourly["DemandGallons"].sum() == pytest.approx(before.sum())
+    assert cfg.demand.simple_daily_demand_gallons == 0.0
+    assert cfg.demand.spray_irrigation["jan"] == 0.0
+    assert migrate_legacy_demand_inputs(cfg.demand) == []
 
 
 def test_daily_demand_schedule_applies_recurring_demand_on_selected_weekdays() -> None:

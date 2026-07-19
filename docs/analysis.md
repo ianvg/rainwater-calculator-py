@@ -12,7 +12,9 @@ The primary tank controls the detailed daily tank-level results, report tank sum
 
 ## Results views
 
-The **Results** tab contains horizontal **Single-tank summary** and **Multitank summary** sub-tabs. Single-tank summary shows the primary tank's reliability curve, daily storage, distribution, yearly reliability, and result rows. Multitank summary overlays every tank entered in **Tank size comparison** on three charts: tank water over time, tank-level distribution, and yearly demand reliability. Tank-level distributions use six percentage-of-capacity bins so different tank sizes can be compared on the same scale.
+The **Results** tab contains **Single-tank summary**, **Candidate performance**, **Multitank summary**, and **Hourly results** sub-tabs. Single-tank summary shows the primary tank's reliability curve, daily storage, distribution, yearly reliability, and result rows. Multitank summary overlays every tank entered in **Tank size comparison** on three charts: tank water over time, tank-level distribution, and yearly demand reliability. Tank-level distributions use six percentage-of-capacity bins so different tank sizes can be compared on the same scale.
+
+**Candidate performance** is a sortable table covering every capacity on the reliability curve. Each row reports reliability, total demand, rainwater supplied, rainwater shortfall, municipal makeup, remaining system unmet demand, overflow, first-flush loss, treatment loss, and final primary-tank storage. When financial inputs are configured, it also reports net annual savings and simple payback. Select a row and choose **Use selected as primary**, or double-click it, to copy that capacity into the primary-tank input before rerunning the detailed analysis. **Export CSV** writes the full candidate dataset using the project's displayed volume unit.
 
 Comparison simulations are saved with completed project analysis and restored when the project is reopened. Add at least two comparison sizes and run the analysis to compare multiple tanks together.
 
@@ -26,7 +28,7 @@ The analysis simulates storage behavior through the rainfall record for a range 
 
 Review the minimum and maximum tank size, graph step, initial storage assumptions, and any other available settings. Units are displayed next to numeric fields.
 
-The **Daily demand schedule** selects how many days per week recurring daily demand applies. A five-day schedule applies daily and occupancy-based demand Monday through Friday; monthly end-use totals remain distributed across every day of the month. Existing projects default to seven days per week.
+Each recurring-daily demand object selects how many days per week it applies. A five-day object applies Monday through Friday. Monthly-volume objects remain distributed across every day of the selected month, then follow their assigned hourly schedule within each day.
 
 Enter the desired **Number of steps** and select **Auto** to divide the tank-size range into that many increments. New projects default to 20 steps. The selected count is stored with the project.
 
@@ -42,7 +44,7 @@ If analysis cannot start, check that rainfall data has been imported and that re
 
 ## Optimize an indirect system
 
-The dedicated **Optimization** tab starts with a sample planning catalog of three primary tanks, three filtration pumps, and three booster tanks. Select **Edit sample catalog** to open a bulk CSV-style editor where product category, name, capacity, installed cost, and filtration-pump power can be viewed, pasted, or changed. The edited catalog is saved with the project. It is illustrative input and is not vendor data or a market quotation. See [Engineering optimization](optimization.md) for the complete problem structure, assumptions, equations, classifications, and limitations.
+The dedicated **Optimization** tab starts with a sample planning catalog of three primary tanks, three filtration pumps, and three buffer tanks. Select **Edit sample catalog** to open a bulk CSV-style editor where product category, name, capacity, installed cost, and filtration-pump power can be viewed, pasted, or changed. The edited catalog is saved with the project. It is illustrative input and is not vendor data or a market quotation. See [Engineering optimization](optimization.md) for the complete problem structure, assumptions, equations, classifications, and limitations.
 
 Choose an objective from **Simple payback**, **Net annual savings**, **Rainwater reliability**, or **Analysis-period net benefit**. The optimizer runs every catalog combination through the hourly indirect-system model and ranks only feasible designs by that objective. Minimum reliability is always available; maximum annual municipal makeup, maximum installed cost, and a positive-net-annual-savings requirement are optional constraints. Leave either maximum field blank for no limit. The result table includes annual municipal makeup alongside reliability, energy, cost, savings, and payback. The main progress bar and status line update after each combination and reach 100% when optimization finishes.
 

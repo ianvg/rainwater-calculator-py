@@ -77,6 +77,20 @@ def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> 
         schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
         if schedule is None:
             continue
+        mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+        if mode == "recurring_daily":
+            operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
+            if date.weekday() >= operating_days:
+                continue
+            month_value = demand_object.monthly_daily_demand_gallons.get(
+                _month_index_key(date), demand_object.recurring_daily_gallons
+            )
+            total += max(float(month_value), 0.0)
+            continue
+        if mode == "monthly_volume":
+            monthly = max(float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)), 0.0)
+            total += monthly / monthrange(date.year, date.month)[1]
+            continue
         day_key = WEEKDAY_KEYS[date.weekday()]
         multipliers = [min(max(float(value), 0.0), 1.0) for value in schedule.get(day_key, [])[:24]]
         total += (
@@ -87,29 +101,110 @@ def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> 
     return total
 
 
+def _demand_object_hourly_for_date(
+    demand: DemandProfile, demand_object, date: pd.Timestamp
+) -> np.ndarray:
+    schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
+    if schedule is None:
+        return np.zeros(24, dtype=np.float64)
+    mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+    day_key = WEEKDAY_KEYS[date.weekday()]
+    multipliers = [
+        min(max(float(value), 0.0), 1.0)
+        for value in schedule.get(day_key, [])[:24]
+    ]
+    multipliers.extend([0.0] * (24 - len(multipliers)))
+    if mode == "scheduled_flow":
+        flow = max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
+        return np.asarray(multipliers, dtype=np.float64) * flow * 60.0
+    daily_volume = 0.0
+    if mode == "recurring_daily":
+        operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
+        if date.weekday() < operating_days:
+            daily_volume = max(float(demand_object.monthly_daily_demand_gallons.get(
+                _month_index_key(date), demand_object.recurring_daily_gallons
+            )), 0.0)
+    elif mode == "monthly_volume":
+        monthly = max(float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)), 0.0)
+        daily_volume = monthly / monthrange(date.year, date.month)[1]
+    total_multiplier = sum(multipliers)
+    fractions = (
+        np.asarray(multipliers, dtype=np.float64) / total_multiplier
+        if total_multiplier > 0.0 else np.full(24, 1.0 / 24.0)
+    )
+    return fractions * daily_volume
+
+
 def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
     return _base_daily_demand_for_date(demand, date) + _demand_object_daily_for_date(demand, date)
 
 
-def collected_water_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series:
-    data = _validate_rainfall(rainfall_df)
+def collection_balance_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.DataFrame:
+    """Calculate gross runoff, rainfall-history first flush, and net collection.
 
+    A wet observation begins a new event when it is the first wet observation or
+    when the elapsed time since the preceding wet observation exceeds the
+    configured antecedent dry period. On the first wet observation of an event,
+    each surface diverts up to its configured first-flush depth. Consecutive wet
+    observations do not divert another first flush (Khan's Model 2).
+    """
+    data = _validate_rainfall(rainfall_df)
     areas = np.array([max(0.0, s.area) for s in config.surfaces], dtype=float)
     coeffs = np.array([min(max(0.0, s.runoff_coefficient), 1.0) for s in config.surfaces], dtype=float)
-
-    collected_gallons: list[float] = []
+    diversion_depths = np.array(
+        [max(float(s.first_flush_depth_inches), 0.0) for s in config.surfaces], dtype=float
+    )
+    diversion_allowances = (
+        areas * coeffs * diversion_depths / 12.0 * GAL_PER_CUBIC_FOOT
+    )
+    antecedent = pd.Timedelta(days=max(float(config.first_flush_antecedent_dry_days), 0.0))
+    last_wet_time: pd.Timestamp | None = None
+    event_id = 0
+    gross_values: list[float] = []
+    loss_values: list[float] = []
+    net_values: list[float] = []
+    event_ids: list[int | None] = []
+    event_starts: list[bool] = []
     precip = data["Precipitation"].to_numpy(dtype=float)
+    for index, precipitation in enumerate(precip):
+        timestamp = pd.Timestamp(data["Date"].iloc[index])
+        wet = precipitation > 0.0
+        starts_event = bool(
+            wet and (last_wet_time is None or timestamp - last_wet_time > antecedent)
+        )
+        if starts_event:
+            event_id += 1
+        surface_runoff = areas * coeffs * max(float(precipitation), 0.0) / 12.0 * GAL_PER_CUBIC_FOOT
+        surface_loss = (
+            np.minimum(surface_runoff, diversion_allowances)
+            if starts_event
+            else np.zeros_like(areas)
+        )
+        gross = float(surface_runoff.sum())
+        loss = float(surface_loss.sum())
+        gross_values.append(gross)
+        loss_values.append(loss)
+        net_values.append(max(gross - loss, 0.0))
+        event_ids.append(event_id if wet else None)
+        event_starts.append(starts_event)
+        if wet:
+            last_wet_time = timestamp
+    return pd.DataFrame(
+        {
+            "GrossCollectedGallons": gross_values,
+            "FirstFlushLossGallons": loss_values,
+            "CollectedGallons": net_values,
+            "RainfallEventId": pd.array(event_ids, dtype="Int64"),
+            "RainfallEventStart": event_starts,
+        },
+        index=data.index,
+    )
 
-    for i in range(len(precip)):
-        effective_areas = areas
-        if i > 3 and precip[i - 1] <= 0 and precip[i - 2] <= 0 and precip[i - 3] <= 0:
-            effective_areas = areas - (areas * 0.00138)
 
-        rainfall_feet = precip[i] / 12.0
-        gallons = float(np.sum(effective_areas * coeffs * rainfall_feet) * GAL_PER_CUBIC_FOOT)
-        collected_gallons.append(max(0.0, gallons))
-
-    return pd.Series(collected_gallons, index=data.index, name="collected_gallons")
+def collected_water_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series:
+    return collection_balance_series(config, rainfall_df)["CollectedGallons"].rename(
+        "collected_gallons"
+    )
 
 
 def demand_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series:
@@ -153,17 +248,9 @@ def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> P
             fractions = [1.0 / 24.0] * 24
         object_demands = np.zeros(24, dtype=np.float64)
         for demand_object in config.demand.demand_objects:
-            object_schedule = config.demand.hourly_schedule_library.get(demand_object.schedule_name)
-            if object_schedule is None:
-                continue
-            day_key = WEEKDAY_KEYS[timestamp.weekday()]
-            multipliers = [
-                min(max(float(value), 0.0), 1.0)
-                for value in object_schedule.get(day_key, [])[:24]
-            ]
-            multipliers.extend([0.0] * (24 - len(multipliers)))
-            object_flow = max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
-            object_demands += np.asarray(multipliers) * object_flow * 60.0
+            object_demands += _demand_object_hourly_for_date(
+                config.demand, demand_object, timestamp
+            )
         start = day_index * 24
         demand_values[start:start + 24] = (
             max(_base_daily_demand_for_date(config.demand, timestamp), 0.0)
@@ -282,9 +369,12 @@ def simulate_tank(
     system = compile_builder_system(
         config.system_type, config.system_layout, config.system_connections
     )
-    collected = collected_water_series(config, data)
+    collection = collection_balance_series(config, data)
     if not system.rain_reaches_primary:
-        collected = collected * 0.0
+        collection.loc[:, [
+            "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons"
+        ]] = 0.0
+    collected = collection["CollectedGallons"]
     demand = demand_series(config, data)
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
@@ -296,6 +386,10 @@ def simulate_tank(
     demand_met: list[bool] = []
     usable_water_available: list[float] = []
     unmet_demand: list[float] = []
+    supplied_demand: list[float] = []
+    municipal_makeup: list[float] = []
+    system_unmet_demand: list[float] = []
+    treatment_loss: list[float] = []
     overflow: list[float] = []
     reliable_days = 0
 
@@ -336,6 +430,14 @@ def simulate_tank(
                 withdrawn_today = supplied_today
         met_today = supplied_today >= demand_today
         unmet_today = max(demand_today - supplied_today, 0.0)
+        municipal_makeup_today = (
+            unmet_today
+            if config.system_parameters.municipal_backup_enabled
+            and (system.municipal_reaches_end_uses or system.municipal_reaches_booster)
+            else 0.0
+        )
+        system_unmet_today = max(unmet_today - municipal_makeup_today, 0.0)
+        treatment_loss_today = max(withdrawn_today - supplied_today, 0.0)
         water = max(water - withdrawn_today, 0.0)
         water += float(collected.iloc[i])
         overflow_today = max(water - tank_size_gallons, 0.0)
@@ -345,6 +447,10 @@ def simulate_tank(
         demand_met.append(bool(met_today))
         usable_water_available.append(float(max(water - minimum_operating_volume, 0.0)))
         unmet_demand.append(float(unmet_today))
+        supplied_demand.append(float(supplied_today))
+        municipal_makeup.append(float(municipal_makeup_today))
+        system_unmet_demand.append(float(system_unmet_today))
+        treatment_loss.append(float(treatment_loss_today))
         overflow.append(float(overflow_today))
 
         if met_today:
@@ -356,12 +462,20 @@ def simulate_tank(
         {
             "Date": data["Date"],
             "Precipitation": data["Precipitation"],
+            "GrossCollectedGallons": collection["GrossCollectedGallons"],
+            "FirstFlushLossGallons": collection["FirstFlushLossGallons"],
             "CollectedGallons": collected,
+            "RainfallEventId": collection["RainfallEventId"],
+            "RainfallEventStart": collection["RainfallEventStart"],
             "DemandGallons": demand,
             "DemandMet": demand_met,
+            "RainwaterSuppliedGallons": supplied_demand,
             "MinimumOperatingVolumeGallons": minimum_operating_volume,
             "UsableWaterAvailableGallons": usable_water_available,
             "UnmetDemandGallons": unmet_demand,
+            "MainsMakeupGallons": municipal_makeup,
+            "SystemUnmetDemandGallons": system_unmet_demand,
+            "FilterLossGallons": treatment_loss,
             "OverflowGallons": overflow,
             "WaterInTankGallons": water_level,
         }
@@ -401,9 +515,12 @@ def simulate_hourly_tank(
     )
     booster_refill_target = booster_capacity * booster_refill_level
     refill_active = booster_capacity > 0.0 and booster_water < booster_refill_target
-    collected = collected_water_series(config, data)
+    collection = collection_balance_series(config, data)
     if not system.rain_reaches_primary:
-        collected = collected * 0.0
+        collection.loc[:, [
+            "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons"
+        ]] = 0.0
+    collected = collection["CollectedGallons"]
     base_daily_demand = pd.Series(
         [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
         index=data.index,
@@ -429,18 +546,11 @@ def simulate_hourly_tank(
             fractions = [1.0 / 24.0] * 24
         object_hourly_demands = [0.0] * 24
         for demand_object in config.demand.demand_objects:
-            object_schedule = config.demand.hourly_schedule_library.get(demand_object.schedule_name)
-            if object_schedule is None:
-                continue
-            day_key = WEEKDAY_KEYS[timestamp.weekday()]
-            object_multipliers = [
-                min(max(float(value), 0.0), 1.0)
-                for value in object_schedule.get(day_key, [])[:24]
-            ]
-            object_multipliers.extend([0.0] * (24 - len(object_multipliers)))
-            object_flow = max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
-            for object_hour, object_multiplier in enumerate(object_multipliers):
-                object_hourly_demands[object_hour] += object_flow * object_multiplier * 60.0
+            values = _demand_object_hourly_for_date(
+                config.demand, demand_object, timestamp
+            )
+            for object_hour, value in enumerate(values):
+                object_hourly_demands[object_hour] += float(value)
         for hour, fraction in enumerate(fractions):
             demand_hour = max(
                 float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
@@ -521,6 +631,12 @@ def simulate_hourly_tank(
             else:
                 system_unmet = max(demand_hour - rainwater_supplied - mains_supplied, 0.0)
             collected_hour = float(collected.iloc[day_index]) if hour == 23 else 0.0
+            gross_collected_hour = (
+                float(collection["GrossCollectedGallons"].iloc[day_index]) if hour == 23 else 0.0
+            )
+            first_flush_loss_hour = (
+                float(collection["FirstFlushLossGallons"].iloc[day_index]) if hour == 23 else 0.0
+            )
             water += collected_hour
             overflow = max(water - tank_size_gallons, 0.0)
             water = min(max(water, 0.0), tank_size_gallons)
@@ -529,7 +645,11 @@ def simulate_hourly_tank(
                 {
                     "Date": pd.Timestamp(date) + pd.Timedelta(hours=hour),
                     "SystemType": system.display_type,
+                    "GrossCollectedGallons": gross_collected_hour,
+                    "FirstFlushLossGallons": first_flush_loss_hour,
                     "CollectedGallons": collected_hour,
+                    "RainfallEventId": collection["RainfallEventId"].iloc[day_index],
+                    "RainfallEventStart": bool(collection["RainfallEventStart"].iloc[day_index]) if hour == 23 else False,
                     "DemandGallons": demand_hour,
                     "DemandMet": met,
                     "UnmetDemandGallons": unmet,
@@ -561,7 +681,7 @@ def reliability_curve(
 ) -> pd.DataFrame:
     rows: list[dict[str, float]] = []
     tank_sizes = list(tank_sizes_gallons)
-    total = len(tank_sizes)
+    candidate_count = len(tank_sizes)
     for index, tank_size in enumerate(tank_sizes, start=1):
         if cancel_callback is not None and cancel_callback():
             raise AnalysisCancelledError("Analysis cancelled by user.")
@@ -573,8 +693,30 @@ def reliability_curve(
             cancel_callback=cancel_callback,
         )
         reliability = float(result["ReliabilityPercent"].iloc[0]) if not result.empty else 0.0
-        rows.append({"TankSizeGallons": float(tank_size), "ReliabilityPercent": reliability})
+        dates = pd.to_datetime(result.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+        year_count = max(int(dates.dropna().dt.year.nunique()), 1)
+
+        def column_total(column: str) -> float:
+            return float(pd.to_numeric(result.get(column, pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
+
+        supplied = column_total("RainwaterSuppliedGallons")
+        rows.append({
+            "TankSizeGallons": float(tank_size),
+            "ReliabilityPercent": reliability,
+            "TotalDemandGallons": column_total("DemandGallons"),
+            "RainwaterSuppliedGallons": supplied,
+            "AverageAnnualRainwaterSuppliedGallons": supplied / year_count,
+            "UnmetDemandGallons": column_total("UnmetDemandGallons"),
+            "MunicipalMakeupGallons": column_total("MainsMakeupGallons"),
+            "SystemUnmetDemandGallons": column_total("SystemUnmetDemandGallons"),
+            "OverflowGallons": column_total("OverflowGallons"),
+            "FirstFlushLossGallons": column_total("FirstFlushLossGallons"),
+            "TreatmentLossGallons": column_total("FilterLossGallons"),
+            "FinalStorageGallons": (
+                float(result["WaterInTankGallons"].iloc[-1]) if not result.empty else 0.0
+            ),
+        })
         if progress_callback is not None:
-            progress_callback(index, total, float(tank_size))
+            progress_callback(index, candidate_count, float(tank_size))
 
     return pd.DataFrame(rows)

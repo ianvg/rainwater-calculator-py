@@ -27,6 +27,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.optimization_parameters.minimum_reliability_percent == 80.0
     assert config.optimization_parameters.electricity_rate_per_kwh == 0.15
     assert config.tank_parameters.minimum_operating_volume_percent == 0.0
+    assert config.first_flush_antecedent_dry_days == 1.0
 
 
 def test_legacy_reserve_target_migrates_to_zero_minimum_operating_level() -> None:
@@ -67,6 +68,22 @@ def test_system_component_parameters_are_loaded() -> None:
     assert config.system_parameters.booster_initial_fill_percent == 40.0
     assert config.system_parameters.booster_refill_level_percent == 35.0
     assert config.system_parameters.municipal_backup_enabled is False
+
+
+def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "First flush project",
+        "first_flush_antecedent_dry_days": 4.5,
+        "surfaces": [
+            {"name": "New roof", "area": 1000.0, "runoff_coefficient": 0.9,
+             "first_flush_depth_inches": 0.08},
+            {"name": "Legacy roof", "area": 500.0, "runoff_coefficient": 0.8},
+        ],
+    })
+
+    assert config.first_flush_antecedent_dry_days == 4.5
+    assert config.surfaces[0].first_flush_depth_inches == pytest.approx(0.08)
+    assert config.surfaces[1].first_flush_depth_inches == pytest.approx(0.0)
 
 
 def test_financial_parameters_are_loaded() -> None:
@@ -143,6 +160,27 @@ def test_demand_objects_are_loaded_as_model_objects() -> None:
     assert config.demand.demand_objects[0].instantaneous_demand_gallons_per_minute == 250.0 / 60.0
 
 
+def test_legacy_aggregate_demands_migrate_and_assign_to_end_uses() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "Legacy demand project",
+        "demand": {
+            "simple_daily_demand_gallons": 40.0,
+            "daily_demand_days_per_week": 5,
+            "spray_irrigation": {"jan": 310.0},
+        },
+        "system_layout": [
+            {"id": "uses", "component_type": "end_uses"},
+        ],
+    })
+
+    assert config.demand.legacy_inputs_migrated
+    assert config.demand.simple_daily_demand_gallons == 0.0
+    assert [item.name for item in config.demand.demand_objects] == [
+        "Simple recurring demand", "Spray irrigation",
+    ]
+    assert config.system_layout[0]["demand_object_indices"] == [0, 1]
+
+
 def test_instantaneous_demand_object_flow_is_loaded() -> None:
     config = SQLiteStore._config_from_dict(
         {
@@ -168,7 +206,7 @@ def test_system_builder_layout_is_loaded() -> None:
         {"id": "primary_tank_1", "component_type": "primary_tank", "name": "Primary tank", "x": 120, "y": 80},
         {
             "id": "booster_tank_1", "component_type": "booster_tank",
-            "name": "Booster tank", "x": 260, "y": 80, "extra_input_node": True,
+            "name": "Buffer tank", "x": 260, "y": 80, "extra_input_node": True,
         },
         {
             "id": "end_uses_1",

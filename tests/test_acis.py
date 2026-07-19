@@ -3,7 +3,7 @@ from datetime import date
 
 import pytest
 
-from rainwater_app.acis import fetch_daily_station_data
+from rainwater_app.acis import fetch_daily_station_data, fetch_station_by_id
 
 
 @pytest.fixture
@@ -44,3 +44,24 @@ def test_acis_rain_only_excludes_precipitation_on_snowfall_days(acis_cache) -> N
 def test_acis_rejects_unknown_precipitation_basis(acis_cache) -> None:
     with pytest.raises(ValueError, match="Unsupported ACIS precipitation basis"):
         fetch_daily_station_data("test", date(2020, 1, 1), date(2020, 1, 2), "OTHER", acis_cache)
+
+
+def test_fetch_station_by_id_uses_stnmeta_sids_and_returns_coordinates(monkeypatch) -> None:
+    captured = {}
+
+    def fake_post(_url, payload):
+        captured.update(payload)
+        return {
+            "meta": [{
+                "name": "ATHENS BEN EPPS AP", "state": "GA",
+                "sids": ["13873 1"], "ll": [-83.32736, 33.94773], "elev": 784,
+            }]
+        }
+
+    monkeypatch.setattr("rainwater_app.acis._post_json", fake_post)
+    station = fetch_station_by_id("13873")
+
+    assert captured["sids"] == "13873"
+    assert station is not None
+    assert station["latitude"] == 33.94773
+    assert station["longitude"] == -83.32736

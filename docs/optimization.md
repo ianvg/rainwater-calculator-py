@@ -17,7 +17,7 @@ The application separates the problem into the following parts:
 
 | Part | Meaning | Current implementation |
 | --- | --- | --- |
-| Design variables | Decisions left open to the optimizer | Primary tank product, filtration pump product, booster tank product |
+| Design variables | Decisions left open to the optimizer | Primary tank product, filtration pump product, buffer tank product |
 | Fixed parameters | Project values not changed by the optimizer | Rainfall, collection surfaces, demand, controls, tariffs, maintenance, electricity price |
 | Governing model | Predicts each candidate's behavior | Hourly collection, storage, treatment, booster, demand, backup, and overflow mass balance |
 | Objective | Defines which feasible design ranks highest | Simple payback, net annual savings, rainwater reliability, or analysis-period net benefit |
@@ -32,9 +32,9 @@ The current optimizer leaves three discrete catalog selections open:
 
 - Primary tank product and capacity.
 - Filtration pump product, capacity, power, and cost.
-- Booster tank product and capacity.
+- Buffer tank product and capacity.
 
-Select **Edit sample catalog** to view or bulk-edit comma-separated catalog rows in a separate window. Each row contains category, product name, capacity, installed cost, and power. Primary- and booster-tank capacities use gallons; filtration-pump capacity uses gallons per hour; power uses kW. The catalog requires at least one product in every category and is saved with the project.
+Select **Edit sample catalog** to view or bulk-edit comma-separated catalog rows in a separate window. Each row contains category, product name, capacity, installed cost, and power. Primary- and buffer-tank capacities use gallons; filtration-pump capacity uses gallons per hour; power uses kW. The catalog requires at least one product in every category and is saved with the project.
 
 The supplied catalog is illustrative. Its product identifiers, capacities, power, and prices are development assumptions, not vendor data, quotations, or engineering recommendations.
 
@@ -85,7 +85,7 @@ Current model assumptions that materially affect interpretation are:
 
 ## Candidate evaluation
 
-For every primary-tank, filtration-pump, and booster-tank combination, the application:
+For every primary-tank, filtration-pump, and buffer-tank combination, the application:
 
 1. Creates an indirect-system candidate.
 2. Runs the same hourly mass-balance rules in aggregate-only mode, without constructing a full timestep table.

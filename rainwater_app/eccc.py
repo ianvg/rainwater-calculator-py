@@ -40,6 +40,29 @@ def fetch_canadian_station_options_bbox(
     return _station_options_from_features(features, start_date, end_date)
 
 
+def fetch_canadian_station_by_id(station_id: str) -> dict[str, Any] | None:
+    """Return one ECCC climate station, including coordinates."""
+    features = _get_feature_pages(
+        ECCC_STATIONS_URL,
+        {"f": "json", "limit": 10, "CLIMATE_IDENTIFIER": station_id.strip()},
+    )
+    for feature in features:
+        properties = feature.get("properties", {})
+        coordinates = feature.get("geometry", {}).get("coordinates", [])
+        identifier = str(properties.get("CLIMATE_IDENTIFIER") or "").strip()
+        if identifier != station_id.strip():
+            continue
+        return {
+            "sid": identifier,
+            "name": str(properties.get("STATION_NAME") or "Unnamed station").strip(),
+            "state": str(properties.get("PROV_STATE_TERR_CODE") or "").strip(),
+            "longitude": _coordinate(coordinates, 0),
+            "latitude": _coordinate(coordinates, 1),
+            "provider": "ECCC",
+        }
+    return None
+
+
 def _station_options_from_features(
     features: list[dict[str, Any]], start_date: date, end_date: date, default_province: str = ""
 ) -> list[dict[str, Any]]:
