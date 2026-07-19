@@ -16,6 +16,7 @@ from tkinter_app import (
     _report_demand_summary,
     _report_surface_rows,
     _report_tank_level_distribution,
+    _tank_volume_capacity_label,
     _yearly_demand_reliability,
 )
 
@@ -592,6 +593,35 @@ def test_report_tank_level_distribution_uses_six_bins_and_all_days() -> None:
     assert sum(int(row["count"]) for row in distribution) == len(results)
     assert distribution[0] == {"low": 0.0, "high": 100.0, "count": 2}
     assert distribution[-1] == {"low": 500.0, "high": 600.0, "count": 2}
+
+
+def test_animation_tank_label_shows_current_volume_and_capacity() -> None:
+    imperial = default_project_config()
+    metric = default_project_config()
+    metric.unit_system = "Metric"
+
+    assert _tank_volume_capacity_label(4654.0, 5000.0, imperial) == (
+        "4,654 gal / 5,000 gal"
+    )
+    assert _tank_volume_capacity_label(4654.0, 5000.0, metric) == (
+        "17,617 L / 18,927 L"
+    )
+
+
+def test_animation_overflow_connection_and_pipe_flow_labels() -> None:
+    row = pd.Series({"OverflowGallons": 120.0})
+    imperial = default_project_config()
+    metric = default_project_config()
+    metric.unit_system = "Metric"
+
+    assert RainwaterTkApp._system_animation_connection_active(
+        "primary_tank", "overflow_pipe", row
+    )
+    assert RainwaterTkApp._system_animation_connection_flow_gallons(
+        "primary_tank", "overflow_pipe", row
+    ) == pytest.approx(120.0)
+    assert RainwaterTkApp._system_animation_pipe_flow_label(60.0, imperial) == "1.0 GPM"
+    assert RainwaterTkApp._system_animation_pipe_flow_label(60.0, metric) == "3.8 LPM"
 
 
 def test_reverse_system_connection_routes_around_object_bodies() -> None:

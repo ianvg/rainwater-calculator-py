@@ -52,7 +52,7 @@ class RWHSystem:
             if source_port.medium != target_port.medium:
                 errors.append(f"Connection {source.id} -> {target.id} connects incompatible media.")
 
-        required_types = {"collection", "primary_tank", "end_uses", "overflow"}
+        required_types = {"collection", "primary_tank", "end_uses", "overflow_pipe"}
         available_types = {component.component_type for component in self.components.values()}
         for missing_type in sorted(required_types - available_types):
             errors.append(f"System is missing required component type: {missing_type}.")
@@ -60,7 +60,7 @@ class RWHSystem:
             errors.append("Collection is not connected to the primary tank.")
         if not self._is_reachable("primary_tank", "end_uses"):
             errors.append("The primary tank cannot supply the end uses.")
-        if not self._is_reachable("primary_tank", "overflow"):
+        if not self._is_reachable("primary_tank", "overflow_pipe"):
             errors.append("The primary tank has no overflow discharge path.")
         return errors
 
@@ -97,7 +97,58 @@ BUILDER_COMPONENT_PORTS: dict[str, tuple[bool, bool]] = {
     "municipal_backup": (False, True),
     "end_uses": (True, False),
     "first_flush_diversion": (True, False),
+    "overflow_pipe": (True, False),
 }
+
+
+def ensure_primary_overflow_paths(
+    layout: Iterable[dict[str, object]],
+    connections: Iterable[dict[str, str]],
+) -> tuple[list[dict[str, object]], list[dict[str, str]]]:
+    """Migrate builder layouts so every primary tank has a dedicated overflow pipe."""
+    items = [dict(item) for item in layout]
+    links = [{str(key): str(value) for key, value in item.items()} for item in connections]
+    existing_ids = {str(item.get("id", "")) for item in items}
+    primary_items = [
+        item for item in items if str(item.get("component_type", "")) == "primary_tank"
+    ]
+    for primary in primary_items:
+        primary_id = str(primary.get("id", ""))
+        if not primary_id:
+            continue
+        has_path = any(
+            link.get("source_component") == primary_id
+            and link.get("source_port") == "overflow"
+            and any(
+                str(item.get("id", "")) == link.get("target_component")
+                and str(item.get("component_type", "")) == "overflow_pipe"
+                for item in items
+            )
+            for link in links
+        )
+        if has_path:
+            continue
+        index = 1
+        while f"overflow_pipe_{index}" in existing_ids:
+            index += 1
+        overflow_id = f"overflow_pipe_{index}"
+        existing_ids.add(overflow_id)
+        primary_x = float(primary.get("x", 200.0))
+        primary_y = float(primary.get("y", 120.0))
+        vertical_offset = -85.0 if primary_y >= 250.0 else 85.0
+        items.append({
+            "id": overflow_id,
+            "component_type": "overflow_pipe",
+            "name": "Overflow pipe",
+            "x": primary_x + 155.0,
+            "y": max(primary_y + vertical_offset, 35.0),
+        })
+        links.append({
+            "source_component": primary_id,
+            "source_port": "overflow",
+            "target_component": overflow_id,
+        })
+    return items, links
 
 
 @dataclass(frozen=True)
@@ -303,16 +354,30 @@ def validate_builder_system(
         ("rainwater_input", "rainwater input"),
         ("primary_tank", "primary tank"),
         ("end_uses", "end-uses"),
+        ("overflow_pipe", "overflow pipe"),
     ):
         count = len(ids_of(component_type))
         if count == 0:
-            warnings.append(f"Add a {label} component.")
+            article = "an" if label[0].lower() in "aeiou" else "a"
+            warnings.append(f"Add {article} {label} component.")
         elif component_type == "primary_tank" and count > 1:
             warnings.append("The current simulation supports exactly one primary tank.")
     if not reachable({"rainwater_input"}, {"primary_tank"}):
         warnings.append("Connect rainwater input to the primary tank.")
     if not reachable({"primary_tank"}, {"end_uses"}):
         warnings.append("Connect the primary tank to end-uses through a valid supply path.")
+    overflow_connections = [
+        (source, target)
+        for source, target, source_port, _target_port in valid_connections
+        if types.get(source) == "primary_tank"
+        and source_port == "overflow"
+        and types.get(target) == "overflow_pipe"
+    ]
+    for primary_id in ids_of("primary_tank"):
+        if not any(source == primary_id for source, _target in overflow_connections):
+            warnings.append(
+                f"Connect {primary_id}'s overflow outlet directly to an overflow pipe."
+            )
     if municipal_backup_enabled and not (
         reachable({"municipal_backup"}, {"end_uses"})
         or reachable({"municipal_backup"}, {"booster_tank"})
@@ -352,7 +417,7 @@ def validate_builder_system(
     for item_id, component_type in types.items():
         if component_type not in {"rainwater_input", "municipal_backup"} and incoming[item_id] == 0:
             warnings.append(f"{item_id} has no incoming connection.")
-        if component_type not in {"end_uses", "first_flush_diversion"} and not adjacency[item_id]:
+        if component_type not in {"end_uses", "first_flush_diversion", "overflow_pipe"} and not adjacency[item_id]:
             warnings.append(f"{item_id} has no outgoing connection.")
     for source, target, source_port, _target_port in valid_connections:
         if source_port == "out2" and types.get(source) == "primary_tank" and types.get(target) != "first_flush_diversion":
@@ -361,6 +426,14 @@ def validate_builder_system(
             types.get(source) == "primary_tank" and source_port == "out2"
         ):
             warnings.append("First-flush diversion must connect from the primary tank's second outlet.")
+        if source_port == "overflow" and not (
+            types.get(source) == "primary_tank" and types.get(target) == "overflow_pipe"
+        ):
+            warnings.append("A primary tank overflow outlet may connect only to an overflow pipe.")
+        if types.get(target) == "overflow_pipe" and not (
+            types.get(source) == "primary_tank" and source_port == "overflow"
+        ):
+            warnings.append("An overflow pipe must connect directly from a primary tank overflow outlet.")
     by_id = {str(item.get("id", "")): item for item in items}
     for item_id, item in by_id.items():
         if item.get("component_type") == "primary_tank" and item.get("extra_output_node"):
@@ -385,13 +458,14 @@ def build_system_template(system_type: str) -> RWHSystem:
     components = {
         "collection": _component("collection", "collection", "Collection surfaces", inlet=False),
         "primary": _component("primary", "primary_tank", "Primary tank"),
-        "overflow": _component("overflow", "overflow", "Overflow discharge", outlet=False),
+        "overflow": _component("overflow", "overflow_pipe", "Overflow pipe", outlet=False),
         "end_uses": _component("end_uses", "end_uses", "End uses", outlet=False),
         "mains": _component("mains", "mains_backup", "Municipal backup", inlet=False),
     }
+    components["primary"].ports["overflow"] = Port("overflow", "out")
     connections = [
         Connection("collection", "out", "primary", "in"),
-        Connection("primary", "out", "overflow", "in"),
+        Connection("primary", "overflow", "overflow", "in"),
     ]
     normalized_type = "Indirect system" if system_type == "Indirect system" else "Direct system"
     if normalized_type == "Indirect system":

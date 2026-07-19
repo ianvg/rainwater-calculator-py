@@ -46,6 +46,28 @@ def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
     assert result["DemandGallons"].iloc[2:].sum() == pytest.approx(0.0)
 
 
+def test_hourly_result_start_date_warms_up_tank_state_without_returning_prior_days() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 100.0
+    cfg.demand.hourly_weekly_fractions = {
+        day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.tank_parameters.initial_fill_percent = 50.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+        "Precipitation": [0.0, 0.0],
+    })
+
+    result = simulate_hourly_tank(
+        cfg, rainfall, 5000.0, result_start_date=pd.Timestamp("2025-01-02")
+    )
+
+    assert len(result) == 24
+    assert pd.Timestamp(result.iloc[0]["Date"]) == pd.Timestamp("2025-01-02 00:00:00")
+    assert result.iloc[0]["PrimaryTankBeginningGallons"] == pytest.approx(2400.0)
+    assert result.iloc[0]["WaterInTankGallons"] == pytest.approx(2300.0)
+
+
 def test_hourly_simulation_collects_generated_rainfall_in_its_assigned_hour() -> None:
     cfg = default_project_config()
     cfg.use_synthetic_hourly_rainfall = True
@@ -77,6 +99,23 @@ def test_hourly_simulation_ignores_generated_profile_when_option_is_off() -> Non
 
     assert result.loc[5, "CollectedGallons"] == pytest.approx(0.0)
     assert result.loc[23, "CollectedGallons"] > 0.0
+
+
+def test_hourly_simulation_accumulates_overflow_for_animation() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.0)]
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+        "Precipitation": [1.0, 0.5],
+    })
+
+    result = simulate_hourly_tank(cfg, rainfall, 100.0)
+
+    assert result["CumulativeOverflowGallons"].to_numpy() == pytest.approx(
+        result["OverflowGallons"].cumsum().to_numpy()
+    )
+    assert result.iloc[-1]["CumulativeOverflowGallons"] > 0.0
 
 
 def test_simulate_tank_returns_expected_columns() -> None:

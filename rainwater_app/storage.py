@@ -10,6 +10,7 @@ from typing import Any
 import pandas as pd
 
 from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
+from .system_model import ensure_primary_overflow_paths
 from .models import (
     DemandObject,
     DemandProfile,
@@ -327,6 +328,14 @@ class SQLiteStore:
         system_layout = [
             dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
         ]
+        system_connections = [
+            {str(key): str(value) for key, value in item.items()}
+            for item in payload.get("system_connections", [])
+            if isinstance(item, dict)
+        ]
+        system_layout, system_connections = ensure_primary_overflow_paths(
+            system_layout, system_connections
+        )
         if migrated_indices:
             for item in system_layout:
                 if item.get("component_type") != "end_uses":
@@ -364,11 +373,7 @@ class SQLiteStore:
                 else "Direct system"
             ),
             system_layout=system_layout,
-            system_connections=[
-                {str(key): str(value) for key, value in item.items()}
-                for item in payload.get("system_connections", [])
-                if isinstance(item, dict)
-            ],
+            system_connections=system_connections,
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,

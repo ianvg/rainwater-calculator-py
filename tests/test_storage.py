@@ -262,8 +262,14 @@ def test_system_builder_layout_is_loaded() -> None:
         {"name": "Builder", "system_layout": layout, "system_connections": connections}
     )
 
-    assert config.system_layout == layout
-    assert config.system_connections == connections
+    assert config.system_layout[:len(layout)] == layout
+    assert config.system_layout[-1]["component_type"] == "overflow_pipe"
+    assert config.system_connections[:len(connections)] == connections
+    assert config.system_connections[-1] == {
+        "source_component": "primary_tank_1",
+        "source_port": "overflow",
+        "target_component": config.system_layout[-1]["id"],
+    }
 
 
 def test_custom_system_template_library_crud(tmp_path) -> None:

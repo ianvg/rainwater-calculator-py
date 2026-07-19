@@ -80,7 +80,11 @@ from rainwater_app.rainfall import (
     load_rainfall_csv,
 )
 from rainwater_app.storage import SQLiteStore
-from rainwater_app.system_model import compile_builder_system, validate_builder_system
+from rainwater_app.system_model import (
+    compile_builder_system,
+    ensure_primary_overflow_paths,
+    validate_builder_system,
+)
 from rainwater_app.stations import bounding_box, nearest_stations
 from rainwater_app.units import (
     LITERS_PER_GALLON,
@@ -610,6 +614,16 @@ def _report_tank_level_distribution(
         }
         for index, count in enumerate(counts)
     ]
+
+
+def _tank_volume_capacity_label(
+    current_gallons: float, capacity_gallons: float, config: ProjectConfig
+) -> str:
+    """Format the animated tank's current volume and capacity in project units."""
+    current = volume_to_display(max(float(current_gallons), 0.0), config)
+    capacity = volume_to_display(max(float(capacity_gallons), 0.0), config)
+    unit = volume_unit(config)
+    return f"{current:,.0f} {unit} / {capacity:,.0f} {unit}"
 
 
 class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
@@ -1972,6 +1986,7 @@ class RainwaterTkApp(tk.Tk):
             "municipal_backup": "Municipal water backup",
             "end_uses": "End-uses",
             "first_flush_diversion": "First-flush diversion",
+            "overflow_pipe": "Overflow pipe",
         }
 
     def _new_system_component_id(self, component_type: str) -> str:
@@ -2291,6 +2306,13 @@ class RainwaterTkApp(tk.Tk):
             settings, text="Repeat day",
             variable=self.system_animation_auto_replay_var,
         ).grid(row=0, column=2, sticky="w", padx=(0, 14))
+        self.system_animation_show_pipe_flow_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            settings,
+            text="Show instantaneous pipe flow",
+            variable=self.system_animation_show_pipe_flow_var,
+            command=self._draw_system_animation,
+        ).grid(row=0, column=3, sticky="w")
         self.system_animation_canvas = tk.Canvas(
             parent, background="white", highlightthickness=1,
             highlightbackground="#b7b7b7", width=980, height=500,
@@ -2351,10 +2373,32 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showerror(APP_TITLE, "The selected rainfall day is unavailable.", parent=self)
             return
         try:
-            self.system_animation_results = simulate_hourly_tank(
-                self.config_model, selected_rainfall,
-                float(self.config_model.selected_tank_size_gal),
+            current_signature = analysis_input_signature(
+                self.config_model, self.rainfall_df
             )
+            cached_dates = pd.to_datetime(
+                self.hourly_results_df.get("Date", pd.Series(dtype="datetime64[ns]")),
+                errors="coerce",
+            )
+            cached_day = self.hourly_results_df.loc[
+                cached_dates.dt.normalize() == selected_date
+            ].copy()
+            cache_is_current = (
+                self.config_model.analysis_input_signature == current_signature
+                and len(cached_day) == 24
+                and "PrimaryTankBeginningGallons" in cached_day.columns
+                and "CumulativeOverflowGallons" in cached_day.columns
+            )
+            if cache_is_current:
+                self.system_animation_results = cached_day.reset_index(drop=True)
+            else:
+                history = self.rainfall_df.loc[dates <= selected_date].copy()
+                self.system_animation_results = simulate_hourly_tank(
+                    self.config_model,
+                    history,
+                    float(self.config_model.selected_tank_size_gal),
+                    result_start_date=selected_date,
+                ).reset_index(drop=True)
         except (TypeError, ValueError) as exc:
             messagebox.showerror(APP_TITLE, f"Could not simulate the selected day:\n{exc}", parent=self)
             return
@@ -2691,7 +2735,9 @@ class RainwaterTkApp(tk.Tk):
         if source_type == "municipal_backup":
             return float(row.get("MainsMakeupGallons", 0.0)) > 1e-9
         if target_type == "first_flush_diversion":
-            return False
+            return float(row.get("FirstFlushLossGallons", 0.0)) > 1e-9
+        if target_type == "overflow_pipe":
+            return float(row.get("OverflowGallons", 0.0)) > 1e-9
         if source_type in {"primary_tank", "filtration_pump"}:
             return float(row.get("PumpFlowGallons", 0.0)) > 1e-9
         if source_type == "filtration_system":
@@ -2702,6 +2748,40 @@ class RainwaterTkApp(tk.Tk):
             )
             return supplied > 1e-9
         return False
+
+    @staticmethod
+    def _system_animation_connection_flow_gallons(
+        source_type: str, target_type: str, row: pd.Series
+    ) -> float:
+        """Return the volume crossing a builder connection during this hour."""
+        if target_type == "overflow_pipe":
+            return max(float(row.get("OverflowGallons", 0.0)), 0.0)
+        if target_type == "first_flush_diversion":
+            return max(float(row.get("FirstFlushLossGallons", 0.0)), 0.0)
+        if source_type == "rainwater_input":
+            return max(float(row.get("CollectedGallons", 0.0)), 0.0)
+        if source_type == "municipal_backup":
+            return max(float(row.get("MainsMakeupGallons", 0.0)), 0.0)
+        if source_type in {"primary_tank", "filtration_pump"}:
+            return max(float(row.get("PumpFlowGallons", 0.0)), 0.0)
+        if source_type == "filtration_system":
+            return max(float(row.get("FilterThroughputGallons", 0.0)), 0.0)
+        if source_type in {"booster_tank", "booster_pump"}:
+            return max(
+                float(row.get("DemandGallons", 0.0))
+                - float(row.get("SystemUnmetDemandGallons", 0.0)),
+                0.0,
+            )
+        return 0.0
+
+    @staticmethod
+    def _system_animation_pipe_flow_label(
+        hourly_gallons: float, config: ProjectConfig
+    ) -> str:
+        flow = max(float(hourly_gallons), 0.0) / 60.0
+        if config.unit_system == "Metric":
+            return f"{flow * LITERS_PER_GALLON:,.1f} LPM"
+        return f"{flow:,.1f} GPM"
 
     @staticmethod
     def _system_animation_rain_active(row: pd.Series) -> bool:
@@ -2913,22 +2993,48 @@ class RainwaterTkApp(tk.Tk):
                 continue
             sx, sy = point(source); tx, ty = point(target)
             canvas.create_line(sx, sy, tx, ty, fill="#7b878d", width=3, arrow=tk.LAST)
-            if self._system_animation_connection_active(
-                str(source.get("component_type", "")), str(target.get("component_type", "")), row
-            ):
+            source_type = str(source.get("component_type", ""))
+            target_type = str(target.get("component_type", ""))
+            if self._system_animation_connection_active(source_type, target_type, row):
                 for offset in (0.0, 0.33, 0.66):
                     fraction = (self.system_animation_phase + offset) % 1.0
                     px, py = sx + (tx - sx) * fraction, sy + (ty - sy) * fraction
                     canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#1687d9", outline="")
-        primary_begin = (
-            self.config_model.selected_tank_size_gal * self.config_model.tank_parameters.initial_fill_percent / 100.0
-            if hour == 0 else float(self.system_animation_results.iloc[hour - 1].get("WaterInTankGallons", 0.0))
-        )
-        booster_begin = (
+            if self.system_animation_show_pipe_flow_var.get():
+                flow_volume = self._system_animation_connection_flow_gallons(
+                    source_type, target_type, row
+                )
+                label_id = canvas.create_text(
+                    (sx + tx) / 2.0,
+                    (sy + ty) / 2.0 - 9.0,
+                    text=self._system_animation_pipe_flow_label(
+                        flow_volume, self.config_model
+                    ),
+                    fill="#263238",
+                    font=("Segoe UI", 8, "bold"),
+                )
+                bounds = canvas.bbox(label_id)
+                if bounds is not None:
+                    background_id = canvas.create_rectangle(
+                        bounds[0] - 3, bounds[1] - 1,
+                        bounds[2] + 3, bounds[3] + 1,
+                        fill="white", outline="#c5cdd1",
+                    )
+                    canvas.tag_lower(background_id, label_id)
+        primary_begin = float(row.get(
+            "PrimaryTankBeginningGallons",
+            self.config_model.selected_tank_size_gal
+            * self.config_model.tank_parameters.initial_fill_percent / 100.0
+            if hour == 0
+            else self.system_animation_results.iloc[hour - 1].get("WaterInTankGallons", 0.0),
+        ))
+        booster_begin = float(row.get(
+            "BoosterTankBeginningGallons",
             self.config_model.system_parameters.booster_tank_size_gallons
             * self.config_model.system_parameters.booster_initial_fill_percent / 100.0
-            if hour == 0 else float(self.system_animation_results.iloc[hour - 1].get("BoosterTankGallons", 0.0))
-        )
+            if hour == 0
+            else self.system_animation_results.iloc[hour - 1].get("BoosterTankGallons", 0.0),
+        ))
         for item in layout:
             x, y = point(item); component_type = str(item.get("component_type", ""))
             component_id = str(item.get("id", ""))
@@ -2940,12 +3046,30 @@ class RainwaterTkApp(tk.Tk):
             if component_type in {"primary_tank", "booster_tank"}:
                 capacity = (self.config_model.selected_tank_size_gal if component_type == "primary_tank"
                             else self.config_model.system_parameters.booster_tank_size_gallons)
-                volume = primary_begin if component_type == "primary_tank" else booster_begin
+                beginning_volume = primary_begin if component_type == "primary_tank" else booster_begin
+                result_column = (
+                    "WaterInTankGallons"
+                    if component_type == "primary_tank"
+                    else "BoosterTankGallons"
+                )
+                ending_volume = float(row.get(result_column, beginning_volume))
+                volume = beginning_volume + (ending_volume - beginning_volume) * hour_progress
+                volume = min(max(volume, 0.0), max(capacity, 0.0))
                 fraction = min(max(volume / capacity, 0.0), 1.0) if capacity > 0 else 0.0
                 inner_h = max(block_h - 6.0, 0.0) * fraction
                 canvas.create_rectangle(x - block_w / 2 + 3, y + block_h / 2 - 3 - inner_h,
                                         x + block_w / 2 - 3, y + block_h / 2 - 3,
                                         fill="#70b7e6", outline="")
+                canvas.create_text(
+                    x,
+                    y,
+                    text=_tank_volume_capacity_label(volume, capacity, self.config_model),
+                    fill="#172026",
+                    font=("Segoe UI", 7, "bold"),
+                    width=max(block_w - 8.0, 20.0),
+                    justify="center",
+                    tags=(component_tag,),
+                )
             if component_type in {"filtration_pump", "booster_pump"}:
                 running = (float(row.get("PumpFlowGallons", 0.0)) > 1e-9 if component_type == "filtration_pump"
                            else float(row.get("DemandGallons", 0.0)) - float(row.get("SystemUnmetDemandGallons", 0.0)) > 1e-9)
@@ -2965,6 +3089,27 @@ class RainwaterTkApp(tk.Tk):
                         canvas, x, y, max(block_w - 6.0, 1.0), max(block_h - 6.0, 1.0),
                         self.system_animation_phase, raining,
                     )
+            if component_type == "overflow_pipe":
+                overflow_start = float(
+                    row.get("OverflowBeginningCumulativeGallons", 0.0)
+                )
+                overflow_end = float(
+                    row.get("CumulativeOverflowGallons", overflow_start)
+                )
+                overflow_total = overflow_start + (
+                    overflow_end - overflow_start
+                ) * hour_progress
+                canvas.create_text(
+                    x, y,
+                    text=(
+                        "Cumulative overflow\n"
+                        f"{volume_to_display(overflow_total, self.config_model):,.1f} "
+                        f"{volume_unit(self.config_model)}"
+                    ),
+                    fill="#a84300", font=("Segoe UI", 7, "bold"),
+                    width=max(block_w - 8.0, 20.0), justify="center",
+                    tags=(component_tag,),
+                )
             if (
                 component_type == "end_uses"
                 and self._system_animation_irrigation_active(item, animation_timestamp)
@@ -3016,11 +3161,14 @@ class RainwaterTkApp(tk.Tk):
                 if payload.get("system_type") in {"Direct system", "Indirect system"}
                 else "Direct system"
             )
-            cfg.system_layout = [copy.deepcopy(item) for item in layout if isinstance(item, dict)]
-            cfg.system_connections = [
+            loaded_layout = [copy.deepcopy(item) for item in layout if isinstance(item, dict)]
+            loaded_connections = [
                 {str(key): str(value) for key, value in item.items()}
                 for item in connections if isinstance(item, dict)
             ]
+            cfg.system_layout, cfg.system_connections = ensure_primary_overflow_paths(
+                loaded_layout, loaded_connections
+            )
             if isinstance(payload.get("system_parameters"), dict):
                 cfg.system_parameters = SystemComponentParameters(**payload["system_parameters"])
             if isinstance(payload.get("tank_parameters"), dict):
@@ -3087,6 +3235,7 @@ class RainwaterTkApp(tk.Tk):
                 ("booster_pump", "Distribution pump", 460, 135),
                 ("end_uses", "End-uses", 650, 135),
                 ("municipal_backup", "Municipal water backup", 460, 260),
+                ("overflow_pipe", "Overflow pipe", 460, 40),
             ]
             links = [(0, 1), (1, 2), (2, 3), (4, 3)]
         elif system_type == "Indirect system":
@@ -3099,6 +3248,7 @@ class RainwaterTkApp(tk.Tk):
                 ("municipal_backup", "Municipal water backup", 535, 235),
                 ("booster_pump", "Booster pump", 385, 320),
                 ("end_uses", "End-uses", 650, 320),
+                ("overflow_pipe", "Overflow pipe", 385, 20),
             ]
             links = [(0, 1), (1, 2), (2, 3), (3, 4), (5, 4), (4, 6), (6, 7)]
         else:
@@ -3125,6 +3275,17 @@ class RainwaterTkApp(tk.Tk):
             }
             for source, target in links
         ]
+        primary_id = next(
+            str(item["id"]) for item in layout if item["component_type"] == "primary_tank"
+        )
+        overflow_id = next(
+            str(item["id"]) for item in layout if item["component_type"] == "overflow_pipe"
+        )
+        self.config_model.system_connections.append({
+            "source_component": primary_id,
+            "source_port": "overflow",
+            "target_component": overflow_id,
+        })
         self.config_model.system_type = system_type
         self.system_type_var.set(system_type)
         self.current_system_type_var.set(f"Current system type: {system_type}")
@@ -3365,8 +3526,26 @@ class RainwaterTkApp(tk.Tk):
     @staticmethod
     def _system_component_ports(component_type: str) -> tuple[bool, bool]:
         has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
-        has_outlet = component_type not in {"end_uses", "first_flush_diversion"}
+        has_outlet = component_type not in {
+            "end_uses", "first_flush_diversion", "overflow_pipe"
+        }
         return has_inlet, has_outlet
+
+    @staticmethod
+    def _primary_tank_outlet_offset(
+        item: dict[str, object], source_port: str
+    ) -> float:
+        """Return the vertical offset for a primary tank's distinct outlets."""
+        has_optional_outlet = bool(item.get("extra_output_node"))
+        if source_port == "overflow":
+            return 20.0 if has_optional_outlet else 14.0
+        if source_port == "out2":
+            return 0.0
+        return -20.0 if has_optional_outlet else -14.0
+
+    @staticmethod
+    def _system_port_is_output(direction: str) -> bool:
+        return direction.startswith("out") or direction == "overflow"
 
     def _connect_system_components(
         self, source_id: str, target_id: str, target_port: str = "in",
@@ -3378,8 +3557,8 @@ class RainwaterTkApp(tk.Tk):
             self._render_system_builder()
             return
         connection = {"source_component": source_id, "target_component": target_id}
-        if source_port == "out2":
-            connection["source_port"] = "out2"
+        if source_port in {"out2", "overflow"}:
+            connection["source_port"] = source_port
         if target_port == "in2":
             connection["target_port"] = "in2"
         if connection not in self.config_model.system_connections:
@@ -3470,7 +3649,7 @@ class RainwaterTkApp(tk.Tk):
             return
         if port_tag is not None:
             _prefix, component_id, direction = port_tag.split(":", 2)
-            if direction.startswith("out") and self.system_builder_pending_target is not None:
+            if self._system_port_is_output(direction) and self.system_builder_pending_target is not None:
                 self._connect_system_components(
                     component_id, self.system_builder_pending_target,
                     self.system_builder_pending_target_port, direction,
@@ -3482,7 +3661,7 @@ class RainwaterTkApp(tk.Tk):
                     self.system_builder_pending_source_port,
                 )
                 self.system_builder_port_drag = None
-            elif direction.startswith("out"):
+            elif self._system_port_is_output(direction):
                 self.system_builder_pending_source = component_id
                 self.system_builder_pending_source_port = direction
                 self.system_builder_pending_target = None
@@ -3569,10 +3748,11 @@ class RainwaterTkApp(tk.Tk):
                 return
             x, y = float(item.get("x", 0.0)), float(item.get("y", 0.0))
             half_width = max(float(item.get("width", 124.0)), 80.0) / 2.0
-            start_x = x + half_width + 3.0 if direction.startswith("out") else x - half_width - 3.0
+            output_port = self._system_port_is_output(direction)
+            start_x = x + half_width + 3.0 if output_port else x - half_width - 3.0
             start_y = y + (14.0 if direction == "in2" else (-14.0 if direction == "in" and item.get("extra_input_node") else 0.0))
-            if direction.startswith("out") and item.get("extra_output_node"):
-                start_y = y + (14.0 if direction == "out2" else -14.0)
+            if output_port and item.get("component_type") == "primary_tank":
+                start_y = y + self._primary_tank_outlet_offset(item, direction)
             self.system_builder_canvas.delete("pending-link-preview")
             zoom = self.system_builder_zoom
             self.system_builder_canvas.create_line(
@@ -3637,7 +3817,7 @@ class RainwaterTkApp(tk.Tk):
             self._clear_system_port_drag_hover()
             self.system_builder_canvas.delete("pending-link-preview")
             if target_port is not None and target_port[1] != origin_direction:
-                if origin_direction.startswith("out"):
+                if self._system_port_is_output(origin_direction):
                     self._connect_system_components(
                         origin_id, target_port[0], target_port[1], origin_direction
                     )
@@ -3653,18 +3833,23 @@ class RainwaterTkApp(tk.Tk):
         if self.system_builder_hover_port is None:
             return
         component_id, direction = self.system_builder_hover_port
-        base_fill = "#1565c0" if direction.startswith("in") else "#c62828"
+        base_fill = (
+            "#1565c0" if direction.startswith("in")
+            else "#ef6c00" if direction == "overflow"
+            else "#c62828"
+        )
         for canvas_item in self.system_builder_canvas.find_withtag(
             f"port:{component_id}:{direction}"
         ):
-            self.system_builder_canvas.itemconfigure(canvas_item, fill=base_fill)
+            if self.system_builder_canvas.type(canvas_item) == "oval":
+                self.system_builder_canvas.itemconfigure(canvas_item, fill=base_fill)
         self.system_builder_hover_port = None
 
     def _update_system_port_drag_hover(
         self, x: float, y: float, origin_id: str, origin_direction: str
     ) -> None:
         self._clear_system_port_drag_hover()
-        expected_direction = "in" if origin_direction.startswith("out") else "out"
+        expected_direction = "in" if self._system_port_is_output(origin_direction) else "out"
         overlapping = self.system_builder_canvas.find_overlapping(x - 2, y - 2, x + 2, y + 2)
         for canvas_item in reversed(overlapping):
             port_tag = next(
@@ -3675,11 +3860,19 @@ class RainwaterTkApp(tk.Tk):
                 continue
             _prefix, component_id, direction = port_tag.split(":", 2)
             if ((expected_direction == "in" and not direction.startswith("in"))
-                    or (expected_direction == "out" and not direction.startswith("out"))
+                    or (expected_direction == "out" and not self._system_port_is_output(direction))
                     or component_id == origin_id):
                 continue
-            hover_fill = "#90caf9" if direction.startswith("in") else "#ef9a9a"
-            self.system_builder_canvas.itemconfigure(canvas_item, fill=hover_fill)
+            hover_fill = (
+                "#90caf9" if direction.startswith("in")
+                else "#ffcc80" if direction == "overflow"
+                else "#ef9a9a"
+            )
+            for port_item in self.system_builder_canvas.find_withtag(
+                f"port:{component_id}:{direction}"
+            ):
+                if self.system_builder_canvas.type(port_item) == "oval":
+                    self.system_builder_canvas.itemconfigure(port_item, fill=hover_fill)
             self.system_builder_hover_port = (component_id, direction)
             break
 
@@ -3749,6 +3942,12 @@ class RainwaterTkApp(tk.Tk):
                 if item.get("source_component") != component_id
                 or item.get("source_port", "out") != "out2"
             ]
+        if direction == "overflow":
+            return [
+                item for item in connections
+                if item.get("source_component") != component_id
+                or item.get("source_port", "out") != "overflow"
+            ]
         return [
             item for item in connections
             if item.get("source_component") != component_id
@@ -3759,7 +3958,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_selected_id = component_id
         self.system_builder_selected_connection = None
         self.system_builder_port_drag = None
-        if direction.startswith("out"):
+        if self._system_port_is_output(direction):
             self.system_builder_pending_source = component_id
             self.system_builder_pending_source_port = direction
             self.system_builder_pending_target = None
@@ -3782,7 +3981,8 @@ class RainwaterTkApp(tk.Tk):
         self._clear_system_port_drag_hover()
         node_label = {
             "in": "input node", "in2": "second input node",
-            "out": "output node", "out2": "second output node", None: "object",
+            "out": "output node", "out2": "second output node",
+            "overflow": "overflow outlet", None: "object",
         }[direction]
         self.status_var.set(f"Disconnected {removed} connection(s) from the {node_label}")
         self._render_system_builder()
@@ -3804,11 +4004,12 @@ class RainwaterTkApp(tk.Tk):
         if port is None:
             return None
         component_id, direction = port
-        node_key = "source_component" if direction.startswith("out") else "target_component"
+        output_port = self._system_port_is_output(direction)
+        node_key = "source_component" if output_port else "target_component"
         node_connections = sum(
             connection.get(node_key) == component_id
             and (
-                (direction.startswith("out") and connection.get("source_port", "out") == direction)
+                (output_port and connection.get("source_port", "out") == direction)
                 or (direction.startswith("in") and connection.get("target_port", "in") == direction)
             )
             for connection in self.config_model.system_connections
@@ -4118,8 +4319,10 @@ class RainwaterTkApp(tk.Tk):
                 continue
             source_x, source_y = float(source.get("x", 0.0)), float(source.get("y", 0.0))
             target_x, target_y = float(target.get("x", 0.0)), float(target.get("y", 0.0))
-            if source.get("component_type") == "primary_tank" and source.get("extra_output_node"):
-                source_y += 14.0 if connection.get("source_port") == "out2" else -14.0
+            if source.get("component_type") == "primary_tank":
+                source_y += self._primary_tank_outlet_offset(
+                    source, str(connection.get("source_port", "out"))
+                )
             if target.get("component_type") == "booster_tank" and target.get("extra_input_node"):
                 target_y += 14.0 if connection.get("target_port") == "in2" else -14.0
             selected = connection is self.system_builder_selected_connection
@@ -4229,7 +4432,10 @@ class RainwaterTkApp(tk.Tk):
                         )
             if has_outlet:
                 extra_outlet = component_type == "primary_tank" and bool(item.get("extra_output_node"))
-                outlet_y = y - 14.0 if extra_outlet else y
+                outlet_y = (
+                    y + self._primary_tank_outlet_offset(item, "out")
+                    if component_type == "primary_tank" else y
+                )
                 pending = (
                     component_id == self.system_builder_pending_source
                     and self.system_builder_pending_source_port == "out"
@@ -4242,7 +4448,7 @@ class RainwaterTkApp(tk.Tk):
                     tags=(f"port:{component_id}:out",),
                 )
                 if component_type == "primary_tank":
-                    second_y = y + 14.0
+                    second_y = y + self._primary_tank_outlet_offset(item, "out2")
                     if extra_outlet:
                         second_pending = (
                             component_id == self.system_builder_pending_source
@@ -4280,6 +4486,23 @@ class RainwaterTkApp(tk.Tk):
                             fill="#b86f6f", font=("Segoe UI", 11, "bold"),
                             tags=(affordance_tag,),
                         )
+                    overflow_y = y + self._primary_tank_outlet_offset(item, "overflow")
+                    overflow_pending = (
+                        component_id == self.system_builder_pending_source
+                        and self.system_builder_pending_source_port == "overflow"
+                    )
+                    canvas.create_oval(
+                        x + half_width - 4, overflow_y - 7,
+                        x + half_width + 10, overflow_y + 7,
+                        fill="#ffcc80" if overflow_pending else "#ef6c00",
+                        outline="#a84300", width=3 if overflow_pending else 2,
+                        tags=(f"port:{component_id}:overflow",),
+                    )
+                    canvas.create_text(
+                        x + half_width + 22, overflow_y,
+                        text="OF", fill="#a84300", font=("Segoe UI", 6, "bold"),
+                        tags=(f"port:{component_id}:overflow",),
+                    )
         if self.system_builder_zoom != 1.0:
             canvas.scale("all", 0.0, 0.0, self.system_builder_zoom, self.system_builder_zoom)
         if self.system_builder_pan_x or self.system_builder_pan_y:

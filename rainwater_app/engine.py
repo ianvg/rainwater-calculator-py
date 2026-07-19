@@ -599,8 +599,13 @@ def simulate_hourly_tank(
     rainfall_df: pd.DataFrame,
     tank_size_gallons: float,
     cancel_callback: Callable[[], bool] | None = None,
+    result_start_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Simulate hourly demand using synthetic profiles or the 23:00 fallback."""
+    """Simulate hourly demand using synthetic profiles or the 23:00 fallback.
+
+    When ``result_start_date`` is provided, earlier rows still warm up the tank
+    state but are omitted from the returned frame.
+    """
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
     data = _validate_rainfall(rainfall_df)
@@ -648,6 +653,12 @@ def simulate_hourly_tank(
     )
     minimum_operating_volume = tank_size_gallons * minimum_operating_fraction
     water = tank_size_gallons * initial_fill
+    cumulative_overflow = 0.0
+    output_start = (
+        pd.Timestamp(result_start_date).normalize()
+        if result_start_date is not None
+        else None
+    )
     rows: list[dict[str, object]] = []
     met_hours = 0
     for day_index, date in enumerate(data["Date"]):
@@ -678,6 +689,9 @@ def simulate_hourly_tank(
                 )
         for hour, fraction in enumerate(fractions):
             hourly_index = day_index * 24 + hour
+            primary_tank_beginning = water
+            booster_tank_beginning = booster_water
+            overflow_beginning_cumulative = cumulative_overflow
             demand_hour = max(
                 float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
                 0.0,
@@ -780,6 +794,10 @@ def simulate_hourly_tank(
             water += collected_hour
             overflow = max(water - tank_size_gallons, 0.0)
             water = min(max(water, 0.0), tank_size_gallons)
+            cumulative_overflow += overflow
+            include_row = output_start is None or timestamp.normalize() >= output_start
+            if not include_row:
+                continue
             met_hours += int(met)
             rows.append(
                 {
@@ -807,9 +825,13 @@ def simulate_hourly_tank(
                     "PumpFlowGallons": pump_flow,
                     "FilterThroughputGallons": filter_throughput,
                     "FilterLossGallons": filter_loss,
+                    "PrimaryTankBeginningGallons": primary_tank_beginning,
+                    "BoosterTankBeginningGallons": booster_tank_beginning,
                     "BoosterTankGallons": booster_water,
                     "BoosterRefillActive": refill_active,
                     "OverflowGallons": overflow,
+                    "OverflowBeginningCumulativeGallons": overflow_beginning_cumulative,
+                    "CumulativeOverflowGallons": cumulative_overflow,
                     "WaterInTankGallons": water,
                     "MinimumOperatingVolumeGallons": minimum_operating_volume,
                     "UsableWaterAvailableGallons": max(water - minimum_operating_volume, 0.0),

@@ -1,5 +1,6 @@
 from rainwater_app.system_model import (
-    Connection, build_system_template, compile_builder_system, validate_builder_system,
+    Connection, build_system_template, compile_builder_system,
+    ensure_primary_overflow_paths, validate_builder_system,
 )
 
 
@@ -8,6 +9,7 @@ def test_direct_system_template_is_valid() -> None:
 
     assert system.validate() == []
     assert system.components["distribution_pump"].component_type == "pump"
+    assert system.components["overflow"].component_type == "overflow_pipe"
     assert "filtration" not in system.components
 
 
@@ -112,17 +114,57 @@ def test_builder_validation_accepts_direct_template_layout() -> None:
         {"id": "pump", "component_type": "booster_pump"},
         {"id": "uses", "component_type": "end_uses"},
         {"id": "mains", "component_type": "municipal_backup"},
+        {"id": "overflow", "component_type": "overflow_pipe"},
     ]
     connections = [
         {"source_component": "rain", "target_component": "tank"},
         {"source_component": "tank", "target_component": "pump"},
         {"source_component": "pump", "target_component": "uses"},
         {"source_component": "mains", "target_component": "uses"},
+        {
+            "source_component": "tank", "source_port": "overflow",
+            "target_component": "overflow",
+        },
     ]
 
     assert validate_builder_system(
         layout, connections, municipal_backup_enabled=True
     ) == []
+
+
+def test_builder_validation_requires_dedicated_primary_overflow_path() -> None:
+    layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "tank", "component_type": "primary_tank"},
+        {"id": "pump", "component_type": "booster_pump"},
+        {"id": "uses", "component_type": "end_uses"},
+        {"id": "overflow", "component_type": "overflow_pipe"},
+    ]
+    connections = [
+        {"source_component": "rain", "target_component": "tank"},
+        {"source_component": "tank", "target_component": "pump"},
+        {"source_component": "pump", "target_component": "uses"},
+        {"source_component": "tank", "target_component": "overflow"},
+    ]
+
+    warnings = validate_builder_system(layout, connections)
+
+    assert "Connect tank's overflow outlet directly to an overflow pipe." in warnings
+    assert "An overflow pipe must connect directly from a primary tank overflow outlet." in warnings
+
+
+def test_existing_builder_layout_is_migrated_with_overflow_pipe() -> None:
+    layout, connections = ensure_primary_overflow_paths(
+        [{"id": "tank", "component_type": "primary_tank", "x": 100, "y": 100}],
+        [],
+    )
+
+    assert layout[-1]["component_type"] == "overflow_pipe"
+    assert connections == [{
+        "source_component": "tank",
+        "source_port": "overflow",
+        "target_component": layout[-1]["id"],
+    }]
 
 
 def test_builder_validation_requires_a_valid_demand_assignment_for_each_end_use() -> None:
