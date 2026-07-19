@@ -1,6 +1,18 @@
 # Reports
 
-Reports summarize the project information, end uses, collection surfaces, selected reliability, and reliability curve.
+Reports summarize the project inputs, hydraulic performance, end-use allocation, financial results, provenance, and reliability charts.
+
+The HTML report begins with an **Executive design summary** containing the selected tank, reliability, average annual rainwater supply, municipal makeup, system unmet demand, overflow, first-flush and treatment losses, net annual savings, and simple payback. When financial inputs are not configured, the report says so instead of implying that zero-value economics represent a completed assessment.
+
+The **Candidate tank performance** table extends the reliability curve with average annual supply, municipal makeup, system unmet demand, overflow, first-flush loss, treatment loss, end-of-record storage, net annual savings, and simple payback. The selected primary tank is highlighted. In HTML, select a column heading to sort the table.
+
+The **Reconciled water balance** keeps two accounting stages separate. The collection balance shows potential rainfall volume, runoff-coefficient loss, gross runoff, first-flush diversion, and net collection. The primary-storage balance reconciles initial storage and collection against rainwater supply, treatment loss, overflow, and final storage. Runoff coefficients apply to every rainfall observation; first-flush diversion applies once at the start of a qualifying rainfall event.
+
+The **End-use demand and savings** table reports each demand object's type, operating schedule, sewer eligibility, average annual demand, allocated rainwater supply, demand met, and water and sewer savings. When several objects operate on the same day, supplied rainwater is allocated in proportion to their simulated demand for that day.
+
+The **Financial assumptions and results** section records tariffs, billing units, legacy sewer eligibility, installed cost, incentives, maintenance, analysis period, delivered rainwater, savings, net cost, payback, and undiscounted analysis-period net benefit.
+
+The **Analysis provenance and reproducibility** section identifies the rainfall source and record coverage, missing calendar days, timestep and rainfall-timing assumptions, system and municipal-backup state, initial tank fill, filter recovery, application and algorithm versions, analysis signature, and report-generation timestamp.
 
 Project information includes mean annual precipitation, calculated as the mean of the yearly precipitation totals in the imported record. The value is displayed in inches for Imperial projects and millimeters for Metric projects. The report also identifies whether the rainfall import uses **Total precipitation** or **Rain only**.
 
@@ -61,7 +73,7 @@ When `pdflatex` is available, the application saves LaTeX source and compiles it
 
 ## HTML details
 
-The generated file is self-contained and can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. Its reliability chart includes point details on hover. In the Yearly Demand Reliability chart, hover over either stacked-bar segment to see the year's met and unmet day counts and percentages. Hover over a yellow marker to see that year's reliability or the overall reliability across the analyzed years.
+The generated file can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. The optional location map currently uses online Leaflet assets and OpenStreetMap tiles, so that part of the report requires network access. Its reliability chart includes point details on hover. In the Yearly Demand Reliability chart, hover over either stacked-bar segment to see the year's met and unmet day counts and percentages. Hover over a yellow marker to see that year's reliability or the overall reliability across the analyzed years.
 
 ## Report review
 

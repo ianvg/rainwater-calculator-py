@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import html
 import http.server
+import importlib.metadata as importlib_metadata
 import json
 import math
 import os
@@ -38,7 +39,7 @@ from rainwater_app.acis import (
     fetch_station_options,
     fetch_station_options_bbox,
 )
-from rainwater_app.analysis_state import analysis_input_signature
+from rainwater_app.analysis_state import ANALYSIS_ALGORITHM_VERSION, analysis_input_signature
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.eccc import (
     fetch_canadian_station_by_id,
@@ -46,10 +47,18 @@ from rainwater_app.eccc import (
     fetch_canadian_station_options,
     fetch_canadian_station_options_bbox,
 )
-from rainwater_app.engine import AnalysisCancelledError, reliability_curve, simulate_hourly_tank, simulate_tank
+from rainwater_app.engine import (
+    AnalysisCancelledError,
+    demand_object_daily_value_for_date,
+    demand_object_sewer_eligible_fraction,
+    reliability_curve,
+    simulate_hourly_tank,
+    simulate_tank,
+)
 from rainwater_app.financial import (
     calculate_financial_results,
     calculate_financial_results_from_annual_supply,
+    tariff_rate_per_gallon,
 )
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
@@ -8562,6 +8571,179 @@ class RainwaterTkApp(tk.Tk):
         cfg.weather_station_latitude, cfg.weather_station_longitude = coordinates
         return coordinates
 
+    @staticmethod
+    def _average_annual_result_total(results: pd.DataFrame, column: str) -> float:
+        if results.empty or "Date" not in results or column not in results:
+            return 0.0
+        values = results[["Date", column]].copy()
+        values["Date"] = pd.to_datetime(values["Date"], errors="coerce")
+        values[column] = pd.to_numeric(values[column], errors="coerce").fillna(0.0)
+        values = values.dropna(subset=["Date"])
+        annual = values.groupby(values["Date"].dt.year)[column].sum()
+        return float(annual.mean()) if not annual.empty else 0.0
+
+    def _report_end_use_rows(self) -> list[dict[str, object]]:
+        cfg = self.config_model
+        if self.results_df.empty or "Date" not in self.results_df:
+            return []
+        dates = pd.to_datetime(self.results_df["Date"], errors="coerce")
+        total_demand = pd.to_numeric(
+            self.results_df.get("DemandGallons", pd.Series(0.0, index=self.results_df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        supplied = pd.to_numeric(
+            self.results_df.get("RainwaterSuppliedGallons", pd.Series(0.0, index=self.results_df.index)),
+            errors="coerce",
+        ).fillna(0.0)
+        water_rate = tariff_rate_per_gallon(
+            cfg.financial_parameters.water_rate, cfg.financial_parameters.tariff_billing_unit
+        )
+        sewer_rate = tariff_rate_per_gallon(
+            cfg.financial_parameters.sewer_rate, cfg.financial_parameters.tariff_billing_unit
+        )
+        rows: list[dict[str, object]] = []
+        assigned_demand = pd.Series(0.0, index=self.results_df.index)
+        assigned_supply = pd.Series(0.0, index=self.results_df.index)
+
+        def annual_average(values: pd.Series) -> float:
+            frame = pd.DataFrame({"Date": dates, "Value": values}).dropna(subset=["Date"])
+            annual = frame.groupby(frame["Date"].dt.year)["Value"].sum()
+            return float(annual.mean()) if not annual.empty else 0.0
+
+        for demand_object in cfg.demand.demand_objects:
+            object_demand = pd.Series(
+                [
+                    0.0 if pd.isna(date) else demand_object_daily_value_for_date(
+                        cfg.demand, demand_object, pd.Timestamp(date)
+                    )
+                    for date in dates
+                ],
+                index=self.results_df.index,
+                dtype=float,
+            )
+            object_supply = supplied * object_demand.div(total_demand.where(total_demand > 0.0, 1.0))
+            object_supply = object_supply.where(total_demand > 0.0, 0.0)
+            sewer_fraction = demand_object_sewer_eligible_fraction(
+                demand_object, cfg.financial_parameters.sewer_eligible_percent
+            )
+            annual_demand = annual_average(object_demand)
+            annual_supply = annual_average(object_supply)
+            sewer_supply = annual_supply * sewer_fraction
+            mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+            if mode == "monthly_volume":
+                schedule = "Monthly volume profile"
+            elif mode == "recurring_daily":
+                days = getattr(demand_object, "operating_weekdays", None) or []
+                labels = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+                schedule = ", ".join(labels[int(day)] for day in days if 0 <= int(day) <= 6) or "No operating days"
+            else:
+                schedule = demand_object.schedule_name or "Schedule not specified"
+            sewer_basis = (
+                f"Legacy aggregate ({sewer_fraction * 100.0:g}%)"
+                if getattr(demand_object, "uses_legacy_sewer_eligibility", False)
+                else ("Eligible" if sewer_fraction > 0.0 else "Exempt")
+            )
+            rows.append({
+                "name": demand_object.name,
+                "type": demand_object.object_type,
+                "schedule": schedule,
+                "sewer_basis": sewer_basis,
+                "annual_demand": volume_to_display(annual_demand, cfg),
+                "annual_supply": volume_to_display(annual_supply, cfg),
+                "demand_met_percent": annual_supply / annual_demand * 100.0 if annual_demand > 0.0 else 0.0,
+                "water_savings": annual_supply * water_rate,
+                "sewer_savings": sewer_supply * sewer_rate,
+            })
+            assigned_demand += object_demand
+            assigned_supply += object_supply
+
+        legacy_demand = (total_demand - assigned_demand).clip(lower=0.0)
+        if float(legacy_demand.sum()) > 1e-6:
+            legacy_supply = (supplied - assigned_supply).clip(lower=0.0)
+            annual_demand = annual_average(legacy_demand)
+            annual_supply = annual_average(legacy_supply)
+            sewer_fraction = min(max(cfg.financial_parameters.sewer_eligible_percent, 0.0), 100.0) / 100.0
+            rows.append({
+                "name": "Legacy aggregate demand",
+                "type": "Legacy project inputs",
+                "schedule": cfg.demand.active_hourly_schedule_name or "Project demand schedule",
+                "sewer_basis": f"Legacy aggregate ({sewer_fraction * 100.0:g}%)",
+                "annual_demand": volume_to_display(annual_demand, cfg),
+                "annual_supply": volume_to_display(annual_supply, cfg),
+                "demand_met_percent": annual_supply / annual_demand * 100.0 if annual_demand > 0.0 else 0.0,
+                "water_savings": annual_supply * water_rate,
+                "sewer_savings": annual_supply * sewer_fraction * sewer_rate,
+            })
+        return rows
+
+    def _report_candidate_rows(self) -> list[dict[str, object]]:
+        cfg = self.config_model
+        data = self._candidate_performance_data()
+        if data.empty:
+            return []
+        dates = pd.to_datetime(self.results_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
+        year_count = max(int(dates.dropna().dt.year.nunique()), 1)
+        annual_columns = (
+            "RainwaterSuppliedGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
+            "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
+        )
+        rows: list[dict[str, object]] = []
+        for row in data.to_dict("records"):
+            output: dict[str, object] = {
+                "selected": abs(float(row["TankSizeGallons"]) - cfg.selected_tank_size_gal) < 0.01,
+                "tank_size": volume_to_display(float(row["TankSizeGallons"]), cfg),
+                "reliability": float(row["ReliabilityPercent"]),
+            }
+            for column in annual_columns:
+                value = row.get(column)
+                output[column] = None if pd.isna(value) else volume_to_display(float(value) / year_count, cfg)
+            final_storage = row.get("FinalStorageGallons")
+            output["FinalStorageGallons"] = (
+                None if pd.isna(final_storage) else volume_to_display(float(final_storage), cfg)
+            )
+            output["NetAnnualSavings"] = None if pd.isna(row.get("NetAnnualSavings")) else float(row["NetAnnualSavings"])
+            output["SimplePaybackYears"] = None if pd.isna(row.get("SimplePaybackYears")) else float(row["SimplePaybackYears"])
+            rows.append(output)
+        return rows
+
+    def _report_water_balance(self) -> dict[str, float]:
+        cfg = self.config_model
+        results = self.results_df
+        total_area_sqft = sum(max(float(surface.area), 0.0) for surface in cfg.surfaces)
+        rainfall_inches = pd.to_numeric(
+            self.rainfall_df.get("Precipitation", pd.Series(dtype=float)), errors="coerce"
+        ).fillna(0.0).clip(lower=0.0).sum()
+        potential = float(rainfall_inches) * total_area_sqft / 12.0 * 7.48051948
+        total = lambda column: float(pd.to_numeric(results.get(column, pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
+        gross = total("GrossCollectedGallons")
+        first_flush = total("FirstFlushLossGallons")
+        collected = total("CollectedGallons")
+        supplied = total("RainwaterSuppliedGallons")
+        treatment = total("FilterLossGallons")
+        overflow = total("OverflowGallons")
+        initial = cfg.selected_tank_size_gal * min(max(cfg.tank_parameters.initial_fill_percent, 0.0), 100.0) / 100.0
+        final = (
+            float(pd.to_numeric(results["WaterInTankGallons"], errors="coerce").fillna(0.0).iloc[-1])
+            if not results.empty and "WaterInTankGallons" in results else 0.0
+        )
+        return {
+            key: volume_to_display(value, cfg)
+            for key, value in {
+                "potential_surface_rainfall": potential,
+                "runoff_coefficient_loss": max(potential - gross, 0.0),
+                "gross_runoff": gross,
+                "first_flush_loss": first_flush,
+                "net_collected": collected,
+                "initial_storage": initial,
+                "rainwater_supplied": supplied,
+                "treatment_loss": treatment,
+                "overflow": overflow,
+                "final_storage": final,
+                "collection_residual": potential - max(potential - gross, 0.0) - first_flush - collected,
+                "storage_residual": initial + collected - supplied - treatment - overflow - final,
+            }.items()
+        }
+
     def _build_report_content(self, metadata: dict[str, object]) -> dict[str, object]:
         cfg = self.config_model
         station_latitude, station_longitude = self._report_weather_station_coordinates()
@@ -8572,6 +8754,37 @@ class RainwaterTkApp(tk.Tk):
         selected_reliability: float | None = None
         if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
             selected_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+        params = cfg.financial_parameters
+        financial_results = calculate_financial_results(
+            self.results_df,
+            water_rate=params.water_rate,
+            sewer_rate=params.sewer_rate,
+            billing_unit=params.tariff_billing_unit,
+            sewer_eligible_percent=params.sewer_eligible_percent,
+            installed_cost=params.installed_cost,
+            incentives=params.incentives,
+            fixed_annual_maintenance=params.fixed_annual_maintenance,
+            maintenance_percent=params.annual_maintenance_percent,
+            analysis_period_years=params.analysis_period_years,
+        )
+        financial_configured = any(float(value) > 0.0 for value in (
+            params.water_rate, params.sewer_rate, params.installed_cost, params.incentives,
+            params.fixed_annual_maintenance, params.annual_maintenance_percent,
+        ))
+        result_dates = pd.to_datetime(self.results_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
+        rainfall_dates = pd.to_datetime(self.rainfall_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
+        record_start = rainfall_dates.min().date().isoformat() if not rainfall_dates.empty else "Not available"
+        record_end = rainfall_dates.max().date().isoformat() if not rainfall_dates.empty else "Not available"
+        unique_rainfall_dates = pd.DatetimeIndex(rainfall_dates.dt.normalize().unique())
+        expected_days = (
+            len(pd.date_range(unique_rainfall_dates.min(), unique_rainfall_dates.max(), freq="D"))
+            if len(unique_rainfall_dates) else 0
+        )
+        missing_days = max(expected_days - len(unique_rainfall_dates), 0)
+        try:
+            application_version = importlib_metadata.version("rainwater-calculator-standalone")
+        except importlib_metadata.PackageNotFoundError:
+            application_version = "development build"
         return {
             "metadata": dict(metadata),
             "notes": cfg.notes,
@@ -8611,6 +8824,78 @@ class RainwaterTkApp(tk.Tk):
                 cfg,
             ),
             "selected_reliability": selected_reliability,
+            "executive_summary": {
+                "average_annual_supply": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "RainwaterSuppliedGallons"), cfg
+                ),
+                "average_annual_municipal_makeup": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "MainsMakeupGallons"), cfg
+                ),
+                "average_annual_system_unmet": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "SystemUnmetDemandGallons"), cfg
+                ),
+                "average_annual_overflow": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "OverflowGallons"), cfg
+                ),
+                "average_annual_first_flush_loss": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "FirstFlushLossGallons"), cfg
+                ),
+                "average_annual_treatment_loss": volume_to_display(
+                    self._average_annual_result_total(self.results_df, "FilterLossGallons"), cfg
+                ),
+                "net_annual_savings": financial_results.net_annual_savings,
+                "simple_payback_years": financial_results.simple_payback_years,
+                "financial_configured": financial_configured,
+            },
+            "candidate_performance": self._report_candidate_rows(),
+            "water_balance": self._report_water_balance(),
+            "end_use_rows": self._report_end_use_rows(),
+            "financial_summary": {
+                "configured": financial_configured,
+                "currency": params.currency,
+                "water_rate": params.water_rate,
+                "sewer_rate": params.sewer_rate,
+                "tariff_billing_unit": params.tariff_billing_unit,
+                "legacy_sewer_eligible_percent": params.sewer_eligible_percent,
+                "installed_cost": params.installed_cost,
+                "incentives": params.incentives,
+                "fixed_annual_maintenance": params.fixed_annual_maintenance,
+                "annual_maintenance_percent": params.annual_maintenance_percent,
+                "analysis_period_years": params.analysis_period_years,
+                "average_annual_supply": volume_to_display(financial_results.average_annual_supplied_gallons, cfg),
+                "average_annual_sewer_eligible_supply": volume_to_display(
+                    financial_results.average_annual_sewer_eligible_supplied_gallons, cfg
+                ),
+                "municipal_water_savings": financial_results.annual_municipal_water_savings,
+                "sewer_savings": financial_results.annual_sewer_savings,
+                "gross_annual_savings": financial_results.gross_annual_savings,
+                "annual_maintenance_cost": financial_results.annual_maintenance_cost,
+                "net_annual_savings": financial_results.net_annual_savings,
+                "net_installed_cost": financial_results.net_installed_cost,
+                "simple_payback_years": financial_results.simple_payback_years,
+                "analysis_period_net_benefit": financial_results.analysis_period_net_benefit,
+                "methodology": "Simple-rate, undiscounted estimate based only on simulated rainwater delivered to demand.",
+            },
+            "provenance": {
+                "rainfall_source": self.rainfall_source_label or cfg.rainfall_source_label or "Imported rainfall data",
+                "record_start": record_start,
+                "record_end": record_end,
+                "calendar_years": int(rainfall_dates.dt.year.nunique()) if not rainfall_dates.empty else 0,
+                "observations": len(unique_rainfall_dates),
+                "missing_calendar_days": missing_days,
+                "rainfall_resolution": "Daily",
+                "simulation_timestep": "Daily mass balance",
+                "rainfall_timing_assumption": "Each daily rainfall total is applied within that simulated day; hourly demand analysis places it after hour 23.",
+                "initial_tank_fill_percent": cfg.tank_parameters.initial_fill_percent,
+                "municipal_backup": "Enabled" if cfg.system_parameters.municipal_backup_enabled else "Disabled",
+                "filter_recovery_percent": cfg.system_parameters.filter_recovery_percent,
+                "system_type": cfg.system_type,
+                "application_version": application_version,
+                "algorithm_version": ANALYSIS_ALGORITHM_VERSION,
+                "analysis_input_signature": cfg.analysis_input_signature or "Not stored",
+                "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+                "result_years": int(result_dates.dt.year.nunique()) if not result_dates.empty else 0,
+            },
             "include_multitank_charts": bool(metadata.get("include_multitank_charts", False)),
             "include_system_visualization": bool(metadata.get("include_system_visualization", False)),
             "system_type": cfg.system_type,
@@ -9241,6 +9526,140 @@ coordinates {{{yearly_marker_coordinates}}};
             ]
         )
         notes_html = escape(report.get("notes", "").strip() or "No notes provided.")
+        summary = report.get("executive_summary", {})
+        summary_payback = summary.get("simple_payback_years")
+        summary_financial = (
+            f'{escape(report.get("financial_summary", {}).get("currency", "USD"))} '
+            f'{float(summary.get("net_annual_savings", 0.0)):,.2f}/year; '
+            + (f'{float(summary_payback):,.1f} years payback' if summary_payback is not None else 'payback not achieved')
+            if summary.get("financial_configured") else "Financial assumptions not configured"
+        )
+        executive_cards = "".join(
+            f'<div class="metric"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
+            for label, value in (
+                ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
+                ("Reliability", selected_text),
+                ("Average annual supply", f'{float(summary.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Municipal makeup", f'{float(summary.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("System unmet demand", f'{float(summary.get("average_annual_system_unmet", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Overflow", f'{float(summary.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("First-flush loss", f'{float(summary.get("average_annual_first_flush_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Treatment loss", f'{float(summary.get("average_annual_treatment_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Financial result", summary_financial),
+            )
+        )
+
+        candidate_columns = (
+            ("tank_size", "Tank size", "number"), ("reliability", "Reliability", "number"),
+            ("RainwaterSuppliedGallons", "Supply/year", "number"),
+            ("MunicipalMakeupGallons", "Municipal makeup/year", "number"),
+            ("SystemUnmetDemandGallons", "System unmet/year", "number"),
+            ("OverflowGallons", "Overflow/year", "number"),
+            ("FirstFlushLossGallons", "First flush/year", "number"),
+            ("TreatmentLossGallons", "Treatment loss/year", "number"),
+            ("FinalStorageGallons", "Final storage", "number"),
+            ("NetAnnualSavings", "Net savings/year", "number"),
+            ("SimplePaybackYears", "Payback", "number"),
+        )
+        candidate_head = "".join(
+            f'<th><button class="sort-button" type="button" data-column="{index}" data-sort="{kind}">{escape(label)}</button></th>'
+            for index, (_key, label, kind) in enumerate(candidate_columns)
+        )
+        candidate_rows = ""
+        currency = str(report.get("financial_summary", {}).get("currency", "USD"))
+        for candidate in report.get("candidate_performance", []):
+            cells: list[str] = []
+            for key, _label, _kind in candidate_columns:
+                value = candidate.get(key)
+                if value is None:
+                    display, sort_value = "--", ""
+                elif key == "reliability":
+                    display, sort_value = f"{float(value):.1f}%", str(float(value))
+                elif key == "NetAnnualSavings":
+                    display, sort_value = f"{currency} {float(value):,.2f}", str(float(value))
+                elif key == "SimplePaybackYears":
+                    display, sort_value = f"{float(value):,.1f} years", str(float(value))
+                else:
+                    display, sort_value = f"{float(value):,.0f}", str(float(value))
+                cells.append(f'<td data-value="{escape(sort_value)}">{escape(display)}</td>')
+            selected_class = ' class="selected-row"' if candidate.get("selected") else ""
+            candidate_rows += f'<tr{selected_class}>{"".join(cells)}</tr>'
+        candidate_rows = candidate_rows or f'<tr><td colspan="{len(candidate_columns)}">No candidate results available.</td></tr>'
+
+        balance = report.get("water_balance", {})
+        def balance_row(label: str, key: str) -> str:
+            return f'<tr><td>{escape(label)}</td><td>{float(balance.get(key, 0.0)):,.1f} {escape(report["volume_unit"])}</td></tr>'
+        collection_balance_rows = "".join((
+            balance_row("Potential rainfall volume on collection surfaces", "potential_surface_rainfall"),
+            balance_row("Less runoff-coefficient loss", "runoff_coefficient_loss"),
+            balance_row("Gross runoff after runoff coefficients", "gross_runoff"),
+            balance_row("Less first-flush diversion", "first_flush_loss"),
+            balance_row("Net collected water", "net_collected"),
+            balance_row("Reconciliation residual", "collection_residual"),
+        ))
+        storage_balance_rows = "".join((
+            balance_row("Initial primary-tank storage", "initial_storage"),
+            balance_row("Plus net collected water", "net_collected"),
+            balance_row("Less rainwater supplied", "rainwater_supplied"),
+            balance_row("Less treatment loss", "treatment_loss"),
+            balance_row("Less overflow", "overflow"),
+            balance_row("Final primary-tank storage", "final_storage"),
+            balance_row("Reconciliation residual", "storage_residual"),
+        ))
+
+        end_use_rows = "".join(
+            "<tr>"
+            f'<td>{escape(row["name"])}</td><td>{escape(row["type"])}</td><td>{escape(row["schedule"])}</td>'
+            f'<td>{escape(row["sewer_basis"])}</td><td>{float(row["annual_demand"]):,.0f}</td>'
+            f'<td>{float(row["annual_supply"]):,.0f}</td><td>{float(row["demand_met_percent"]):.1f}%</td>'
+            f'<td>{escape(currency)} {float(row["water_savings"]):,.2f}</td>'
+            f'<td>{escape(currency)} {float(row["sewer_savings"]):,.2f}</td></tr>'
+            for row in report.get("end_use_rows", [])
+        ) or '<tr><td colspan="9">No demand objects were reported.</td></tr>'
+
+        financial = report.get("financial_summary", {})
+        payback = financial.get("simple_payback_years")
+        financial_rows = "".join(
+            f'<tr><td>{escape(label)}</td><td>{escape(value)}</td></tr>'
+            for label, value in (
+                ("Water tariff", f'{currency} {float(financial.get("water_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
+                ("Sewer tariff", f'{currency} {float(financial.get("sewer_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
+                ("Legacy aggregate sewer eligibility", f'{float(financial.get("legacy_sewer_eligible_percent", 0.0)):g}%'),
+                ("Installed cost", f'{currency} {float(financial.get("installed_cost", 0.0)):,.2f}'),
+                ("Incentives", f'{currency} {float(financial.get("incentives", 0.0)):,.2f}'),
+                ("Annual maintenance", f'{currency} {float(financial.get("fixed_annual_maintenance", 0.0)):,.2f} + {float(financial.get("annual_maintenance_percent", 0.0)):g}% of installed cost'),
+                ("Average annual rainwater supplied", f'{float(financial.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Average annual sewer-eligible supply", f'{float(financial.get("average_annual_sewer_eligible_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
+                ("Municipal water savings", f'{currency} {float(financial.get("municipal_water_savings", 0.0)):,.2f}/year'),
+                ("Sewer savings", f'{currency} {float(financial.get("sewer_savings", 0.0)):,.2f}/year'),
+                ("Gross annual savings", f'{currency} {float(financial.get("gross_annual_savings", 0.0)):,.2f}/year'),
+                ("Annual maintenance cost", f'{currency} {float(financial.get("annual_maintenance_cost", 0.0)):,.2f}/year'),
+                ("Net annual savings", f'{currency} {float(financial.get("net_annual_savings", 0.0)):,.2f}/year'),
+                ("Net installed cost", f'{currency} {float(financial.get("net_installed_cost", 0.0)):,.2f}'),
+                ("Simple payback", f'{float(payback):,.1f} years' if payback is not None else "Not achieved"),
+                (f'{int(financial.get("analysis_period_years", 0))}-year net benefit', f'{currency} {float(financial.get("analysis_period_net_benefit", 0.0)):,.2f}'),
+            )
+        )
+        financial_notice = "" if financial.get("configured") else '<p class="notice">Financial inputs are not configured; zero-value outputs are shown for transparency.</p>'
+
+        provenance = report.get("provenance", {})
+        provenance_rows = "".join(
+            f'<div class="fact"><dt>{escape(label)}</dt><dd>{escape(value)}</dd></div>'
+            for label, value in (
+                ("Rainfall source", provenance.get("rainfall_source", "Not available")),
+                ("Rainfall record", f'{provenance.get("record_start", "Not available")} to {provenance.get("record_end", "Not available")}'),
+                ("Record coverage", f'{int(provenance.get("calendar_years", 0))} calendar years; {int(provenance.get("observations", 0)):,} observations; {int(provenance.get("missing_calendar_days", 0)):,} missing calendar days'),
+                ("Rainfall resolution", provenance.get("rainfall_resolution", "Daily")),
+                ("Simulation timestep", provenance.get("simulation_timestep", "Daily mass balance")),
+                ("Rainfall timing", provenance.get("rainfall_timing_assumption", "Not specified")),
+                ("System", f'{provenance.get("system_type", "Not specified")}; municipal backup {str(provenance.get("municipal_backup", "Not specified")).lower()}'),
+                ("Initial tank fill", f'{float(provenance.get("initial_tank_fill_percent", 0.0)):g}%'),
+                ("Filter recovery", f'{float(provenance.get("filter_recovery_percent", 100.0)):g}%'),
+                ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
+                ("Analysis input signature", provenance.get("analysis_input_signature", "Not stored")),
+                ("Generated", provenance.get("generated_at", "Not available")),
+            )
+        )
         yearly = report["yearly_reliability"]
         yearly_chart_width = max(900.0, 90.0 + (len(yearly) + 1) * 24.0)
         yearly_chart_height = 420.0
@@ -9353,6 +9772,8 @@ dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; m
 .location-map {{ height:230px; margin-top:20px; border:1px solid var(--line); border-radius:6px; }} .map-star {{ width:24px!important; height:24px!important; margin:-12px 0 0 -12px!important; background:transparent; border:0; font-size:25px; line-height:24px; text-align:center; text-shadow:0 1px 2px #fff,0 0 2px #fff; }} .map-legend {{ margin-top:7px; color:var(--muted); font-size:12px; }} .map-legend span {{ margin-left:12px; font-size:17px; }} .map-legend span:first-child {{ margin-left:0; }} .project-star {{ color:#1565c0; }} .station-star {{ color:#d71920; }}
 .toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
+.metric-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }} .metric {{ min-width:0; padding:16px; border:1px solid var(--line); border-radius:6px; background:#f8fbfa; }} .metric span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }} .metric strong {{ display:block; margin-top:5px; font-size:17px; overflow-wrap:anywhere; }}
+.table-scroll {{ overflow-x:auto; }} .table-scroll table {{ min-width:1040px; }} .selected-row {{ background:#e8f4ef; font-weight:700; }} .sort-button {{ width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:inherit; text-transform:inherit; cursor:pointer; }} .sort-button::after {{ content:' \2195'; color:#93a1a7; }} .notice {{ padding:10px 12px; border-left:4px solid #d17a00; background:#fff7e8; }} .balance-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }} .balance-grid h3 {{ margin:0 0 8px; font-size:16px; }}
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
 .curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
@@ -9363,18 +9784,24 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} .toc-collapsed .toc-toggle {{ height:auto; writing-mode:horizontal-tb; transform:none; text-align:left; }} main {{ box-shadow:none; }} }}
-@media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} }}
+@media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#executive-summary">Executive summary</a></li><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
+<section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>Rainfall-history event definition: {float(report.get('first_flush_antecedent_dry_days', 1.0)):g} antecedent dry days. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
 <section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
+<section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
 {system_visualization_html}
 <section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{float(report['total_annual_demand']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="end-use-performance"><h2>End-use demand and savings</h2><p>Rainwater supply is allocated proportionally among the demand objects active on each simulated day. Sewer savings follow each object's eligibility setting; migrated legacy objects use the legacy aggregate percentage.</p><div class="table-scroll"><table><thead><tr><th>End use</th><th>Type</th><th>Schedule</th><th>Sewer basis</th><th>Demand ({escape(report['volume_unit'])}/year)</th><th>Supply ({escape(report['volume_unit'])}/year)</th><th>Demand met</th><th>Water savings/year</th><th>Sewer savings/year</th></tr></thead><tbody>{end_use_rows}</tbody></table></div></section>
+<section id="financial-analysis"><h2>Financial assumptions and results</h2>{financial_notice}<p>{escape(financial.get('methodology', 'Simple-rate, undiscounted estimate.'))}</p><table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>{financial_rows}</tbody></table></section>
+<section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
 <g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
@@ -9437,6 +9864,22 @@ document.querySelectorAll('[data-tooltip]').forEach((element)=>{{
     chartTooltip.style.left=Math.max(8,left)+'px';chartTooltip.style.top=Math.max(8,top)+'px';
   }});
   element.addEventListener('mouseleave',()=>{{chartTooltip.style.display='none';}});
+}});
+document.querySelectorAll('[data-sortable-table] .sort-button').forEach((button)=>{{
+  button.addEventListener('click',()=>{{
+    const table=button.closest('table');const body=table.querySelector('tbody');
+    const column=Number(button.dataset.column);const ascending=button.dataset.direction!=='asc';
+    const rows=[...body.querySelectorAll('tr')];
+    rows.sort((leftRow,rightRow)=>{{
+      const left=leftRow.children[column]?.dataset.value||'';const right=rightRow.children[column]?.dataset.value||'';
+      const leftNumber=Number(left),rightNumber=Number(right);
+      const comparison=(left!==''&&right!==''&&!Number.isNaN(leftNumber)&&!Number.isNaN(rightNumber))
+        ?leftNumber-rightNumber:left.localeCompare(right,undefined,{{numeric:true}});
+      return ascending?comparison:-comparison;
+    }});
+    table.querySelectorAll('.sort-button').forEach((item)=>delete item.dataset.direction);
+    button.dataset.direction=ascending?'asc':'desc';rows.forEach((row)=>body.appendChild(row));
+  }});
 }});
 function refreshTankHistory(sectionId){{
   const section=document.getElementById(sectionId);if(!section)return;

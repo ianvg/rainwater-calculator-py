@@ -115,6 +115,20 @@ def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> 
     )
 
 
+def demand_object_daily_value_for_date(
+    demand: DemandProfile, demand_object, date: pd.Timestamp
+) -> float:
+    """Return one demand object's simulated daily demand for reporting and audits."""
+    return _demand_object_daily_value_for_date(demand, demand_object, pd.Timestamp(date))
+
+
+def demand_object_sewer_eligible_fraction(
+    demand_object, legacy_eligible_percent: float
+) -> float:
+    """Return the sewer-savings fraction applied to a demand object."""
+    return _demand_object_sewer_eligible_fraction(demand_object, legacy_eligible_percent)
+
+
 def _demand_object_sewer_eligible_fraction(
     demand_object, legacy_eligible_percent: float
 ) -> float:

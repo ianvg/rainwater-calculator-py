@@ -33,7 +33,9 @@ nav:
   - Reports: reports.md
   - Shortcuts: shortcuts.md
   - Troubleshooting: troubleshooting.md
-  - Roadmap: roadmap.md
+  - Roadmap:
+      - Overview: roadmap.md
+      - Report improvements: roadmap/report-improvements.md
   - Financial analysis: financial-analysis.md
 
 markdown_extensions:

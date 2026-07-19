@@ -200,6 +200,62 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
         ],
         "selected_tank_size": 750.0,
         "selected_reliability": 65.0,
+        "executive_summary": {
+            "average_annual_supply": 120000.0,
+            "average_annual_municipal_makeup": 45000.0,
+            "average_annual_system_unmet": 0.0,
+            "average_annual_overflow": 18000.0,
+            "average_annual_first_flush_loss": 1200.0,
+            "average_annual_treatment_loss": 500.0,
+            "net_annual_savings": 420.0,
+            "simple_payback_years": 12.5,
+            "financial_configured": True,
+        },
+        "candidate_performance": [{
+            "selected": True, "tank_size": 750.0, "reliability": 65.0,
+            "RainwaterSuppliedGallons": 120000.0, "MunicipalMakeupGallons": 45000.0,
+            "SystemUnmetDemandGallons": 0.0, "OverflowGallons": 18000.0,
+            "FirstFlushLossGallons": 1200.0, "TreatmentLossGallons": 500.0,
+            "FinalStorageGallons": 610.0, "NetAnnualSavings": 420.0,
+            "SimplePaybackYears": 12.5,
+        }],
+        "water_balance": {
+            "potential_surface_rainfall": 250000.0, "runoff_coefficient_loss": 25000.0,
+            "gross_runoff": 225000.0, "first_flush_loss": 2400.0,
+            "net_collected": 222600.0, "initial_storage": 375.0,
+            "rainwater_supplied": 200000.0, "treatment_loss": 1000.0,
+            "overflow": 21365.0, "final_storage": 610.0,
+            "collection_residual": 0.0, "storage_residual": 0.0,
+        },
+        "end_use_rows": [{
+            "name": "Landscape irrigation", "type": "Irrigation system",
+            "schedule": "Mon, Wed, Fri", "sewer_basis": "Exempt",
+            "annual_demand": 90000.0, "annual_supply": 72000.0,
+            "demand_met_percent": 80.0, "water_savings": 180.0, "sewer_savings": 0.0,
+        }],
+        "financial_summary": {
+            "configured": True, "currency": "USD", "water_rate": 2.5,
+            "sewer_rate": 3.0, "tariff_billing_unit": "per 1,000 gal",
+            "legacy_sewer_eligible_percent": 100.0, "installed_cost": 6000.0,
+            "incentives": 750.0, "fixed_annual_maintenance": 100.0,
+            "annual_maintenance_percent": 1.0, "analysis_period_years": 20,
+            "average_annual_supply": 120000.0, "average_annual_sewer_eligible_supply": 48000.0,
+            "municipal_water_savings": 300.0, "sewer_savings": 144.0,
+            "gross_annual_savings": 444.0, "annual_maintenance_cost": 160.0,
+            "net_annual_savings": 284.0, "net_installed_cost": 5250.0,
+            "simple_payback_years": 18.49, "analysis_period_net_benefit": 430.0,
+            "methodology": "Simple-rate, undiscounted estimate based only on simulated delivery.",
+        },
+        "provenance": {
+            "rainfall_source": "Example station (TEST)", "record_start": "2024-01-01",
+            "record_end": "2025-12-31", "calendar_years": 2, "observations": 731,
+            "missing_calendar_days": 0, "rainfall_resolution": "Daily",
+            "simulation_timestep": "Daily mass balance", "rainfall_timing_assumption": "Daily total",
+            "system_type": "Indirect system", "municipal_backup": "Enabled",
+            "initial_tank_fill_percent": 50.0, "filter_recovery_percent": 95.0,
+            "application_version": "0.1.1", "algorithm_version": 12,
+            "analysis_input_signature": "abc123", "generated_at": "2026-07-19T12:00:00+02:00",
+        },
         "include_multitank_charts": True,
         "include_system_visualization": True,
         "system_type": "Indirect system",
@@ -282,6 +338,16 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert ".axis-label { fill:var(--muted); font-size:15px; font-weight:700; }" in html
     assert "stroke:#d71920" in html
     assert "Primary tank size" in html
+    assert "Executive design summary" in html
+    assert "Candidate tank performance" in html
+    assert "data-sortable-table" in html
+    assert "Reconciled water balance" in html
+    assert "Less runoff-coefficient loss" in html
+    assert "End-use demand and savings" in html
+    assert "Landscape irrigation" in html
+    assert "Financial assumptions and results" in html
+    assert "Analysis provenance and reproducibility" in html
+    assert "Example station (TEST)" in html
     assert "<h2>Tank summary</h2>" in html
     assert 'id="system-visualization"' in html
     assert "System visualization - Indirect system" in html
@@ -406,6 +472,62 @@ def test_report_demand_summary_uses_simulated_monthly_and_annual_demand() -> Non
     assert monthly[1] == {"month": "Feb", "demand_per_day": 300.0, "demand_per_month": 300.0}
     assert monthly[2] == {"month": "Mar", "demand_per_day": 0.0, "demand_per_month": 0.0}
     assert annual == 500.0
+
+
+def test_report_end_use_rows_allocate_supply_and_respect_sewer_exemption() -> None:
+    config = default_project_config()
+    config.demand.hourly_schedule_library["Always"] = {
+        day: [1.0] * 24 for day in WEEKDAY_KEYS
+    }
+    config.demand.demand_objects = [DemandObject(
+        "Irrigation", "Irrigation system", schedule_name="Always",
+        demand_mode="recurring_daily", recurring_daily_gallons=100.0,
+        operating_weekdays=list(range(7)), sewer_eligible=False,
+    )]
+    config.financial_parameters.water_rate = 10.0
+    config.financial_parameters.sewer_rate = 20.0
+    app = RainwaterTkApp.__new__(RainwaterTkApp)
+    app.config_model = config
+    app.results_df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-06", "2025-01-07"]),
+        "DemandGallons": [100.0, 100.0],
+        "RainwaterSuppliedGallons": [50.0, 50.0],
+    })
+
+    rows = app._report_end_use_rows()
+
+    assert len(rows) == 1
+    assert rows[0]["annual_demand"] == pytest.approx(200.0)
+    assert rows[0]["annual_supply"] == pytest.approx(100.0)
+    assert rows[0]["demand_met_percent"] == pytest.approx(50.0)
+    assert rows[0]["water_savings"] == pytest.approx(1.0)
+    assert rows[0]["sewer_savings"] == 0.0
+    assert rows[0]["sewer_basis"] == "Exempt"
+
+
+def test_report_water_balance_reconciles_collection_and_storage() -> None:
+    config = default_project_config()
+    config.surfaces = [Surface("Roof", area=100.0, runoff_coefficient=0.9)]
+    potential = 100.0 / 12.0 * 7.48051948
+    gross = potential * 0.9
+    initial = config.selected_tank_size_gal * 0.5
+    app = RainwaterTkApp.__new__(RainwaterTkApp)
+    app.config_model = config
+    app.rainfall_df = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [1.0],
+    })
+    app.results_df = pd.DataFrame({
+        "GrossCollectedGallons": [gross], "FirstFlushLossGallons": [0.0],
+        "CollectedGallons": [gross], "RainwaterSuppliedGallons": [10.0],
+        "FilterLossGallons": [0.0], "OverflowGallons": [0.0],
+        "WaterInTankGallons": [initial + gross - 10.0],
+    })
+
+    balance = app._report_water_balance()
+
+    assert balance["runoff_coefficient_loss"] == pytest.approx(potential * 0.1)
+    assert balance["collection_residual"] == pytest.approx(0.0)
+    assert balance["storage_residual"] == pytest.approx(0.0)
 
 
 def test_pypdf_report_contents_links_and_outlines_are_navigable(tmp_path) -> None:
