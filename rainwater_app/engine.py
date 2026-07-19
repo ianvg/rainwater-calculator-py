@@ -71,34 +71,52 @@ def _schedule_fractions_for_date(
     return [value / total for value in values] if total > 0.0 else [0.0] * 24
 
 
-def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
-    total = 0.0
-    for demand_object in demand.demand_objects:
-        schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
-        if schedule is None:
-            continue
-        mode = getattr(demand_object, "demand_mode", "scheduled_flow")
-        if mode == "recurring_daily":
-            operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
-            if date.weekday() >= operating_days:
-                continue
-            month_value = demand_object.monthly_daily_demand_gallons.get(
-                _month_index_key(date), demand_object.recurring_daily_gallons
-            )
-            total += max(float(month_value), 0.0)
-            continue
-        if mode == "monthly_volume":
-            monthly = max(float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)), 0.0)
-            total += monthly / monthrange(date.year, date.month)[1]
-            continue
-        day_key = WEEKDAY_KEYS[date.weekday()]
-        multipliers = [min(max(float(value), 0.0), 1.0) for value in schedule.get(day_key, [])[:24]]
-        total += (
-            max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
-            * 60.0
-            * sum(multipliers)
+def _demand_object_daily_value_for_date(
+    demand: DemandProfile, demand_object, date: pd.Timestamp
+) -> float:
+    schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
+    if schedule is None:
+        return 0.0
+    mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+    if mode == "recurring_daily":
+        operating_days = min(max(int(demand_object.operating_days_per_week), 0), 7)
+        if date.weekday() >= operating_days:
+            return 0.0
+        month_value = demand_object.monthly_daily_demand_gallons.get(
+            _month_index_key(date), demand_object.recurring_daily_gallons
         )
-    return total
+        return max(float(month_value), 0.0)
+    if mode == "monthly_volume":
+        monthly = max(
+            float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)),
+            0.0,
+        )
+        return monthly / monthrange(date.year, date.month)[1]
+    day_key = WEEKDAY_KEYS[date.weekday()]
+    multipliers = [
+        min(max(float(value), 0.0), 1.0)
+        for value in schedule.get(day_key, [])[:24]
+    ]
+    return (
+        max(float(demand_object.instantaneous_demand_gallons_per_minute), 0.0)
+        * 60.0
+        * sum(multipliers)
+    )
+
+
+def _demand_object_daily_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
+    return sum(
+        _demand_object_daily_value_for_date(demand, demand_object, date)
+        for demand_object in demand.demand_objects
+    )
+
+
+def _demand_object_sewer_eligible_fraction(
+    demand_object, legacy_eligible_percent: float
+) -> float:
+    if bool(getattr(demand_object, "uses_legacy_sewer_eligibility", False)):
+        return min(max(float(legacy_eligible_percent), 0.0), 100.0) / 100.0
+    return 1.0 if bool(getattr(demand_object, "sewer_eligible", True)) else 0.0
 
 
 def _demand_object_hourly_for_date(
@@ -137,6 +155,24 @@ def _demand_object_hourly_for_date(
 
 def _daily_demand_for_date(demand: DemandProfile, date: pd.Timestamp) -> float:
     return _base_daily_demand_for_date(demand, date) + _demand_object_daily_for_date(demand, date)
+
+
+def _sewer_eligible_daily_demand_for_date(
+    demand: DemandProfile, date: pd.Timestamp, legacy_eligible_percent: float
+) -> float:
+    legacy_eligible = (
+        _base_daily_demand_for_date(demand, date)
+        * min(max(float(legacy_eligible_percent), 0.0), 100.0)
+        / 100.0
+    )
+    object_eligible = sum(
+        _demand_object_daily_value_for_date(demand, demand_object, date)
+        * _demand_object_sewer_eligible_fraction(
+            demand_object, legacy_eligible_percent
+        )
+        for demand_object in demand.demand_objects
+    )
+    return float(legacy_eligible + object_eligible)
 
 
 def collection_balance_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.DataFrame:
@@ -213,9 +249,23 @@ def demand_series(config: ProjectConfig, rainfall_df: pd.DataFrame) -> pd.Series
     return pd.Series(values, index=data.index, name="demand_gallons")
 
 
+def sewer_eligible_demand_series(
+    config: ProjectConfig, rainfall_df: pd.DataFrame
+) -> pd.Series:
+    data = _validate_rainfall(rainfall_df)
+    values = [
+        _sewer_eligible_daily_demand_for_date(
+            config.demand, date, config.financial_parameters.sewer_eligible_percent
+        )
+        for date in data["Date"]
+    ]
+    return pd.Series(values, index=data.index, name="sewer_eligible_demand_gallons")
+
+
 @dataclass(frozen=True)
 class PreparedHourlyInputs:
     demand_gallons: np.ndarray
+    sewer_eligible_demand_gallons: np.ndarray
     collected_gallons: np.ndarray
     year_indices: np.ndarray
     year_count: int
@@ -225,6 +275,7 @@ class PreparedHourlyInputs:
 class HourlySimulationAggregates:
     reliability_percent: float
     average_annual_supplied_gallons: float
+    average_annual_sewer_eligible_supplied_gallons: float
     average_annual_municipal_makeup_gallons: float
     average_annual_overflow_gallons: float
     average_annual_pump_flow_gallons: float
@@ -235,6 +286,7 @@ def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> P
     data = _validate_rainfall(rainfall_df)
     daily_collected = collected_water_series(config, data).to_numpy(dtype=float)
     demand_values = np.zeros(len(data) * 24, dtype=np.float64)
+    sewer_eligible_demand_values = np.zeros(len(data) * 24, dtype=np.float64)
     collected_values = np.zeros(len(data) * 24, dtype=np.float64)
     years = np.zeros(len(data) * 24, dtype=np.int32)
     schedule = config.demand.hourly_schedule_library.get(
@@ -247,21 +299,32 @@ def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> P
         if not any(fractions):
             fractions = [1.0 / 24.0] * 24
         object_demands = np.zeros(24, dtype=np.float64)
+        sewer_eligible_object_demands = np.zeros(24, dtype=np.float64)
         for demand_object in config.demand.demand_objects:
-            object_demands += _demand_object_hourly_for_date(
+            values = _demand_object_hourly_for_date(
                 config.demand, demand_object, timestamp
             )
+            object_demands += values
+            sewer_eligible_object_demands += values * _demand_object_sewer_eligible_fraction(
+                demand_object, config.financial_parameters.sewer_eligible_percent
+            )
         start = day_index * 24
-        demand_values[start:start + 24] = (
-            max(_base_daily_demand_for_date(config.demand, timestamp), 0.0)
-            * np.asarray(fractions)
-            + object_demands
+        legacy_daily = max(_base_daily_demand_for_date(config.demand, timestamp), 0.0)
+        fraction_values = np.asarray(fractions)
+        demand_values[start:start + 24] = legacy_daily * fraction_values + object_demands
+        sewer_eligible_demand_values[start:start + 24] = (
+            legacy_daily
+            * min(max(config.financial_parameters.sewer_eligible_percent, 0.0), 100.0)
+            / 100.0
+            * fraction_values
+            + sewer_eligible_object_demands
         )
         collected_values[start + 23] = daily_collected[day_index]
         years[start:start + 24] = timestamp.year
     _unique_years, year_indices = np.unique(years, return_inverse=True)
     return PreparedHourlyInputs(
         demand_gallons=demand_values,
+        sewer_eligible_demand_gallons=sewer_eligible_demand_values,
         collected_gallons=collected_values,
         year_indices=year_indices.astype(np.int32, copy=False),
         year_count=max(len(_unique_years), 1),
@@ -290,12 +353,16 @@ def simulate_hourly_indirect_aggregates(
         max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
     )
     annual_supplied = np.zeros(prepared.year_count, dtype=np.float64)
+    annual_sewer_eligible_supplied = np.zeros(prepared.year_count, dtype=np.float64)
     annual_makeup = np.zeros(prepared.year_count, dtype=np.float64)
     annual_overflow = np.zeros(prepared.year_count, dtype=np.float64)
     annual_pump = np.zeros(prepared.year_count, dtype=np.float64)
     met_hours = 0
     for index in range(prepared.demand_gallons.size):
         demand = max(float(prepared.demand_gallons[index]), 0.0)
+        sewer_eligible_demand = min(
+            max(float(prepared.sewer_eligible_demand_gallons[index]), 0.0), demand
+        )
         pump_flow = 0.0
         mains_makeup = 0.0
         if booster_capacity > 0.0:
@@ -341,6 +408,9 @@ def simulate_hourly_indirect_aggregates(
         water = min(max(water, 0.0), tank_size_gallons)
         year_index = int(prepared.year_indices[index])
         annual_supplied[year_index] += rainwater_supplied
+        annual_sewer_eligible_supplied[year_index] += (
+            rainwater_supplied * sewer_eligible_demand / demand if demand > 0.0 else 0.0
+        )
         annual_makeup[year_index] += mains_makeup
         annual_overflow[year_index] += overflow
         annual_pump[year_index] += pump_flow
@@ -348,6 +418,10 @@ def simulate_hourly_indirect_aggregates(
     return HourlySimulationAggregates(
         reliability_percent=met_hours / count * 100.0 if count else 0.0,
         average_annual_supplied_gallons=float(annual_supplied.mean()) if annual_supplied.size else 0.0,
+        average_annual_sewer_eligible_supplied_gallons=(
+            float(annual_sewer_eligible_supplied.mean())
+            if annual_sewer_eligible_supplied.size else 0.0
+        ),
         average_annual_municipal_makeup_gallons=float(annual_makeup.mean()) if annual_makeup.size else 0.0,
         average_annual_overflow_gallons=float(annual_overflow.mean()) if annual_overflow.size else 0.0,
         average_annual_pump_flow_gallons=float(annual_pump.mean()) if annual_pump.size else 0.0,
@@ -376,6 +450,7 @@ def simulate_tank(
         ]] = 0.0
     collected = collection["CollectedGallons"]
     demand = demand_series(config, data)
+    sewer_eligible_demand = sewer_eligible_demand_series(config, data)
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
     minimum_operating_fraction = min(
@@ -387,6 +462,7 @@ def simulate_tank(
     usable_water_available: list[float] = []
     unmet_demand: list[float] = []
     supplied_demand: list[float] = []
+    sewer_eligible_supplied: list[float] = []
     municipal_makeup: list[float] = []
     system_unmet_demand: list[float] = []
     treatment_loss: list[float] = []
@@ -403,6 +479,9 @@ def simulate_tank(
 
         water = min(max(water, 0.0), tank_size_gallons)
         demand_today = max(float(demand.iloc[i]), 0.0)
+        sewer_eligible_demand_today = min(
+            max(float(sewer_eligible_demand.iloc[i]), 0.0), demand_today
+        )
         available_for_withdrawal = max(water - minimum_operating_volume, 0.0)
         supplied_today = 0.0
         withdrawn_today = 0.0
@@ -438,6 +517,10 @@ def simulate_tank(
         )
         system_unmet_today = max(unmet_today - municipal_makeup_today, 0.0)
         treatment_loss_today = max(withdrawn_today - supplied_today, 0.0)
+        sewer_eligible_supplied_today = (
+            supplied_today * sewer_eligible_demand_today / demand_today
+            if demand_today > 0.0 else 0.0
+        )
         water = max(water - withdrawn_today, 0.0)
         water += float(collected.iloc[i])
         overflow_today = max(water - tank_size_gallons, 0.0)
@@ -448,6 +531,7 @@ def simulate_tank(
         usable_water_available.append(float(max(water - minimum_operating_volume, 0.0)))
         unmet_demand.append(float(unmet_today))
         supplied_demand.append(float(supplied_today))
+        sewer_eligible_supplied.append(float(sewer_eligible_supplied_today))
         municipal_makeup.append(float(municipal_makeup_today))
         system_unmet_demand.append(float(system_unmet_today))
         treatment_loss.append(float(treatment_loss_today))
@@ -468,8 +552,10 @@ def simulate_tank(
             "RainfallEventId": collection["RainfallEventId"],
             "RainfallEventStart": collection["RainfallEventStart"],
             "DemandGallons": demand,
+            "SewerEligibleDemandGallons": sewer_eligible_demand,
             "DemandMet": demand_met,
             "RainwaterSuppliedGallons": supplied_demand,
+            "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_supplied,
             "MinimumOperatingVolumeGallons": minimum_operating_volume,
             "UsableWaterAvailableGallons": usable_water_available,
             "UnmetDemandGallons": unmet_demand,
@@ -525,6 +611,9 @@ def simulate_hourly_tank(
         [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
         index=data.index,
     )
+    legacy_sewer_eligible_fraction = (
+        min(max(config.financial_parameters.sewer_eligible_percent, 0.0), 100.0) / 100.0
+    )
     initial_fill = min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
     minimum_operating_fraction = min(
         max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
@@ -545,16 +634,34 @@ def simulate_hourly_tank(
         if not any(fractions):
             fractions = [1.0 / 24.0] * 24
         object_hourly_demands = [0.0] * 24
+        sewer_eligible_object_hourly_demands = [0.0] * 24
         for demand_object in config.demand.demand_objects:
             values = _demand_object_hourly_for_date(
                 config.demand, demand_object, timestamp
             )
             for object_hour, value in enumerate(values):
                 object_hourly_demands[object_hour] += float(value)
+                sewer_eligible_object_hourly_demands[object_hour] += (
+                    float(value)
+                    * _demand_object_sewer_eligible_fraction(
+                        demand_object,
+                        config.financial_parameters.sewer_eligible_percent,
+                    )
+                )
         for hour, fraction in enumerate(fractions):
             demand_hour = max(
                 float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
                 0.0,
+            )
+            sewer_eligible_demand_hour = min(
+                max(
+                    float(base_daily_demand.iloc[day_index])
+                    * fraction
+                    * legacy_sewer_eligible_fraction
+                    + sewer_eligible_object_hourly_demands[hour],
+                    0.0,
+                ),
+                demand_hour,
             )
             pump_flow = 0.0
             filter_throughput = 0.0
@@ -630,6 +737,10 @@ def simulate_hourly_tank(
                 system_unmet = max(unmet - mains_makeup, 0.0)
             else:
                 system_unmet = max(demand_hour - rainwater_supplied - mains_supplied, 0.0)
+            sewer_eligible_rainwater_supplied = (
+                rainwater_supplied * sewer_eligible_demand_hour / demand_hour
+                if demand_hour > 0.0 else 0.0
+            )
             collected_hour = float(collected.iloc[day_index]) if hour == 23 else 0.0
             gross_collected_hour = (
                 float(collection["GrossCollectedGallons"].iloc[day_index]) if hour == 23 else 0.0
@@ -651,7 +762,10 @@ def simulate_hourly_tank(
                     "RainfallEventId": collection["RainfallEventId"].iloc[day_index],
                     "RainfallEventStart": bool(collection["RainfallEventStart"].iloc[day_index]) if hour == 23 else False,
                     "DemandGallons": demand_hour,
+                    "SewerEligibleDemandGallons": sewer_eligible_demand_hour,
                     "DemandMet": met,
+                    "RainwaterSuppliedGallons": rainwater_supplied,
+                    "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_rainwater_supplied,
                     "UnmetDemandGallons": unmet,
                     "SystemUnmetDemandGallons": system_unmet,
                     "MainsMakeupGallons": mains_makeup,
@@ -700,12 +814,17 @@ def reliability_curve(
             return float(pd.to_numeric(result.get(column, pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
 
         supplied = column_total("RainwaterSuppliedGallons")
+        sewer_eligible_supplied = column_total("SewerEligibleRainwaterSuppliedGallons")
         rows.append({
             "TankSizeGallons": float(tank_size),
             "ReliabilityPercent": reliability,
             "TotalDemandGallons": column_total("DemandGallons"),
             "RainwaterSuppliedGallons": supplied,
             "AverageAnnualRainwaterSuppliedGallons": supplied / year_count,
+            "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_supplied,
+            "AverageAnnualSewerEligibleRainwaterSuppliedGallons": (
+                sewer_eligible_supplied / year_count
+            ),
             "UnmetDemandGallons": column_total("UnmetDemandGallons"),
             "MunicipalMakeupGallons": column_total("MainsMakeupGallons"),
             "SystemUnmetDemandGallons": column_total("SystemUnmetDemandGallons"),

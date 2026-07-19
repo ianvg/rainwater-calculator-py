@@ -192,8 +192,10 @@ Both resolutions use a conservative end-of-day rainfall convention. The daily an
 | --- | --- |
 | `CollectedGallons` | `I[t]`, rainwater collected that day |
 | `DemandGallons` | `D[t]`, total requested rainwater demand |
+| `SewerEligibleDemandGallons` | Portion of `D[t]` assigned to sewer-eligible end uses |
 | `DemandMet` | Whether `Q[t] >= D[t]` |
 | `RainwaterSuppliedGallons` | `Q[t]`, demand supplied by rainwater |
+| `SewerEligibleRainwaterSuppliedGallons` | Portion of `Q[t]` allocated proportionally to sewer-eligible end uses |
 | `MinimumOperatingVolumeGallons` | `M`, protected physical storage |
 | `UsableWaterAvailableGallons` | Water above `M` in closing storage after collection and overflow |
 | `UnmetDemandGallons` | `U[t]`, requested demand not supplied by rainwater |

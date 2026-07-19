@@ -61,6 +61,7 @@ from rainwater_app.models import (
     TankParameters,
     WEEKDAY_KEYS,
     common_hourly_schedule_templates,
+    default_sewer_eligible_for_object_type,
     default_hourly_weekly_fractions,
     migrate_legacy_demand_inputs,
 )
@@ -386,6 +387,7 @@ def _validated_demand_object_library(payload: object) -> dict[str, DemandObject]
                 month: max(_float(dict(raw_object.get("monthly_demand_gallons", {})).get(month)), 0.0)
                 for month in MONTH_KEYS
             },
+            sewer_eligible=raw_object.get("sewer_eligible"),
         )
     return library
 
@@ -904,7 +906,8 @@ class RainwaterTkApp(tk.Tk):
         self.financial_analysis_period_var = tk.StringVar(value=str(financial.analysis_period_years))
         self.financial_status_var = tk.StringVar(value="Run a tank analysis to calculate financial results.")
         self.financial_result_vars = {key: tk.StringVar(value="--") for key in (
-            "supplied", "water_savings", "sewer_savings", "gross", "maintenance", "net", "net_cost", "payback", "period_benefit"
+            "supplied", "sewer_eligible_supply", "water_savings", "sewer_savings", "gross",
+            "maintenance", "net", "net_cost", "payback", "period_benefit"
         )}
         optimization = self.config_model.optimization_parameters
         self.optimization_minimum_reliability_var = tk.StringVar(
@@ -1294,6 +1297,7 @@ class RainwaterTkApp(tk.Tk):
             name: {
                 "object_type": demand_object.object_type,
                 "instantaneous_demand_gallons_per_minute": demand_object.instantaneous_demand_gallons_per_minute,
+                "sewer_eligible": demand_object.sewer_eligible,
             }
             for name, demand_object in self.custom_demand_object_templates.items()
         }
@@ -4786,7 +4790,7 @@ class RainwaterTkApp(tk.Tk):
         demand_objects_frame.rowconfigure(0, weight=1)
         objects_tree = ttk.Treeview(
             demand_objects_frame,
-            columns=("name", "type", "instantaneous_demand", "schedule"),
+            columns=("name", "type", "instantaneous_demand", "schedule", "sewer"),
             show="headings",
             height=12,
             selectmode="browse",
@@ -4795,10 +4799,12 @@ class RainwaterTkApp(tk.Tk):
         objects_tree.heading("type", text="Type")
         objects_tree.heading("instantaneous_demand", text="Demand")
         objects_tree.heading("schedule", text="Schedule")
+        objects_tree.heading("sewer", text="Sewer savings")
         objects_tree.column("name", width=190)
         objects_tree.column("type", width=140)
         objects_tree.column("instantaneous_demand", width=165, anchor="e")
         objects_tree.column("schedule", width=190)
+        objects_tree.column("sewer", width=105, anchor="center")
         objects_tree.grid(row=0, column=0, sticky="nsew")
         demand_object_scroll = ttk.Scrollbar(
             demand_objects_frame, orient="vertical", command=objects_tree.yview
@@ -5097,7 +5103,7 @@ class RainwaterTkApp(tk.Tk):
             ("Constraint", "Maximum installed cost", maximum_cost, "Optimization"),
             ("Constraint", "Positive net annual savings", "Required" if optimization.require_positive_net_savings else "Not required", "Optimization"),
             ("Economic input", "Water / sewer tariff", f"{financial.currency} {financial.water_rate:g} / {financial.sewer_rate:g} {financial.tariff_billing_unit}", "Financial analysis"),
-            ("Economic input", "Sewer-eligible rainwater", f"{financial.sewer_eligible_percent:g}%", "Financial analysis"),
+            ("Economic input", "Legacy aggregate sewer eligibility", f"{financial.sewer_eligible_percent:g}%", "Financial analysis"),
             ("Economic input", "Base cost / incentives", f"{financial.currency} {financial.installed_cost:,.2f} / {financial.incentives:,.2f}", "Financial analysis"),
             ("Economic input", "Annual maintenance", f"{financial.currency} {financial.fixed_annual_maintenance:,.2f} + {financial.annual_maintenance_percent:g}% of installed cost", "Financial analysis"),
             ("Economic input", "Electricity price", f"{financial.currency} {optimization.electricity_rate_per_kwh:g}/kWh", "Optimization"),
@@ -5329,7 +5335,10 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=1, column=1, sticky="ew", pady=3)
         self._labeled_entry(inputs, 2, "Water rate", self.financial_water_rate_var, self.financial_tariff_unit_var)
         self._labeled_entry(inputs, 3, "Sewer rate", self.financial_sewer_rate_var, self.financial_tariff_unit_var)
-        self._labeled_entry(inputs, 4, "Rainwater supply eligible for sewer savings", self.financial_sewer_eligible_var, self.percent_unit_var)
+        self._labeled_entry(
+            inputs, 4, "Legacy aggregate demand eligible for sewer savings",
+            self.financial_sewer_eligible_var, self.percent_unit_var,
+        )
         self._labeled_entry(inputs, 5, "Installed system cost", self.financial_installed_cost_var, self.financial_currency_var)
         self._labeled_entry(inputs, 6, "Incentives or rebates", self.financial_incentives_var, self.financial_currency_var)
         self._labeled_entry(inputs, 7, "Fixed annual maintenance", self.financial_fixed_maintenance_var, self.financial_currency_var)
@@ -5349,6 +5358,7 @@ class RainwaterTkApp(tk.Tk):
         outputs.columnconfigure(1, weight=1)
         result_rows = (
             ("Average annual rainwater supplied", "supplied"),
+            ("Annual sewer-eligible rainwater supplied", "sewer_eligible_supply"),
             ("Annual municipal water savings", "water_savings"),
             ("Annual sewer savings", "sewer_savings"),
             ("Gross annual utility savings", "gross"),
@@ -5443,6 +5453,12 @@ class RainwaterTkApp(tk.Tk):
         volume_label = volume_unit(self.config_model)
         supplied_display = volume_to_display(results.average_annual_supplied_gallons, self.config_model)
         self.financial_result_vars["supplied"].set(f"{supplied_display:,.0f} {volume_label}/year")
+        eligible_display = volume_to_display(
+            results.average_annual_sewer_eligible_supplied_gallons, self.config_model
+        )
+        self.financial_result_vars["sewer_eligible_supply"].set(
+            f"{eligible_display:,.0f} {volume_label}/year"
+        )
         self.financial_result_vars["water_savings"].set(
             f"{currency} {results.annual_municipal_water_savings:,.2f}/year"
         )
@@ -5664,7 +5680,8 @@ class RainwaterTkApp(tk.Tk):
         ).pack(side="right", padx=(0, 8))
         candidate_columns = (
             "TankSizeGallons", "ReliabilityPercent", "TotalDemandGallons",
-            "RainwaterSuppliedGallons", "UnmetDemandGallons", "MunicipalMakeupGallons",
+            "RainwaterSuppliedGallons", "SewerEligibleRainwaterSuppliedGallons",
+            "UnmetDemandGallons", "MunicipalMakeupGallons",
             "SystemUnmetDemandGallons", "OverflowGallons", "FirstFlushLossGallons",
             "TreatmentLossGallons", "FinalStorageGallons", "NetAnnualSavings",
             "SimplePaybackYears",
@@ -5675,6 +5692,7 @@ class RainwaterTkApp(tk.Tk):
         candidate_headings = {
             "TankSizeGallons": "Tank size", "ReliabilityPercent": "Reliability",
             "TotalDemandGallons": "Total demand", "RainwaterSuppliedGallons": "Rainwater supplied",
+            "SewerEligibleRainwaterSuppliedGallons": "Sewer-eligible supply",
             "UnmetDemandGallons": "Rainwater shortfall", "MunicipalMakeupGallons": "Municipal makeup",
             "SystemUnmetDemandGallons": "System unmet", "OverflowGallons": "Overflow",
             "FirstFlushLossGallons": "First-flush loss", "TreatmentLossGallons": "Treatment loss",
@@ -6490,6 +6508,11 @@ class RainwaterTkApp(tk.Tk):
                         demand_object.object_type,
                         self._demand_object_quantity_summary(demand_object),
                         demand_object.schedule_name,
+                        (
+                            f"Legacy {self.config_model.financial_parameters.sewer_eligible_percent:g}%"
+                            if demand_object.uses_legacy_sewer_eligibility
+                            else ("Eligible" if demand_object.sewer_eligible else "Exempt")
+                        ),
                     ),
                 )
             if select_index is not None and 0 <= select_index < len(self.config_model.demand.demand_objects):
@@ -10429,7 +10452,10 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         out["Precipitation"] = out["Precipitation"].map(lambda v: precip_to_display(float(v), cfg))
         for col in [
             "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons",
-            "OverflowGallons", "DemandGallons", "UnmetDemandGallons", "WaterInTankGallons",
+            "OverflowGallons", "DemandGallons", "SewerEligibleDemandGallons",
+            "RainwaterSuppliedGallons", "SewerEligibleRainwaterSuppliedGallons",
+            "UnmetDemandGallons", "MainsMakeupGallons", "SystemUnmetDemandGallons",
+            "FilterLossGallons", "WaterInTankGallons",
         ]:
             if col in out:
                 out[col] = out[col].map(lambda v: volume_to_display(float(v), cfg))
@@ -10441,7 +10467,13 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
                 "CollectedGallons": f"Collected ({volume_unit(cfg)})",
                 "OverflowGallons": f"Overflow ({volume_unit(cfg)}/day)",
                 "DemandGallons": f"Demand ({volume_unit(cfg)}/day)",
+                "SewerEligibleDemandGallons": f"Sewer-eligible demand ({volume_unit(cfg)}/day)",
+                "RainwaterSuppliedGallons": f"Rainwater supplied ({volume_unit(cfg)}/day)",
+                "SewerEligibleRainwaterSuppliedGallons": f"Sewer-eligible rainwater supplied ({volume_unit(cfg)}/day)",
                 "UnmetDemandGallons": f"Unmet Demand ({volume_unit(cfg)}/day)",
+                "MainsMakeupGallons": f"Municipal makeup ({volume_unit(cfg)}/day)",
+                "SystemUnmetDemandGallons": f"System unmet demand ({volume_unit(cfg)}/day)",
+                "FilterLossGallons": f"Treatment loss ({volume_unit(cfg)}/day)",
                 "WaterInTankGallons": f"Water in Tank ({volume_unit(cfg)})",
                 "ReliabilityPercent": "Reliability (%)",
             }
@@ -10452,6 +10484,8 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         hydraulic_columns = (
             "TankSizeGallons", "ReliabilityPercent", "TotalDemandGallons",
             "RainwaterSuppliedGallons", "AverageAnnualRainwaterSuppliedGallons",
+            "SewerEligibleRainwaterSuppliedGallons",
+            "AverageAnnualSewerEligibleRainwaterSuppliedGallons",
             "UnmetDemandGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
             "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
             "FinalStorageGallons",
@@ -10477,6 +10511,11 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
                 try:
                     financial = calculate_financial_results_from_annual_supply(
                         float(supplied),
+                        average_annual_sewer_eligible_supplied_gallons=(
+                            None
+                            if pd.isna(data.at[index, "AverageAnnualSewerEligibleRainwaterSuppliedGallons"])
+                            else float(data.at[index, "AverageAnnualSewerEligibleRainwaterSuppliedGallons"])
+                        ),
                         water_rate=params.water_rate,
                         sewer_rate=params.sewer_rate,
                         billing_unit=params.tariff_billing_unit,
@@ -10521,6 +10560,7 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         currency = self.config_model.financial_parameters.currency
         volume_columns = (
             "TankSizeGallons", "TotalDemandGallons", "RainwaterSuppliedGallons",
+            "SewerEligibleRainwaterSuppliedGallons",
             "UnmetDemandGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
             "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
             "FinalStorageGallons",
@@ -10529,6 +10569,7 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
             "TankSizeGallons": f"Tank size ({unit})", "ReliabilityPercent": "Reliability (%)",
             "TotalDemandGallons": f"Total demand ({unit})",
             "RainwaterSuppliedGallons": f"Rainwater supplied ({unit})",
+            "SewerEligibleRainwaterSuppliedGallons": f"Sewer-eligible supply ({unit})",
             "UnmetDemandGallons": f"Rainwater shortfall ({unit})",
             "MunicipalMakeupGallons": f"Municipal makeup ({unit})",
             "SystemUnmetDemandGallons": f"System unmet ({unit})",
@@ -11617,6 +11658,7 @@ class DemandObjectDialog(tk.Toplevel):
         self.type_var = tk.StringVar(
             value=demand_object.object_type if demand_object.object_type in self.OBJECT_TYPES else "Other"
         )
+        self.sewer_eligible_var = tk.BooleanVar(value=bool(demand_object.sewer_eligible))
         initial_flow_unit = "lpm" if config.unit_system == "Metric" else "gpm"
         self.instantaneous_demand_unit_var = tk.StringVar(value=initial_flow_unit)
         self._instantaneous_demand_unit = initial_flow_unit
@@ -11645,13 +11687,15 @@ class DemandObjectDialog(tk.Toplevel):
         self.name_entry = ttk.Entry(body, textvariable=self.name_var, width=34)
         self.name_entry.grid(row=0, column=1, sticky="ew", pady=3)
         ttk.Label(body, text="Type").grid(row=1, column=0, sticky="w", pady=3)
-        ttk.Combobox(
+        type_combo = ttk.Combobox(
             body,
             textvariable=self.type_var,
             values=self.OBJECT_TYPES,
             state="readonly",
             width=31,
-        ).grid(row=1, column=1, sticky="ew", pady=3)
+        )
+        type_combo.grid(row=1, column=1, sticky="ew", pady=3)
+        type_combo.bind("<<ComboboxSelected>>", self._demand_type_changed)
         ttk.Label(body, text="Instantaneous demand").grid(row=2, column=0, sticky="w", pady=3)
         demand_row = ttk.Frame(body)
         demand_row.grid(row=2, column=1, sticky="ew", pady=3)
@@ -11688,11 +11732,16 @@ class DemandObjectDialog(tk.Toplevel):
             body, textvariable=self.operating_days_var,
             values=tuple(str(value) for value in range(8)), state="readonly", width=31,
         ).grid(row=6, column=1, sticky="ew", pady=3)
+        ttk.Checkbutton(
+            body,
+            text="Eligible for sewer-charge savings",
+            variable=self.sewer_eligible_var,
+        ).grid(row=7, column=1, sticky="w", pady=3)
         ttk.Button(
             body, text="Edit January-December values...", command=self._edit_monthly_values
-        ).grid(row=7, column=1, sticky="w", pady=3)
+        ).grid(row=8, column=1, sticky="w", pady=3)
         buttons = ttk.Frame(body)
-        buttons.grid(row=8, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=9, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=(0, 6))
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.bind("<Escape>", lambda _event: self.destroy())
@@ -11733,6 +11782,11 @@ class DemandObjectDialog(tk.Toplevel):
             messagebox.showwarning(APP_TITLE, "Monthly values must be numeric.", parent=self)
             return
         self.monthly_values = dict(zip(MONTH_KEYS, converted))
+
+    def _demand_type_changed(self, _event: tk.Event | None = None) -> None:
+        self.sewer_eligible_var.set(
+            default_sewer_eligible_for_object_type(self.type_var.get())
+        )
 
     def _change_instantaneous_demand_unit(self, _event: tk.Event | None = None) -> None:
         new_unit = self.instantaneous_demand_unit_var.get()
@@ -11780,6 +11834,7 @@ class DemandObjectDialog(tk.Toplevel):
                 dict(self.monthly_values)
                 if self.MODE_LABELS[self.mode_var.get()] == "monthly_volume" else {}
             ),
+            sewer_eligible=bool(self.sewer_eligible_var.get()),
         )
         self.destroy()
 

@@ -4,6 +4,7 @@ import pytest
 from rainwater_app.financial import (
     GALLONS_PER_CUBIC_METRE,
     average_annual_rainwater_supplied,
+    average_annual_sewer_eligible_rainwater_supplied,
     calculate_financial_results,
     calculate_financial_results_from_annual_supply,
     tariff_rate_per_gallon,
@@ -65,6 +66,34 @@ def test_financial_results_can_be_calculated_from_candidate_annual_supply() -> N
 
     assert results.net_annual_savings == pytest.approx(1.25)
     assert results.simple_payback_years == pytest.approx(64.0)
+
+
+def test_sewer_savings_use_supplied_volume_from_eligible_end_uses() -> None:
+    source = pd.DataFrame({
+        "Date": pd.to_datetime(["2025-01-01"]),
+        "DemandGallons": [100.0],
+        "UnmetDemandGallons": [0.0],
+        "SewerEligibleRainwaterSuppliedGallons": [40.0],
+    })
+
+    results = calculate_financial_results(
+        source,
+        water_rate=10.0,
+        sewer_rate=20.0,
+        billing_unit="per 1,000 gal",
+        sewer_eligible_percent=100.0,
+        installed_cost=0.0,
+        incentives=0.0,
+        fixed_annual_maintenance=0.0,
+        maintenance_percent=0.0,
+        analysis_period_years=20,
+    )
+
+    assert average_annual_sewer_eligible_rainwater_supplied(source) == pytest.approx(40.0)
+    assert results.average_annual_supplied_gallons == pytest.approx(100.0)
+    assert results.average_annual_sewer_eligible_supplied_gallons == pytest.approx(40.0)
+    assert results.annual_municipal_water_savings == pytest.approx(1.0)
+    assert results.annual_sewer_savings == pytest.approx(0.8)
 
 
 def test_non_positive_net_savings_reports_payback_not_achieved() -> None:

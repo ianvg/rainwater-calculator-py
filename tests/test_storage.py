@@ -158,6 +158,7 @@ def test_demand_objects_are_loaded_as_model_objects() -> None:
 
     assert config.demand.demand_objects[0].name == "Landscape irrigation"
     assert config.demand.demand_objects[0].instantaneous_demand_gallons_per_minute == 250.0 / 60.0
+    assert config.demand.demand_objects[0].sewer_eligible is False
 
 
 def test_legacy_aggregate_demands_migrate_and_assign_to_end_uses() -> None:
@@ -179,6 +180,10 @@ def test_legacy_aggregate_demands_migrate_and_assign_to_end_uses() -> None:
         "Simple recurring demand", "Spray irrigation",
     ]
     assert config.system_layout[0]["demand_object_indices"] == [0, 1]
+    assert all(
+        item.uses_legacy_sewer_eligibility
+        for item in config.demand.demand_objects
+    )
 
 
 def test_instantaneous_demand_object_flow_is_loaded() -> None:

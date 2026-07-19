@@ -8,7 +8,7 @@ import pandas as pd
 
 from .models import ProjectConfig
 
-ANALYSIS_ALGORITHM_VERSION = 10
+ANALYSIS_ALGORITHM_VERSION = 11
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:
@@ -35,6 +35,9 @@ def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -
         ],
         "first_flush_antecedent_dry_days": float(config.first_flush_antecedent_dry_days),
         "demand": asdict(config.demand),
+        "legacy_sewer_eligible_percent": float(
+            config.financial_parameters.sewer_eligible_percent
+        ),
         "graph_start_gal": int(config.graph_start_gal),
         "graph_end_gal": int(config.graph_end_gal),
         "graph_step_gal": int(config.graph_step_gal),

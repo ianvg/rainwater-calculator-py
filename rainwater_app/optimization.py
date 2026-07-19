@@ -155,10 +155,8 @@ def optimize_indirect_system(
     if not 0.0 <= financial.sewer_eligible_percent <= 100.0:
         raise ValueError("Sewer-eligible supply must be between 0% and 100%.")
     water_value = tariff_rate_per_gallon(financial.water_rate, financial.tariff_billing_unit)
-    sewer_value = (
-        tariff_rate_per_gallon(financial.sewer_rate, financial.tariff_billing_unit)
-        * min(max(financial.sewer_eligible_percent, 0.0), 100.0)
-        / 100.0
+    sewer_value = tariff_rate_per_gallon(
+        financial.sewer_rate, financial.tariff_billing_unit
     )
     raw: list[OptimizationResult] = []
     prepared = _cached_prepared_inputs(config, rainfall_df)
@@ -170,12 +168,18 @@ def optimize_indirect_system(
         aggregates = simulate_hourly_indirect_aggregates(candidate, prepared, tank.capacity_gallons)
         reliability = aggregates.reliability_percent
         supplied = aggregates.average_annual_supplied_gallons
+        sewer_eligible_supplied = aggregates.average_annual_sewer_eligible_supplied_gallons
         municipal_makeup = aggregates.average_annual_municipal_makeup_gallons
         overflow = aggregates.average_annual_overflow_gallons
         annual_energy = aggregates.average_annual_pump_flow_gallons / pump.capacity_gallons_per_hour * pump.power_kw
         installed = financial.installed_cost + tank.installed_cost + pump.installed_cost + booster.installed_cost
         maintenance = financial.fixed_annual_maintenance + installed * financial.annual_maintenance_percent / 100.0
-        net_savings = supplied * (water_value + sewer_value) - maintenance - annual_energy * settings.electricity_rate_per_kwh
+        net_savings = (
+            supplied * water_value
+            + sewer_eligible_supplied * sewer_value
+            - maintenance
+            - annual_energy * settings.electricity_rate_per_kwh
+        )
         net_cost = max(installed - financial.incentives, 0.0)
         payback = net_cost / net_savings if net_savings > 0.0 else None
         if payback is not None and not math.isfinite(payback):

@@ -39,6 +39,11 @@ class Surface:
         self.first_flush_depth_inches = max(float(self.first_flush_depth_inches), 0.0)
 
 
+def default_sewer_eligible_for_object_type(object_type: str) -> bool:
+    """Return the conservative billing default for a demand-object type."""
+    return object_type.casefold() != "irrigation system"
+
+
 @dataclass
 class DemandObject:
     name: str
@@ -50,6 +55,12 @@ class DemandObject:
     operating_days_per_week: int = 7
     monthly_daily_demand_gallons: Dict[str, float] = field(default_factory=dict)
     monthly_demand_gallons: Dict[str, float] = field(default_factory=dict)
+    sewer_eligible: bool | None = None
+    uses_legacy_sewer_eligibility: bool = False
+
+    def __post_init__(self) -> None:
+        if self.sewer_eligible is None:
+            self.sewer_eligible = default_sewer_eligible_for_object_type(self.object_type)
 
 
 @dataclass
@@ -89,6 +100,7 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
     created: list[int] = []
 
     def add(item: DemandObject) -> None:
+        item.uses_legacy_sewer_eligibility = True
         demand.demand_objects.append(item)
         created.append(len(demand.demand_objects) - 1)
 

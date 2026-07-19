@@ -12,18 +12,18 @@ The current direct and indirect templates are the first constrained implementati
 
 The first economic-analysis release is implemented for the selected tank. It is driven by simulated rainwater supply rather than a user-estimated tank-efficiency factor and supports simple water and sewer tariffs, installed cost, incentives, fixed and percentage annual maintenance, gross and net annual savings, simple payback, and an undiscounted analysis-period net benefit.
 
-The remaining roadmap work is to add end-use-derived sewer eligibility, tiered and time-varying tariffs, candidate-tank financial comparisons, escalation, discounting, equipment replacement, energy consumption, net present value, and internal rate of return.
+The remaining roadmap work is to add tiered and time-varying tariffs, escalation, discounting, equipment replacement, energy consumption, net present value, and internal rate of return.
 
 Implementation requirements include:
 
 - [Implemented] Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
 - [Implemented] Calculate avoided utility consumption from simulated rainwater delivered to end uses. Do not count overflow, filter loss, unmet demand, municipal makeup, or stored water as savings.
-- Define how sewer savings apply by end-use category because irrigation and other outdoor uses may not incur sewer charges.
+- [Implemented] Define sewer eligibility on each demand object. Irrigation defaults to exempt, users can override the billing assumption, and supplied rainwater is allocated proportionally when demand is only partially met.
 - Support tiered or time-varying tariffs before presenting results as more than a simple-rate estimate.
-- [Implemented for the selected tank] Report annual supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, net present value, and internal rate of return.
+- [Implemented for selected and candidate tanks] Report annual supplied volume, sewer-eligible supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, net present value, and internal rate of return.
 - [Implemented on screen] Include units and assumptions in results and distinguish user inputs from calculated outputs. Exported-report integration remains planned.
 - [Implemented] Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that display as not achieved rather than divide by zero.
-- [Partially implemented] Deterministic tests reconcile economic outputs to delivered hydraulic totals and tariff units. End-use-specific outdoor and municipal-backup scenarios remain planned with automatic sewer eligibility.
+- [Implemented] Deterministic tests reconcile economic outputs to delivered hydraulic totals and tariff units, including mixed indoor/irrigation demand and municipal-backup scenarios.
 
 ## Payback-driven indirect-system optimization
 
@@ -79,13 +79,13 @@ Genetic results do not prove a global optimum. Save the random seed, population 
 
 ## First-flush diversion and event losses
 
-The initial explicit first-flush model is implemented using the rainfall-history criterion favored by Khan (2026). Each collection surface has a unit-aware diversion depth, and a project-wide antecedent dry period identifies new events. Remaining diversion capacity carries across wet timesteps in the same event. Daily and hourly results keep gross runoff, first-flush loss, and net collection separate.
+The initial explicit first-flush model is implemented using the rainfall-history criterion favored by Khan (2026). Each collection surface has a unit-aware diversion depth, and a project-wide antecedent dry period identifies new events. Diversion occurs only on the event's first wet observation; consecutive wet observations do not divert again. Daily and hourly results keep gross runoff, first-flush loss, and net collection separate.
 
 Implementation requirements include:
 
 - [Implemented] Add first-flush depth to collection-surface parameters, with automatic Imperial and Metric conversion.
-- [Implemented] Define a rainfall event using a configurable antecedent dry period. Consecutive wet timesteps within the same event share one first-flush allowance.
-- [Implemented] Track remaining diversion volume through the event and apply it before runoff enters storage.
+- [Implemented] Define a rainfall event using a configurable antecedent dry period. Consecutive wet observations within the same event do not trigger another diversion.
+- [Implemented] Divert up to the configured depth on the first wet observation only; unused depth does not carry into a consecutive wet observation.
 - [Implemented per surface] Multiple surfaces have independent diverter allowances. A shared downstream diverter remains planned.
 - [Implemented] Keep first-flush loss separate from runoff coefficient, filter loss, tank overflow, and net collection in calculations and reports.
 - [Partially implemented] Report diverted volume by timestep and full analysis period, with event identifiers retained in results. Dedicated event and yearly summary tables remain planned.

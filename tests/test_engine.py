@@ -316,6 +316,9 @@ def test_reliability_curve_candidate_metrics_reconcile_with_simulation() -> None
     assert candidate["ReliabilityPercent"] == pytest.approx(detailed["ReliabilityPercent"].iloc[0])
     assert candidate["TotalDemandGallons"] == pytest.approx(detailed["DemandGallons"].sum())
     assert candidate["RainwaterSuppliedGallons"] == pytest.approx(detailed["RainwaterSuppliedGallons"].sum())
+    assert candidate["SewerEligibleRainwaterSuppliedGallons"] == pytest.approx(
+        detailed["SewerEligibleRainwaterSuppliedGallons"].sum()
+    )
     assert candidate["UnmetDemandGallons"] == pytest.approx(detailed["UnmetDemandGallons"].sum())
     assert candidate["MunicipalMakeupGallons"] == pytest.approx(detailed["MainsMakeupGallons"].sum())
     assert candidate["SystemUnmetDemandGallons"] == pytest.approx(detailed["SystemUnmetDemandGallons"].sum())
@@ -344,6 +347,79 @@ def test_reliability_curve_reports_numeric_candidate_progress() -> None:
     )
 
     assert progress == [(1, 2, 100.0), (2, 2, 200.0)]
+
+
+def test_supplied_rainwater_is_allocated_by_end_use_for_sewer_savings() -> None:
+    cfg = default_project_config()
+    schedule_name = "Always on"
+    cfg.demand.hourly_schedule_library[schedule_name] = common_hourly_schedule_templates()[schedule_name]
+    cfg.demand.demand_objects = [
+        DemandObject(
+            "Toilets", "Toilet", schedule_name=schedule_name,
+            demand_mode="recurring_daily", recurring_daily_gallons=50.0,
+        ),
+        DemandObject(
+            "Landscape", "Irrigation system", schedule_name=schedule_name,
+            demand_mode="recurring_daily", recurring_daily_gallons=50.0,
+        ),
+    ]
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({
+        "Date": [pd.Timestamp("2025-01-01")],
+        "Precipitation": [0.0],
+    })
+
+    result = simulate_tank(cfg, rainfall, tank_size_gallons=50.0)
+
+    assert cfg.demand.demand_objects[0].sewer_eligible is True
+    assert cfg.demand.demand_objects[1].sewer_eligible is False
+    assert result.loc[0, "DemandGallons"] == pytest.approx(100.0)
+    assert result.loc[0, "RainwaterSuppliedGallons"] == pytest.approx(50.0)
+    assert result.loc[0, "SewerEligibleDemandGallons"] == pytest.approx(50.0)
+    assert result.loc[0, "SewerEligibleRainwaterSuppliedGallons"] == pytest.approx(25.0)
+
+
+def test_hourly_sewer_eligible_supply_respects_demand_object_setting() -> None:
+    cfg = default_project_config()
+    schedule_name = "Always on"
+    cfg.demand.hourly_schedule_library[schedule_name] = common_hourly_schedule_templates()[schedule_name]
+    cfg.demand.active_hourly_schedule_name = schedule_name
+    cfg.demand.demand_objects = [
+        DemandObject("Indoor", "Other indoor", 1.0, schedule_name),
+        DemandObject("Irrigation", "Irrigation system", 1.0, schedule_name),
+    ]
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({
+        "Date": [pd.Timestamp("2025-01-01")],
+        "Precipitation": [0.0],
+    })
+
+    result = simulate_hourly_tank(cfg, rainfall, tank_size_gallons=2_880.0)
+
+    assert result["RainwaterSuppliedGallons"].sum() == pytest.approx(2_880.0)
+    assert result["SewerEligibleRainwaterSuppliedGallons"].sum() == pytest.approx(1_440.0)
+
+
+def test_migrated_demand_object_uses_legacy_sewer_percentage() -> None:
+    cfg = default_project_config()
+    schedule_name = "Always on"
+    cfg.demand.hourly_schedule_library[schedule_name] = common_hourly_schedule_templates()[schedule_name]
+    migrated = DemandObject(
+        "Legacy demand", "Other", schedule_name=schedule_name,
+        demand_mode="recurring_daily", recurring_daily_gallons=100.0,
+    )
+    migrated.uses_legacy_sewer_eligibility = True
+    cfg.demand.demand_objects = [migrated]
+    cfg.financial_parameters.sewer_eligible_percent = 35.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame({
+        "Date": [pd.Timestamp("2025-01-01")],
+        "Precipitation": [0.0],
+    })
+
+    result = simulate_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert result.loc[0, "SewerEligibleRainwaterSuppliedGallons"] == pytest.approx(35.0)
 
 
 def test_minimum_operating_level_protects_primary_tank_storage() -> None:
