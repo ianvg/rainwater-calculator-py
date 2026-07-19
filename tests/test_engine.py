@@ -14,6 +14,7 @@ from rainwater_app.engine import (
 from rainwater_app.models import (
     DemandObject, Surface, common_hourly_schedule_templates, migrate_legacy_demand_inputs,
 )
+from rainwater_app.rainfall import HOURLY_PRECIPITATION_COLUMNS
 from rainwater_app.storage import SQLiteStore
 
 
@@ -43,6 +44,39 @@ def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
     assert result["DemandGallons"].iloc[0] == pytest.approx(20.0)
     assert result["DemandGallons"].iloc[1] == pytest.approx(10.0)
     assert result["DemandGallons"].iloc[2:].sum() == pytest.approx(0.0)
+
+
+def test_hourly_simulation_collects_generated_rainfall_in_its_assigned_hour() -> None:
+    cfg = default_project_config()
+    cfg.use_synthetic_hourly_rainfall = True
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.0)]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [1.0]})
+    for column in HOURLY_PRECIPITATION_COLUMNS:
+        rainfall[column] = 0.0
+    rainfall.loc[0, HOURLY_PRECIPITATION_COLUMNS[5]] = 1.0
+
+    result = simulate_hourly_tank(cfg, rainfall, 10000.0)
+
+    assert result.loc[5, "CollectedGallons"] > 0.0
+    assert result.loc[23, "CollectedGallons"] == pytest.approx(0.0)
+    assert result["CollectedGallons"].sum() == pytest.approx(
+        1000.0 / 12.0 * 7.48052
+    )
+
+
+def test_hourly_simulation_ignores_generated_profile_when_option_is_off() -> None:
+    cfg = default_project_config()
+    cfg.use_synthetic_hourly_rainfall = False
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.0)]
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [1.0]})
+    for column in HOURLY_PRECIPITATION_COLUMNS:
+        rainfall[column] = 0.0
+    rainfall.loc[0, HOURLY_PRECIPITATION_COLUMNS[5]] = 1.0
+
+    result = simulate_hourly_tank(cfg, rainfall, 10000.0)
+
+    assert result.loc[5, "CollectedGallons"] == pytest.approx(0.0)
+    assert result.loc[23, "CollectedGallons"] > 0.0
 
 
 def test_simulate_tank_returns_expected_columns() -> None:

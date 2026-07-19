@@ -7,21 +7,29 @@ from dataclasses import asdict
 import pandas as pd
 
 from .models import ProjectConfig
+from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
 
-ANALYSIS_ALGORITHM_VERSION = 12
+ANALYSIS_ALGORITHM_VERSION = 13
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:
     rainfall = []
     if "Date" in rainfall_df and "Precipitation" in rainfall_df:
-        normalized = rainfall_df[["Date", "Precipitation"]].copy()
+        columns = ["Date", "Precipitation"]
+        if has_hourly_rainfall(rainfall_df):
+            columns.extend(HOURLY_PRECIPITATION_COLUMNS)
+        normalized = rainfall_df[columns].copy()
         normalized["Date"] = pd.to_datetime(normalized["Date"], errors="coerce")
         normalized["Precipitation"] = pd.to_numeric(normalized["Precipitation"], errors="coerce").fillna(0.0)
         normalized = normalized.dropna(subset=["Date"]).sort_values("Date")
-        rainfall = [
-            [date.isoformat(), float(precipitation)]
-            for date, precipitation in zip(normalized["Date"], normalized["Precipitation"])
-        ]
+        for column in HOURLY_PRECIPITATION_COLUMNS:
+            if column in normalized:
+                normalized[column] = pd.to_numeric(
+                    normalized[column], errors="coerce"
+                ).fillna(0.0)
+        rainfall = normalized.assign(
+            Date=normalized["Date"].map(lambda value: value.isoformat())
+        ).values.tolist()
 
     payload = {
         "algorithm_version": ANALYSIS_ALGORITHM_VERSION,
@@ -44,6 +52,7 @@ def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -
         "selected_tank_size_gal": float(config.selected_tank_size_gal),
         "multitank_comparison_enabled": bool(config.multitank_comparison_enabled),
         "comparison_tank_sizes_gal": sorted(float(value) for value in config.comparison_tank_sizes_gal),
+        "use_synthetic_hourly_rainfall": bool(config.use_synthetic_hourly_rainfall),
         "tank_parameters": asdict(config.tank_parameters),
         "system_type": config.system_type,
         "system_layout": config.system_layout,

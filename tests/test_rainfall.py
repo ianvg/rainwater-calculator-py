@@ -1,0 +1,56 @@
+import numpy as np
+import pandas as pd
+import pytest
+
+from rainwater_app.rainfall import (
+    HOURLY_PRECIPITATION_COLUMNS,
+    disaggregate_daily_rainfall_hyetos,
+    expand_hourly_rainfall,
+    has_hourly_rainfall,
+)
+
+
+def _daily_rainfall() -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=4, freq="D"),
+            "Precipitation": [0.0, 0.35, 1.2, 0.08],
+        }
+    )
+
+
+def test_hyetos_disaggregation_is_reproducible_and_conserves_daily_totals() -> None:
+    rainfall = _daily_rainfall()
+
+    first = disaggregate_daily_rainfall_hyetos(rainfall, seed=42)
+    second = disaggregate_daily_rainfall_hyetos(rainfall, seed=42)
+
+    assert has_hourly_rainfall(first)
+    assert first.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy() == pytest.approx(
+        second.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy()
+    )
+    assert first.loc[:, HOURLY_PRECIPITATION_COLUMNS].sum(axis=1).to_numpy() == pytest.approx(
+        rainfall["Precipitation"].to_numpy(), abs=1e-12
+    )
+    assert np.all(first.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy() >= 0.0)
+    assert np.count_nonzero(first.loc[0, HOURLY_PRECIPITATION_COLUMNS].to_numpy()) == 0
+
+
+def test_hyetos_disaggregation_rejects_negative_precipitation() -> None:
+    rainfall = _daily_rainfall()
+    rainfall.loc[0, "Precipitation"] = -0.1
+
+    with pytest.raises(ValueError, match="cannot be negative"):
+        disaggregate_daily_rainfall_hyetos(rainfall, seed=1)
+
+
+def test_expand_hourly_rainfall_uses_profiles_and_legacy_fallback() -> None:
+    rainfall = _daily_rainfall().iloc[:2].copy()
+    legacy = expand_hourly_rainfall(rainfall)
+    generated = expand_hourly_rainfall(disaggregate_daily_rainfall_hyetos(rainfall, seed=7))
+
+    assert len(legacy) == 48
+    assert legacy.iloc[47]["Precipitation"] == pytest.approx(0.35)
+    assert legacy.iloc[24:47]["Precipitation"].sum() == pytest.approx(0.0)
+    assert generated.iloc[24:48]["Precipitation"].sum() == pytest.approx(0.35)
+    assert generated.iloc[24:48]["Precipitation"].gt(0.0).any()

@@ -259,6 +259,7 @@ class ProjectConfig:
     selected_tank_size_gal: float = 5000.0
     multitank_comparison_enabled: bool = False
     comparison_tank_sizes_gal: List[float] = field(default_factory=list)
+    use_synthetic_hourly_rainfall: bool = False
     rainfall_source_label: str | None = None
     weather_station_latitude: float | None = None
     weather_station_longitude: float | None = None

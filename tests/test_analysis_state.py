@@ -2,6 +2,7 @@ import pandas as pd
 
 from rainwater_app.analysis_state import analysis_input_signature
 from rainwater_app.defaults import default_project_config
+from rainwater_app.rainfall import disaggregate_daily_rainfall_hyetos
 
 
 def _rainfall() -> pd.DataFrame:
@@ -27,6 +28,23 @@ def test_signature_changes_when_rainfall_changes() -> None:
     rainfall.loc[1, "Precipitation"] = 0.5
 
     assert analysis_input_signature(config, rainfall) != before
+
+
+def test_signature_changes_when_hourly_rainfall_profile_changes() -> None:
+    config = default_project_config()
+    first = disaggregate_daily_rainfall_hyetos(_rainfall(), seed=1)
+    second = disaggregate_daily_rainfall_hyetos(_rainfall(), seed=2)
+
+    assert analysis_input_signature(config, first) != analysis_input_signature(config, second)
+
+
+def test_signature_changes_when_synthetic_hourly_use_changes() -> None:
+    config = default_project_config()
+    before = analysis_input_signature(config, _rainfall())
+
+    config.use_synthetic_hourly_rainfall = True
+
+    assert analysis_input_signature(config, _rainfall()) != before
 
 
 def test_signature_changes_when_comparison_tank_sizes_change() -> None:

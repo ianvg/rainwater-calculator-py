@@ -74,7 +74,11 @@ from rainwater_app.models import (
     default_hourly_weekly_fractions,
     migrate_legacy_demand_inputs,
 )
-from rainwater_app.rainfall import load_rainfall_csv
+from rainwater_app.rainfall import (
+    disaggregate_daily_rainfall_hyetos,
+    has_hourly_rainfall,
+    load_rainfall_csv,
+)
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.system_model import compile_builder_system, validate_builder_system
 from rainwater_app.stations import bounding_box, nearest_stations
@@ -900,6 +904,10 @@ class RainwaterTkApp(tk.Tk):
         )
         self.hourly_schedule_enabled_var = tk.BooleanVar(value=self.config_model.demand.hourly_schedule_enabled)
         self.hourly_schedule_summary_var = tk.StringVar(value="Even 24-hour demand profile")
+        self.use_synthetic_hourly_rainfall_var = tk.BooleanVar(
+            value=self.config_model.use_synthetic_hourly_rainfall
+        )
+        self.synthetic_hourly_rainfall_status_var = tk.StringVar()
         self.hourly_results_year_var = tk.StringVar(value="--")
         self.simple_daily_unit_var = tk.StringVar()
         self.flush_count_unit_var = tk.StringVar(value="flushes/person")
@@ -2338,7 +2346,7 @@ class RainwaterTkApp(tk.Tk):
             return
         selected_date = pd.Timestamp(date_text).normalize()
         dates = pd.to_datetime(self.rainfall_df["Date"]).dt.normalize()
-        selected_rainfall = self.rainfall_df.loc[dates == selected_date, ["Date", "Precipitation"]].head(1)
+        selected_rainfall = self.rainfall_df.loc[dates == selected_date].head(1).copy()
         if selected_rainfall.empty:
             messagebox.showerror(APP_TITLE, "The selected rainfall day is unavailable.", parent=self)
             return
@@ -4444,6 +4452,11 @@ class RainwaterTkApp(tk.Tk):
         csv_frame.columnconfigure(0, weight=1)
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
         ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        ttk.Button(
+            csv_frame,
+            text="Generate Synthetic Hourly Rainfall",
+            command=self.generate_hourly_rainfall,
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
         self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
         self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -4891,6 +4904,7 @@ class RainwaterTkApp(tk.Tk):
 
         hourly_analysis_frame = ttk.LabelFrame(self.analysis_tab, text="Hourly analysis", padding=10)
         hourly_analysis_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        hourly_analysis_frame.columnconfigure(0, weight=1)
         self.hourly_schedule_enabled_check = ttk.Checkbutton(
             hourly_analysis_frame,
             text="Enable hourly demand schedule",
@@ -4898,6 +4912,21 @@ class RainwaterTkApp(tk.Tk):
             command=self._hourly_schedule_enabled_changed,
         )
         self.hourly_schedule_enabled_check.grid(row=0, column=0, sticky="w")
+        self.synthetic_hourly_rainfall_check = ttk.Checkbutton(
+            hourly_analysis_frame,
+            text="Use generated synthetic hourly rainfall",
+            variable=self.use_synthetic_hourly_rainfall_var,
+            command=self._synthetic_hourly_rainfall_setting_changed,
+        )
+        self.synthetic_hourly_rainfall_check.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(
+            hourly_analysis_frame,
+            textvariable=self.synthetic_hourly_rainfall_status_var,
+            foreground="#667278",
+            wraplength=950,
+            justify="left",
+        ).grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        self._refresh_synthetic_hourly_rainfall_status()
 
         comparison_frame = ttk.LabelFrame(self.analysis_tab, text="Tank size comparison", padding=10)
         comparison_frame.grid(row=1, column=0, sticky="nsew")
@@ -6344,6 +6373,9 @@ class RainwaterTkApp(tk.Tk):
         self.simple_daily_var.set(f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):.2f}")
         self.daily_demand_days_var.set(str(min(max(int(cfg.demand.daily_demand_days_per_week), 0), 7)))
         self.hourly_schedule_enabled_var.set(bool(cfg.demand.hourly_schedule_enabled))
+        self.use_synthetic_hourly_rainfall_var.set(
+            bool(cfg.use_synthetic_hourly_rainfall)
+        )
         self.hourly_schedule_summary_var.set(
             "Custom typical-week hourly profile" if cfg.demand.hourly_schedule_enabled else "Even 24-hour demand profile"
         )
@@ -6368,6 +6400,7 @@ class RainwaterTkApp(tk.Tk):
         self._populate_comparison_tanks()
         self._update_multitank_comparison_state()
         self._update_rainfall_summary()
+        self._refresh_synthetic_hourly_rainfall_status()
         self._refresh_system_animation_dates()
         self._refresh_optimization_assumptions()
 
@@ -6410,6 +6443,9 @@ class RainwaterTkApp(tk.Tk):
             7,
         )
         cfg.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
+        cfg.use_synthetic_hourly_rainfall = bool(
+            self.use_synthetic_hourly_rainfall_var.get()
+        )
         cfg.system_parameters.pump_capacity_gallons_per_hour = max(
             0.0, volume_to_internal(_float(self.pump_capacity_var.get(), 0.0) * 60.0, cfg)
         )
@@ -6590,12 +6626,17 @@ class RainwaterTkApp(tk.Tk):
         if self.rainfall_df.empty:
             self.rainfall_summary_var.set("No rainfall file loaded")
             self._refresh_system_animation_dates()
+            self._refresh_synthetic_hourly_rainfall_status()
             return
         start = pd.Timestamp(self.rainfall_df["Date"].min()).strftime("%Y-%m-%d")
         end = pd.Timestamp(self.rainfall_df["Date"].max()).strftime("%Y-%m-%d")
         source = f" from {self.rainfall_source_label}" if self.rainfall_source_label else ""
-        self.rainfall_summary_var.set(f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}")
+        hourly = "; Hyetos-style hourly profiles generated" if has_hourly_rainfall(self.rainfall_df) else ""
+        self.rainfall_summary_var.set(
+            f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}{hourly}"
+        )
         self._refresh_system_animation_dates()
+        self._refresh_synthetic_hourly_rainfall_status()
 
     def _change_units(self) -> None:
         new_unit = self.unit_var.get()
@@ -7189,6 +7230,8 @@ class RainwaterTkApp(tk.Tk):
             rainfall = load_rainfall_csv(raw)
             rainfall["Precipitation"] = rainfall["Precipitation"].map(lambda v: precip_to_internal(float(v), self.config_model))
             self.rainfall_df = rainfall
+            self.use_synthetic_hourly_rainfall_var.set(False)
+            self.config_model.use_synthetic_hourly_rainfall = False
             self.rainfall_source_label = None
             self.config_model.rainfall_source_label = None
             self.config_model.weather_station_latitude = None
@@ -7202,6 +7245,39 @@ class RainwaterTkApp(tk.Tk):
             self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not load rainfall CSV:\n{exc}")
+
+    def generate_hourly_rainfall(self) -> None:
+        """Generate reproducible hourly hyetographs from the loaded daily record."""
+        if self.rainfall_df.empty:
+            messagebox.showinfo(
+                APP_TITLE, "Load or import daily rainfall before generating hourly data."
+            )
+            return
+        seed = simpledialog.askinteger(
+            APP_TITLE,
+            "Random seed for reproducible Hyetos-style hourly rainfall:",
+            initialvalue=1,
+            minvalue=0,
+            parent=self,
+        )
+        if seed is None:
+            return
+        try:
+            self.rainfall_df = disaggregate_daily_rainfall_hyetos(
+                self.rainfall_df, seed=seed
+            )
+            self.use_synthetic_hourly_rainfall_var.set(True)
+            self.config_model.use_synthetic_hourly_rainfall = True
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
+            self._update_rainfall_summary()
+            self.status_var.set(
+                f"Generated Hyetos-style hourly rainfall using random seed {seed}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            messagebox.showerror(APP_TITLE, f"Could not generate hourly rainfall:\n{exc}")
 
     def find_acis_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
@@ -7416,6 +7492,8 @@ class RainwaterTkApp(tk.Tk):
             start_date, end_date = default_complete_calendar_range(years)
             weather_df = fetch_daily_station_data(station["sid"], start_date, end_date, precipitation_field)
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
+            self.use_synthetic_hourly_rainfall_var.set(False)
+            self.config_model.use_synthetic_hourly_rainfall = False
             station_region = self._station_region_suffix(station)
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
@@ -7480,6 +7558,8 @@ class RainwaterTkApp(tk.Tk):
             )
             missing_days = int(weather_df.attrs.get("missing_days", 0))
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
+            self.use_synthetic_hourly_rainfall_var.set(False)
+            self.config_model.use_synthetic_hourly_rainfall = False
             station_region = self._station_region_suffix(station)
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
@@ -8114,6 +8194,43 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
         self._refresh_schedule_management()
 
+    def _synthetic_hourly_rainfall_setting_changed(self) -> None:
+        self.config_model.use_synthetic_hourly_rainfall = bool(
+            self.use_synthetic_hourly_rainfall_var.get()
+        )
+        self.curve_df = pd.DataFrame()
+        self.results_df = pd.DataFrame()
+        self.reliability_var.set("Reliability: --")
+        self._clear_results()
+        self._refresh_synthetic_hourly_rainfall_status()
+
+    def _refresh_synthetic_hourly_rainfall_status(self) -> None:
+        if not hasattr(self, "synthetic_hourly_rainfall_status_var"):
+            return
+        enabled = bool(self.use_synthetic_hourly_rainfall_var.get())
+        available = has_hourly_rainfall(self.rainfall_df)
+        if enabled and available:
+            message = (
+                "Synthetic hourly profiles will be used for hourly collection and first-flush timing. "
+                "Daily analyses continue to use the observed daily totals."
+            )
+        elif enabled:
+            message = (
+                "Synthetic hourly rainfall is selected, but no generated profiles are available. "
+                "Generate them on the Rainfall Data tab before running analysis."
+            )
+        elif available:
+            message = (
+                "Synthetic profiles are available but will be ignored. Hourly rainfall uses the "
+                "legacy assumption that each daily total arrives at 23:00."
+            )
+        else:
+            message = (
+                "Synthetic hourly rainfall is not used. Each daily rainfall total is applied at "
+                "23:00 during hourly analysis."
+            )
+        self.synthetic_hourly_rainfall_status_var.set(message)
+
     def _refresh_schedule_management(self, select_name: str | None = None) -> None:
         if not hasattr(self, "schedule_list"):
             return
@@ -8207,6 +8324,13 @@ class RainwaterTkApp(tk.Tk):
             return
         if self.rainfall_df.empty:
             messagebox.showwarning(APP_TITLE, "Load rainfall data before running the analysis.")
+            return
+        if cfg.use_synthetic_hourly_rainfall and not has_hourly_rainfall(self.rainfall_df):
+            messagebox.showwarning(
+                APP_TITLE,
+                "Synthetic hourly rainfall is selected, but no generated profiles are available. "
+                "Generate them on the Rainfall Data tab or turn the option off in Analysis settings.",
+            )
             return
         if cfg.graph_end_gal <= cfg.graph_start_gal:
             messagebox.showwarning(APP_TITLE, "Graph end tank size must be greater than graph start tank size.")

@@ -8,6 +8,7 @@ import numpy as np
 import pandas as pd
 
 from .models import DemandProfile, MONTH_KEYS, ProjectConfig, TankParameters, WEEKDAY_KEYS
+from .rainfall import expand_hourly_rainfall
 from .system_model import compile_builder_system
 
 GAL_PER_CUBIC_FOOT = 7.48052
@@ -306,7 +307,10 @@ class HourlySimulationAggregates:
 def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> PreparedHourlyInputs:
     """Precompute candidate-independent hourly demand, collection, and year arrays."""
     data = _validate_rainfall(rainfall_df)
-    daily_collected = collected_water_series(config, data).to_numpy(dtype=float)
+    hourly_rainfall = expand_hourly_rainfall(
+        data, use_synthetic=config.use_synthetic_hourly_rainfall
+    )
+    hourly_collected = collected_water_series(config, hourly_rainfall).to_numpy(dtype=float)
     demand_values = np.zeros(len(data) * 24, dtype=np.float64)
     sewer_eligible_demand_values = np.zeros(len(data) * 24, dtype=np.float64)
     collected_values = np.zeros(len(data) * 24, dtype=np.float64)
@@ -341,7 +345,7 @@ def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> P
             * fraction_values
             + sewer_eligible_object_demands
         )
-        collected_values[start + 23] = daily_collected[day_index]
+        collected_values[start:start + 24] = hourly_collected[start:start + 24]
         years[start:start + 24] = timestamp.year
     _unique_years, year_indices = np.unique(years, return_inverse=True)
     return PreparedHourlyInputs(
@@ -596,7 +600,7 @@ def simulate_hourly_tank(
     tank_size_gallons: float,
     cancel_callback: Callable[[], bool] | None = None,
 ) -> pd.DataFrame:
-    """Simulate hourly demand; each day's rainfall enters after hour 23."""
+    """Simulate hourly demand using synthetic profiles or the 23:00 fallback."""
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
     data = _validate_rainfall(rainfall_df)
@@ -623,12 +627,14 @@ def simulate_hourly_tank(
     )
     booster_refill_target = booster_capacity * booster_refill_level
     refill_active = booster_capacity > 0.0 and booster_water < booster_refill_target
-    collection = collection_balance_series(config, data)
+    hourly_rainfall = expand_hourly_rainfall(
+        data, use_synthetic=config.use_synthetic_hourly_rainfall
+    )
+    collection = collection_balance_series(config, hourly_rainfall)
     if not system.rain_reaches_primary:
         collection.loc[:, [
             "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons"
         ]] = 0.0
-    collected = collection["CollectedGallons"]
     base_daily_demand = pd.Series(
         [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
         index=data.index,
@@ -671,6 +677,7 @@ def simulate_hourly_tank(
                     )
                 )
         for hour, fraction in enumerate(fractions):
+            hourly_index = day_index * 24 + hour
             demand_hour = max(
                 float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
                 0.0,
@@ -763,12 +770,12 @@ def simulate_hourly_tank(
                 rainwater_supplied * sewer_eligible_demand_hour / demand_hour
                 if demand_hour > 0.0 else 0.0
             )
-            collected_hour = float(collected.iloc[day_index]) if hour == 23 else 0.0
-            gross_collected_hour = (
-                float(collection["GrossCollectedGallons"].iloc[day_index]) if hour == 23 else 0.0
+            collected_hour = float(collection["CollectedGallons"].iloc[hourly_index])
+            gross_collected_hour = float(
+                collection["GrossCollectedGallons"].iloc[hourly_index]
             )
-            first_flush_loss_hour = (
-                float(collection["FirstFlushLossGallons"].iloc[day_index]) if hour == 23 else 0.0
+            first_flush_loss_hour = float(
+                collection["FirstFlushLossGallons"].iloc[hourly_index]
             )
             water += collected_hour
             overflow = max(water - tank_size_gallons, 0.0)
@@ -778,11 +785,16 @@ def simulate_hourly_tank(
                 {
                     "Date": pd.Timestamp(date) + pd.Timedelta(hours=hour),
                     "SystemType": system.display_type,
+                    "Precipitation": float(
+                        hourly_rainfall["Precipitation"].iloc[hourly_index]
+                    ),
                     "GrossCollectedGallons": gross_collected_hour,
                     "FirstFlushLossGallons": first_flush_loss_hour,
                     "CollectedGallons": collected_hour,
-                    "RainfallEventId": collection["RainfallEventId"].iloc[day_index],
-                    "RainfallEventStart": bool(collection["RainfallEventStart"].iloc[day_index]) if hour == 23 else False,
+                    "RainfallEventId": collection["RainfallEventId"].iloc[hourly_index],
+                    "RainfallEventStart": bool(
+                        collection["RainfallEventStart"].iloc[hourly_index]
+                    ),
                     "DemandGallons": demand_hour,
                     "SewerEligibleDemandGallons": sewer_eligible_demand_hour,
                     "DemandMet": met,

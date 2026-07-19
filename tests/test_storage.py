@@ -1,5 +1,12 @@
 import pytest
+import pandas as pd
 
+from rainwater_app.defaults import default_project_config
+from rainwater_app.rainfall import (
+    HOURLY_PRECIPITATION_COLUMNS,
+    disaggregate_daily_rainfall_hyetos,
+    has_hourly_rainfall,
+)
 from rainwater_app.storage import SQLiteStore
 
 
@@ -28,6 +35,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.optimization_parameters.electricity_rate_per_kwh == 0.15
     assert config.tank_parameters.minimum_operating_volume_percent == 0.0
     assert config.first_flush_antecedent_dry_days == 1.0
+    assert config.use_synthetic_hourly_rainfall is False
 
 
 def test_legacy_reserve_target_migrates_to_zero_minimum_operating_level() -> None:
@@ -278,6 +286,26 @@ def test_custom_system_template_library_crud(tmp_path) -> None:
     store.delete_system_template("office SYSTEM")
     assert store.list_system_templates() == []
 
+
+def test_project_round_trip_preserves_synthetic_hourly_rainfall(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "hourly-rainfall.db"))
+    config = default_project_config()
+    config.name = "Hourly rainfall"
+    config.use_synthetic_hourly_rainfall = True
+    daily = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
+        "Precipitation": [0.4, 0.0],
+    })
+    generated = disaggregate_daily_rainfall_hyetos(daily, seed=8)
+
+    store.save_project(config, generated)
+    loaded_config, loaded = store.load_project(config.name)
+
+    assert has_hourly_rainfall(loaded)
+    assert loaded_config.use_synthetic_hourly_rainfall is True
+    assert loaded.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy() == pytest.approx(
+        generated.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy()
+    )
 
 def test_custom_system_template_names_are_unique_case_insensitively(tmp_path) -> None:
     store = SQLiteStore(str(tmp_path / "templates.db"))

@@ -61,6 +61,14 @@ Date,Precipitation
 
 Review the rainfall summary after importing. Confirm that the date range, row count, units, and source are reasonable before running an analysis.
 
+## Generate synthetic hourly rainfall
+
+After loading or importing a daily record, select **Generate Synthetic Hourly Rainfall** and enter a random seed. The same daily record and seed always produce the same result. The generator uses a Hyetos-style workflow: Bartlett-Lewis rectangular pulses produce candidate within-day hyetographs, a repetition step selects a plausible candidate, and an adjusting step scales the 24 hourly depths so their sum exactly matches each observed daily total. Generating profiles automatically selects **Use generated synthetic hourly rainfall** under **Analysis settings**.
+
+Daily tank analyses continue to use the original daily totals. When **Use generated synthetic hourly rainfall** is selected, hourly analyses use the generated timing directly, including the timing of collection, overflow, and first-flush diversion. Turn the option off to retain the generated profiles but make hourly analysis use the legacy assumption that the day's precipitation arrives at 23:00. The setting and generated profiles are retained when the project is saved.
+
+The built-in stochastic parameters are general-purpose defaults, not a local calibration. For design work that depends on peak intensities or storm duration, calibrate the Bartlett-Lewis parameters against representative observed hourly data and validate the generated statistics independently.
+
 ## Data checks
 
 - Dates should be valid and unambiguous.

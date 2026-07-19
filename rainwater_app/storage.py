@@ -9,6 +9,7 @@ from typing import Any
 
 import pandas as pd
 
+from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
 from .models import (
     DemandObject,
     DemandProfile,
@@ -51,6 +52,7 @@ class SQLiteStore:
                     project_id INTEGER NOT NULL,
                     date TEXT NOT NULL,
                     precipitation REAL NOT NULL,
+                    hourly_precipitation_json TEXT,
                     FOREIGN KEY(project_id) REFERENCES projects(id)
                 )
                 """
@@ -74,6 +76,11 @@ class SQLiteStore:
                 conn.execute("ALTER TABLE projects ADD COLUMN comparison_results_json TEXT")
             if "hourly_results_json" not in columns:
                 conn.execute("ALTER TABLE projects ADD COLUMN hourly_results_json TEXT")
+            rainfall_columns = {
+                row["name"] for row in conn.execute("PRAGMA table_info(rainfall_data)").fetchall()
+            }
+            if "hourly_precipitation_json" not in rainfall_columns:
+                conn.execute("ALTER TABLE rainfall_data ADD COLUMN hourly_precipitation_json TEXT")
             conn.commit()
 
     def list_projects(self) -> list[str]:
@@ -186,12 +193,22 @@ class SQLiteStore:
                 conn.execute("DELETE FROM rainfall_data WHERE project_id = ?", (project_id,))
 
             if rainfall_df is not None and not rainfall_df.empty:
+                include_hourly = has_hourly_rainfall(rainfall_df)
                 records = [
-                    (int(project_id), pd.Timestamp(d).strftime("%Y-%m-%d"), float(p))
-                    for d, p in zip(rainfall_df["Date"], rainfall_df["Precipitation"])
+                    (
+                        int(project_id),
+                        pd.Timestamp(row["Date"]).strftime("%Y-%m-%d"),
+                        float(row["Precipitation"]),
+                        json.dumps([
+                            float(row[column]) for column in HOURLY_PRECIPITATION_COLUMNS
+                        ]) if include_hourly else None,
+                    )
+                    for _, row in rainfall_df.iterrows()
                 ]
                 conn.executemany(
-                    "INSERT INTO rainfall_data (project_id, date, precipitation) VALUES (?, ?, ?)",
+                    "INSERT INTO rainfall_data "
+                    "(project_id, date, precipitation, hourly_precipitation_json) "
+                    "VALUES (?, ?, ?, ?)",
                     records,
                 )
             conn.commit()
@@ -211,7 +228,8 @@ class SQLiteStore:
 
             config_dict: dict[str, Any] = json.loads(row["config_json"])
             rainfall_rows = conn.execute(
-                "SELECT date, precipitation FROM rainfall_data WHERE project_id = ? ORDER BY date ASC",
+                "SELECT date, precipitation, hourly_precipitation_json FROM rainfall_data "
+                "WHERE project_id = ? ORDER BY date ASC",
                 (row["id"],),
             ).fetchall()
 
@@ -222,6 +240,12 @@ class SQLiteStore:
                 "Precipitation": [float(r["precipitation"]) for r in rainfall_rows],
             }
         )
+        hourly_profiles = [r["hourly_precipitation_json"] for r in rainfall_rows]
+        if hourly_profiles and all(profile is not None for profile in hourly_profiles):
+            parsed_profiles = [json.loads(profile) for profile in hourly_profiles]
+            if all(isinstance(profile, list) and len(profile) == 24 for profile in parsed_profiles):
+                for hour, column in enumerate(HOURLY_PRECIPITATION_COLUMNS):
+                    rainfall_df[column] = [float(profile[hour]) for profile in parsed_profiles]
         curve_df = self._df_from_json(row["curve_json"])
         results_df = self._df_from_json(row["results_json"])
         return config, rainfall_df, curve_df, results_df
@@ -361,6 +385,9 @@ class SQLiteStore:
             comparison_tank_sizes_gal=[
                 float(value) for value in payload.get("comparison_tank_sizes_gal", []) if float(value) > 0
             ],
+            use_synthetic_hourly_rainfall=bool(
+                payload.get("use_synthetic_hourly_rainfall", False)
+            ),
             rainfall_source_label=payload.get("rainfall_source_label"),
             weather_station_latitude=_optional_float(payload.get("weather_station_latitude")),
             weather_station_longitude=_optional_float(payload.get("weather_station_longitude")),

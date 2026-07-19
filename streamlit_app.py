@@ -7,7 +7,11 @@ from rainwater_app.acis import default_complete_calendar_range, fetch_daily_stat
 from rainwater_app.defaults import default_project_config
 from rainwater_app.engine import reliability_curve, simulate_tank
 from rainwater_app.models import MONTH_KEYS, ProjectConfig, Surface
-from rainwater_app.rainfall import load_rainfall_csv
+from rainwater_app.rainfall import (
+    disaggregate_daily_rainfall_hyetos,
+    has_hourly_rainfall,
+    load_rainfall_csv,
+)
 from rainwater_app.storage import SQLiteStore
 
 st.set_page_config(page_title="Rainwater Calculator", layout="wide")
@@ -185,7 +189,8 @@ def _rainfall_summary(rainfall_df: pd.DataFrame, source_label: str | None = None
     start = pd.Timestamp(rainfall_df["Date"].min()).strftime("%Y-%m-%d")
     end = pd.Timestamp(rainfall_df["Date"].max()).strftime("%Y-%m-%d")
     source = f" from {source_label}" if source_label else ""
-    return f"{len(rainfall_df):,} rainfall rows loaded ({start} to {end}){source}"
+    hourly = "; Hyetos-style hourly profiles generated" if has_hourly_rainfall(rainfall_df) else ""
+    return f"{len(rainfall_df):,} rainfall rows loaded ({start} to {end}){source}{hourly}"
 
 
 def _station_label(station: dict) -> str:
@@ -342,6 +347,8 @@ if station_options:
             st.session_state.weather_source_df = weather_df
             st.session_state.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
             rainfall_df = st.session_state.rainfall_df
+            config.use_synthetic_hourly_rainfall = False
+            st.session_state.use_synthetic_hourly_rainfall = False
             source_label = f"{selected_station['name']} ({selected_station['sid']})"
             st.session_state.rainfall_source_label = source_label
             st.session_state.config.rainfall_source_label = source_label
@@ -369,21 +376,72 @@ if "weather_source_df" in st.session_state and not st.session_state.weather_sour
 uploaded = st.file_uploader(f"Upload CSV with Date and Precipitation columns; precipitation is read as {_precip_unit(config)}", type=["csv"])
 if uploaded is not None:
     try:
-        st.session_state.rainfall_df = _rainfall_to_internal_df(load_rainfall_csv(uploaded.getvalue()), config)
-        rainfall_df = st.session_state.rainfall_df
-        st.session_state.rainfall_source_label = None
-        st.session_state.config.rainfall_source_label = None
-        st.session_state.curve_df = pd.DataFrame()
-        st.session_state.results_df = pd.DataFrame()
-        st.success(f"Loaded {len(rainfall_df)} rainfall rows.")
+        uploaded_bytes = uploaded.getvalue()
+        upload_signature = (uploaded.name, len(uploaded_bytes), hash(uploaded_bytes))
+        if st.session_state.get("rainfall_upload_signature") != upload_signature:
+            st.session_state.rainfall_df = _rainfall_to_internal_df(
+                load_rainfall_csv(uploaded_bytes), config
+            )
+            rainfall_df = st.session_state.rainfall_df
+            config.use_synthetic_hourly_rainfall = False
+            st.session_state.use_synthetic_hourly_rainfall = False
+            st.session_state.rainfall_source_label = None
+            st.session_state.config.rainfall_source_label = None
+            st.session_state.curve_df = pd.DataFrame()
+            st.session_state.results_df = pd.DataFrame()
+            st.session_state.rainfall_upload_signature = upload_signature
+            st.success(f"Loaded {len(rainfall_df)} rainfall rows.")
     except Exception as exc:  # noqa: BLE001
         st.error(str(exc))
 
 if not rainfall_df.empty:
+    hourly_seed = int(st.number_input(
+        "Synthetic hourly rainfall seed", min_value=0, value=1, step=1
+    ))
+    if st.button("Generate Hyetos-style hourly rainfall", width="stretch"):
+        try:
+            st.session_state.rainfall_df = disaggregate_daily_rainfall_hyetos(
+                rainfall_df, seed=hourly_seed
+            )
+            rainfall_df = st.session_state.rainfall_df
+            config.use_synthetic_hourly_rainfall = True
+            st.session_state.use_synthetic_hourly_rainfall = True
+            st.session_state.curve_df = pd.DataFrame()
+            st.session_state.results_df = pd.DataFrame()
+            st.success(f"Generated reproducible hourly rainfall with seed {hourly_seed}.")
+        except Exception as exc:  # noqa: BLE001
+            st.error(f"Could not generate hourly rainfall: {exc}")
     st.caption(_rainfall_summary(rainfall_df, st.session_state.get("rainfall_source_label")))
-    st.dataframe(_rainfall_to_display_df(rainfall_df.head(20), config), width="stretch")
+    st.dataframe(
+        _rainfall_to_display_df(rainfall_df[["Date", "Precipitation"]].head(20), config),
+        width="stretch",
+    )
 
 st.subheader("Analysis Settings")
+config.use_synthetic_hourly_rainfall = st.checkbox(
+    "Use generated synthetic hourly rainfall",
+    value=bool(config.use_synthetic_hourly_rainfall),
+    key="use_synthetic_hourly_rainfall",
+    help=(
+        "Controls hourly collection and first-flush timing. Daily reliability analysis always "
+        "uses the observed daily totals."
+    ),
+)
+synthetic_available = has_hourly_rainfall(rainfall_df)
+if config.use_synthetic_hourly_rainfall and synthetic_available:
+    st.info(
+        "Synthetic profiles will be used for hourly analysis; daily analysis still uses observed totals."
+    )
+elif config.use_synthetic_hourly_rainfall:
+    st.warning(
+        "Synthetic rainfall is selected, but no generated profiles are available. Generate them above."
+    )
+elif synthetic_available:
+    st.caption(
+        "Synthetic profiles are available but ignored; hourly rainfall is applied at 23:00."
+    )
+else:
+    st.caption("Synthetic hourly rainfall is off; daily rainfall is applied at 23:00 hourly.")
 g1, g2, g3 = st.columns(3)
 graph_start = g1.number_input(
     f"Graph start tank size ({_volume_unit(config)})",
