@@ -35,6 +35,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.optimization_parameters.electricity_rate_per_kwh == 0.15
     assert config.tank_parameters.minimum_operating_volume_percent == 0.0
     assert config.first_flush_antecedent_dry_days == 1.0
+    assert config.first_flush_antecedent_dry_unit == "days"
     assert config.use_synthetic_hourly_rainfall is False
 
 
@@ -82,6 +83,7 @@ def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -
     config = SQLiteStore._config_from_dict({
         "name": "First flush project",
         "first_flush_antecedent_dry_days": 4.5,
+        "first_flush_antecedent_dry_unit": "hours",
         "surfaces": [
             {"name": "New roof", "area": 1000.0, "runoff_coefficient": 0.9,
              "first_flush_depth_inches": 0.08},
@@ -90,6 +92,7 @@ def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -
     })
 
     assert config.first_flush_antecedent_dry_days == 4.5
+    assert config.first_flush_antecedent_dry_unit == "hours"
     assert config.surfaces[0].first_flush_depth_inches == pytest.approx(0.08)
     assert config.surfaces[1].first_flush_depth_inches == pytest.approx(0.0)
 

@@ -6,6 +6,8 @@ from rainwater_app.defaults import default_project_config
 from rainwater_app.models import DemandObject, Surface, WEEKDAY_KEYS
 from tkinter_app import (
     RainwaterTkApp,
+    _antecedent_dry_period_from_days,
+    _antecedent_dry_period_to_days,
     _demand_flow_from_gallons_per_minute,
     _demand_flow_to_gallons_per_minute,
     _normalized_demand_object_indices,
@@ -16,9 +18,62 @@ from tkinter_app import (
     _report_demand_summary,
     _report_surface_rows,
     _report_tank_level_distribution,
+    _system_object_editor_validation,
     _tank_volume_capacity_label,
     _yearly_demand_reliability,
 )
+
+
+def test_antecedent_dry_period_converts_between_days_and_hours() -> None:
+    assert _antecedent_dry_period_from_days(1.5, "hours") == 36.0
+    assert _antecedent_dry_period_to_days(36.0, "hours") == 1.5
+    assert _antecedent_dry_period_from_days(1.5, "days") == 1.5
+
+
+def _valid_primary_editor_values() -> dict[str, object]:
+    return {
+        "name": "Primary tank",
+        "selected_tank_size": "5,000",
+        "initial_fill": "50",
+        "reserve": "10",
+        "graph_start": "500",
+        "graph_end": "20000",
+        "graph_step": "500",
+        "graph_auto_step_count": "39",
+    }
+
+
+def test_system_object_editor_accepts_valid_primary_parameters() -> None:
+    assert _system_object_editor_validation("primary_tank", _valid_primary_editor_values()) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("name", " ", "Name cannot be blank."),
+        ("selected_tank_size", "large", "Primary tank size must be a valid number."),
+        ("initial_fill", "101", "Initial fill must be between 0 and 100%."),
+        ("graph_end", "400", "Graph end tank size must be greater than graph start tank size."),
+        ("graph_step", "30000", "Graph step cannot exceed the graph range."),
+        ("graph_auto_step_count", "2.5", "Number of steps must be a whole number from 1 to 1000."),
+    ],
+)
+def test_system_object_editor_rejects_invalid_primary_parameters(
+    field: str, value: str, message: str
+) -> None:
+    values = _valid_primary_editor_values()
+    values[field] = value
+
+    assert message in _system_object_editor_validation("primary_tank", values)
+
+
+def test_system_object_editor_validates_other_visible_parameter_types() -> None:
+    assert _system_object_editor_validation(
+        "filtration_pump", {"name": "Pump", "filtration_pump_capacity": "-1"}
+    ) == ["Pump capacity cannot be negative."]
+    assert _system_object_editor_validation(
+        "filtration_system", {"name": "Filter", "filter_recovery": "101"}
+    ) == ["Filter recovery must be between 0 and 100%."]
 
 
 @pytest.mark.parametrize(
@@ -755,6 +810,19 @@ def test_system_builder_pan_is_limited_to_maximum_zoom_out_workspace() -> None:
         700.0, 420.0, 1.0, -1000.0, 100.0
     )
     assert pan == pytest.approx((-300.0, 0.0))
+
+
+def test_system_builder_canvas_grows_to_contain_all_objects_and_ports() -> None:
+    layout = [
+        {"x": 100.0, "y": 100.0},
+        {"x": 900.0, "y": 510.0, "width": 200.0, "height": 100.0},
+    ]
+
+    assert RainwaterTkApp._required_system_builder_canvas_size(layout) == (1032, 576)
+
+
+def test_system_builder_canvas_keeps_its_useful_minimum_size() -> None:
+    assert RainwaterTkApp._required_system_builder_canvas_size([]) == (760, 420)
 
 
 def test_animation_flow_activity_uses_hourly_component_results() -> None:

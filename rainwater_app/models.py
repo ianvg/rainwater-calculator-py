@@ -251,6 +251,7 @@ class ProjectConfig:
     canadian_precipitation_field: str = "TOTAL_PRECIPITATION"
     surfaces: List[Surface] = field(default_factory=list)
     first_flush_antecedent_dry_days: float = 1.0
+    first_flush_antecedent_dry_unit: str = "days"
     demand: DemandProfile = field(default_factory=DemandProfile)
     graph_start_gal: int = 500
     graph_end_gal: int = 20000

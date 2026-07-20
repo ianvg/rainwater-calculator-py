@@ -48,7 +48,7 @@ F[j,t] = runoff coefficient[j] x area[j] x min(rainfall[t], first-flush depth[j]
 I[t] = G[t] - sum(F[j,t])
 ```
 
-`F[j,t]` is evaluated only on the first wet observation after the configured antecedent dry period. On consecutive wet observations it is zero, even when rainfall on the event's first day was less than the configured first-flush depth. The default is one antecedent dry day, matching Model 2 in Khan (2026). Gross runoff, first-flush loss, and net collection are retained as separate result fields.
+`F[j,t]` is evaluated only on the first wet observation after the configured antecedent dry period. The threshold can be entered in days or hours and is evaluated as a continuous duration. On consecutive wet observations it is zero, even when rainfall on the event's first observation was less than the configured first-flush depth. The default is one antecedent dry day, matching Model 2 in Khan (2026). Gross runoff, first-flush loss, and net collection are retained as separate result fields.
 
 ## 3. Calculate daily demand
 

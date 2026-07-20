@@ -216,6 +216,23 @@ def test_first_flush_resets_after_antecedent_dry_period() -> None:
     assert balance["FirstFlushLossGallons"].iloc[4] == pytest.approx(0.0)
 
 
+def test_first_flush_supports_an_hour_level_antecedent_dry_period() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [Surface("Roof", 1000.0, 1.0, 0.05)]
+    cfg.first_flush_antecedent_dry_days = 12.0 / 24.0
+    cfg.first_flush_antecedent_dry_unit = "hours"
+    rainfall = pd.DataFrame({
+        "Date": pd.to_datetime([
+            "2025-01-01 00:00", "2025-01-01 06:00", "2025-01-01 13:00",
+        ]),
+        "Precipitation": [0.2, 0.0, 0.2],
+    })
+
+    balance = collection_balance_series(cfg, rainfall)
+
+    assert balance["RainfallEventStart"].tolist() == [True, False, True]
+
+
 def test_first_flush_is_separate_and_reconciles_to_gross_runoff() -> None:
     cfg = default_project_config()
     cfg.surfaces = [

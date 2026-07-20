@@ -380,6 +380,12 @@ class SQLiteStore:
             first_flush_antecedent_dry_days=max(
                 float(payload.get("first_flush_antecedent_dry_days", 1.0)), 0.0
             ),
+            first_flush_antecedent_dry_unit=(
+                str(payload.get("first_flush_antecedent_dry_unit", "days")).casefold()
+                if str(payload.get("first_flush_antecedent_dry_unit", "days")).casefold()
+                in {"days", "hours"}
+                else "days"
+            ),
             demand=demand,
             graph_start_gal=int(payload.get("graph_start_gal", 500)),
             graph_end_gal=int(payload.get("graph_end_gal", 20000)),

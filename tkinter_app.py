@@ -432,6 +432,94 @@ def _float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _antecedent_dry_period_to_days(value: float, unit: str) -> float:
+    return value / 24.0 if unit.casefold() == "hours" else value
+
+
+def _antecedent_dry_period_from_days(days: float, unit: str) -> float:
+    return days * 24.0 if unit.casefold() == "hours" else days
+
+
+def _system_object_editor_validation(
+    component_type: str, values: dict[str, object]
+) -> list[str]:
+    """Return user-facing validation errors for a staged system-object edit."""
+    errors: list[str] = []
+    if not str(values.get("name", "")).strip():
+        errors.append("Name cannot be blank.")
+
+    numeric_labels = {
+        "selected_tank_size": "Primary tank size",
+        "initial_fill": "Initial fill",
+        "reserve": "Minimum operating level",
+        "graph_start": "Graph start tank size",
+        "graph_end": "Graph end tank size",
+        "graph_step": "Graph step",
+        "graph_auto_step_count": "Number of steps",
+        "filtration_pump_capacity": "Pump capacity",
+        "filter_recovery": "Filter recovery",
+        "booster_tank_size": "Tank size",
+        "booster_initial_fill": "Initial fill",
+        "booster_refill_level": "Refill level",
+        "pump_capacity": "Pump capacity",
+    }
+    fields_by_type = {
+        "primary_tank": (
+            "selected_tank_size", "initial_fill", "reserve", "graph_start",
+            "graph_end", "graph_step", "graph_auto_step_count",
+        ),
+        "filtration_pump": ("filtration_pump_capacity",),
+        "filtration_system": ("filter_recovery",),
+        "booster_tank": (
+            "booster_tank_size", "booster_initial_fill", "booster_refill_level",
+        ),
+        "booster_pump": ("pump_capacity",),
+    }
+    parsed: dict[str, float] = {}
+    for field in fields_by_type.get(component_type, ()):
+        raw = str(values.get(field, "")).strip().replace(",", "")
+        try:
+            number = float(raw)
+            if not math.isfinite(number):
+                raise ValueError
+            parsed[field] = number
+        except ValueError:
+            errors.append(f"{numeric_labels[field]} must be a valid number.")
+
+    if errors:
+        return errors
+
+    nonnegative_fields = {
+        "filtration_pump_capacity", "booster_tank_size", "pump_capacity",
+    }
+    for field in nonnegative_fields.intersection(parsed):
+        if parsed[field] < 0:
+            errors.append(f"{numeric_labels[field]} cannot be negative.")
+
+    for field in ("initial_fill", "reserve", "filter_recovery", "booster_initial_fill", "booster_refill_level"):
+        if field in parsed and not 0 <= parsed[field] <= 100:
+            errors.append(f"{numeric_labels[field]} must be between 0 and 100%.")
+
+    if component_type == "primary_tank":
+        if parsed["selected_tank_size"] <= 0:
+            errors.append("Primary tank size must be greater than zero.")
+        if parsed["graph_start"] <= 0:
+            errors.append("Graph start tank size must be greater than zero.")
+        if parsed["graph_end"] <= parsed["graph_start"]:
+            errors.append("Graph end tank size must be greater than graph start tank size.")
+        if parsed["graph_step"] <= 0:
+            errors.append("Graph step must be greater than zero.")
+        elif parsed["graph_end"] > parsed["graph_start"] and parsed["graph_step"] > (
+            parsed["graph_end"] - parsed["graph_start"]
+        ):
+            errors.append("Graph step cannot exceed the graph range.")
+        step_count = parsed["graph_auto_step_count"]
+        if not step_count.is_integer() or not 1 <= step_count <= 1000:
+            errors.append("Number of steps must be a whole number from 1 to 1000.")
+
+    return errors
+
+
 def _parse_coordinates(latitude_text: str, longitude_text: str) -> tuple[float | None, float | None]:
     latitude_value = latitude_text.strip()
     longitude_value = longitude_text.strip()
@@ -913,8 +1001,16 @@ class RainwaterTkApp(tk.Tk):
         self.reserve_var = tk.StringVar(
             value=str(self.config_model.tank_parameters.minimum_operating_volume_percent)
         )
-        self.first_flush_antecedent_days_var = tk.StringVar(
-            value=str(self.config_model.first_flush_antecedent_dry_days)
+        self.first_flush_antecedent_unit_var = tk.StringVar(
+            value=self.config_model.first_flush_antecedent_dry_unit
+        )
+        self.first_flush_antecedent_display_unit = self.first_flush_antecedent_unit_var.get()
+        first_flush_antecedent_display_value = _antecedent_dry_period_from_days(
+            self.config_model.first_flush_antecedent_dry_days,
+            self.first_flush_antecedent_display_unit,
+        )
+        self.first_flush_antecedent_var = tk.StringVar(
+            value=f"{first_flush_antecedent_display_value:g}"
         )
         self.hourly_schedule_enabled_var = tk.BooleanVar(value=self.config_model.demand.hourly_schedule_enabled)
         self.hourly_schedule_summary_var = tk.StringVar(value="Even 24-hour demand profile")
@@ -1652,11 +1748,20 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _resize_system_builder_scroll_content(self, event: tk.Event) -> None:
+        requested_width = self.system_builder_scroll_content.winfo_reqwidth()
         self.system_builder_scroll_canvas.itemconfigure(
-            self.system_builder_scroll_window, width=event.width
+            self.system_builder_scroll_window, width=max(event.width, requested_width)
         )
 
     def _update_system_builder_scroll_region(self, _event: tk.Event | None = None) -> None:
+        if hasattr(self, "system_builder_scroll_content"):
+            content_width = max(
+                self.system_builder_scroll_canvas.winfo_width(),
+                self.system_builder_scroll_content.winfo_reqwidth(),
+            )
+            self.system_builder_scroll_canvas.itemconfigure(
+                self.system_builder_scroll_window, width=content_width
+            )
         self.system_builder_scroll_canvas.configure(
             scrollregion=self.system_builder_scroll_canvas.bbox("all")
         )
@@ -1683,8 +1788,17 @@ class RainwaterTkApp(tk.Tk):
             command=self.system_builder_scroll_canvas.yview,
         )
         system_builder_scrollbar.grid(row=0, column=1, sticky="ns")
-        self.system_builder_scroll_canvas.configure(yscrollcommand=system_builder_scrollbar.set)
+        system_builder_horizontal_scrollbar = ttk.Scrollbar(
+            system_builder_page, orient="horizontal",
+            command=self.system_builder_scroll_canvas.xview,
+        )
+        system_builder_horizontal_scrollbar.grid(row=1, column=0, sticky="ew")
+        self.system_builder_scroll_canvas.configure(
+            xscrollcommand=system_builder_horizontal_scrollbar.set,
+            yscrollcommand=system_builder_scrollbar.set,
+        )
         system_builder_content = ttk.Frame(self.system_builder_scroll_canvas)
+        self.system_builder_scroll_content = system_builder_content
         self.system_builder_scroll_window = self.system_builder_scroll_canvas.create_window(
             (0, 0), window=system_builder_content, anchor="nw"
         )
@@ -1829,61 +1943,91 @@ class RainwaterTkApp(tk.Tk):
             foreground="#667278",
             wraplength=230,
         ).grid(row=3, column=0, sticky="ew", pady=(10, 0))
-        system_edit.columnconfigure(1, weight=1)
-        self.system_component_name_var = tk.StringVar()
-        ttk.Label(system_edit, text="Name").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
-        self.system_component_name_entry = ttk.Entry(system_edit, textvariable=self.system_component_name_var)
-        self.system_component_name_entry.grid(row=0, column=1, sticky="ew", pady=2)
-        self.system_component_name_entry.bind("<Return>", self._apply_system_component_name_from_event)
-        self.apply_system_component_name_button = ttk.Button(
-            system_edit, text="Apply", command=self.apply_system_component_name
-        )
-        self.apply_system_component_name_button.grid(row=1, column=0, columnspan=2, sticky="e", pady=(8, 0))
+        system_edit.columnconfigure(0, weight=1)
         self.system_component_edit_status_var = tk.StringVar(value="Select a system object to edit.")
         ttk.Label(
             system_edit,
             textvariable=self.system_component_edit_status_var,
             foreground="#667278",
             wraplength=220,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ).grid(row=0, column=0, sticky="w")
         self.system_component_parameters_editor = ttk.LabelFrame(
             system_edit, text="Object parameters", padding=6
         )
-        self.system_component_parameters_editor.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.system_component_parameters_editor.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.system_component_parameters_editor.columnconfigure(1, weight=1)
+        self.system_component_name_var = tk.StringVar()
+        ttk.Label(self.system_component_parameters_editor, text="Name").grid(
+            row=0, column=0, sticky="w", padx=(0, 8), pady=2
+        )
+        self.system_component_name_entry = ttk.Entry(
+            self.system_component_parameters_editor, textvariable=self.system_component_name_var
+        )
+        self.system_component_name_entry.grid(row=0, column=1, sticky="ew", pady=2)
+        self.system_component_name_entry.bind("<Return>", self._apply_system_component_name_from_event)
+        self.system_component_parameter_vars: dict[str, tk.Variable] = {
+            "selected_tank_size": tk.StringVar(),
+            "initial_fill": tk.StringVar(),
+            "reserve": tk.StringVar(),
+            "graph_start": tk.StringVar(),
+            "graph_end": tk.StringVar(),
+            "graph_step": tk.StringVar(),
+            "graph_auto_step_count": tk.StringVar(),
+            "filtration_pump_capacity": tk.StringVar(),
+            "filter_recovery": tk.StringVar(),
+            "booster_tank_size": tk.StringVar(),
+            "booster_initial_fill": tk.StringVar(),
+            "booster_refill_level": tk.StringVar(),
+            "pump_capacity": tk.StringVar(),
+            "municipal_backup_enabled": tk.BooleanVar(),
+        }
+        self.system_component_editor_loaded_id: str | None = None
+        self.system_component_editor_baseline: dict[str, object] = {}
+        self.system_component_editor_drafts: dict[str, dict[str, object]] = {}
+        self.system_component_editor_loading = False
+        self.system_component_editor_model = self.config_model
+        self.system_component_validation_var = tk.StringVar()
+        self.apply_system_component_name_button = ttk.Button(
+            self.system_component_parameters_editor,
+            text="Apply changes",
+            command=self.apply_system_component_name,
+        )
         self.system_parameter_frames: dict[str, ttk.Frame] = {}
+        editor_vars = self.system_component_parameter_vars
         parameter_specs = {
             "primary_tank": [
-                ("Primary tank size", self.selected_tank_var, self.tank_size_unit_var),
-                ("Initial fill", self.initial_fill_var, self.percent_unit_var),
-                ("Minimum operating level", self.reserve_var, self.reserve_unit_var),
-                ("Graph start tank size", self.graph_start_var, self.tank_size_unit_var),
-                ("Graph end tank size", self.graph_end_var, self.tank_size_unit_var),
-                ("Graph step", self.graph_step_var, self.tank_size_unit_var),
+                ("Primary tank size", editor_vars["selected_tank_size"], self.tank_size_unit_var),
+                ("Initial fill", editor_vars["initial_fill"], self.percent_unit_var),
+                ("Minimum operating level", editor_vars["reserve"], self.reserve_unit_var),
+                ("Graph start tank size", editor_vars["graph_start"], self.tank_size_unit_var),
+                ("Graph end tank size", editor_vars["graph_end"], self.tank_size_unit_var),
+                ("Graph step", editor_vars["graph_step"], self.tank_size_unit_var),
             ],
             "filtration_pump": [
-                ("Pump capacity (0 = unlimited)", self.filtration_pump_capacity_var, self.pump_capacity_unit_var),
+                ("Pump capacity (0 = unlimited)", editor_vars["filtration_pump_capacity"], self.pump_capacity_unit_var),
             ],
             "filtration_system": [
-                ("Filter recovery", self.filter_recovery_var, self.percent_unit_var),
+                ("Filter recovery", editor_vars["filter_recovery"], self.percent_unit_var),
             ],
             "booster_tank": [
-                ("Tank size (0 = pass-through)", self.booster_tank_size_var, self.tank_size_unit_var),
-                ("Initial fill", self.booster_initial_fill_var, self.percent_unit_var),
-                ("Refill level", self.booster_refill_level_var, self.percent_unit_var),
+                ("Tank size (0 = pass-through)", editor_vars["booster_tank_size"], self.tank_size_unit_var),
+                ("Initial fill", editor_vars["booster_initial_fill"], self.percent_unit_var),
+                ("Refill level", editor_vars["booster_refill_level"], self.percent_unit_var),
             ],
             "booster_pump": [
-                ("Pump capacity (0 = unlimited)", self.pump_capacity_var, self.pump_capacity_unit_var),
+                ("Pump capacity (0 = unlimited)", editor_vars["pump_capacity"], self.pump_capacity_unit_var),
             ],
         }
         for component_type, specs in parameter_specs.items():
             frame = ttk.Frame(self.system_component_parameters_editor)
-            frame.grid(row=0, column=0, sticky="ew")
+            frame.grid(row=1, column=0, columnspan=2, sticky="ew")
             frame.columnconfigure(1, weight=1)
             for row, (label, variable, unit_variable) in enumerate(specs):
                 self._labeled_entry(frame, row, label, variable, unit_variable)
             if component_type == "primary_tank":
-                ttk.Button(frame, text="Auto graph step", command=self.auto_set_graph_step).grid(
+                ttk.Button(
+                    frame, text="Auto graph step", command=self._auto_set_system_component_graph_step
+                ).grid(
                     row=len(specs), column=0, columnspan=3, sticky="w", pady=(6, 0)
                 )
                 ttk.Label(frame, text="Number of steps").grid(
@@ -1891,55 +2035,69 @@ class RainwaterTkApp(tk.Tk):
                 )
                 ttk.Spinbox(
                     frame, from_=1, to=1000, increment=1,
-                    textvariable=self.graph_auto_step_count_var, width=6,
+                    textvariable=editor_vars["graph_auto_step_count"], width=6,
                 ).grid(row=len(specs) + 1, column=1, sticky="w", pady=2)
-                ttk.Label(frame, textvariable=self.selected_tank_warning_var, style="Invalid.TLabel").grid(
-                    row=len(specs) + 2, column=0, columnspan=3, sticky="w", pady=(4, 0)
-                )
             self.system_parameter_frames[component_type] = frame
             frame.grid_remove()
         self.system_municipal_backup_editor = ttk.Frame(self.system_component_parameters_editor)
-        self.system_municipal_backup_editor.grid(row=0, column=0, sticky="ew")
+        self.system_municipal_backup_editor.grid(row=1, column=0, columnspan=2, sticky="ew")
         ttk.Checkbutton(
             self.system_municipal_backup_editor,
             text="Municipal backup enabled",
-            variable=self.municipal_backup_enabled_var,
-            command=self._system_builder_backup_setting_changed,
+            variable=editor_vars["municipal_backup_enabled"],
         ).grid(row=0, column=0, sticky="w")
         self.system_municipal_backup_editor.grid_remove()
+        ttk.Label(
+            self.system_component_parameters_editor,
+            textvariable=self.system_component_validation_var,
+            style="Invalid.TLabel",
+            wraplength=220,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
+        self.apply_system_component_name_button.grid(
+            row=3, column=0, columnspan=2, sticky="e", pady=(8, 0)
+        )
         self.system_end_uses_editor = ttk.LabelFrame(
             system_edit, text="Demand objects", padding=6
         )
-        self.system_end_uses_editor.grid(row=4, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
+        self.system_end_uses_editor.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
         self.system_end_uses_editor.columnconfigure(0, weight=1)
-        ttk.Label(self.system_end_uses_editor, text="Available").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            self.system_end_uses_editor,
+            text="Demand assignments apply immediately.",
+            foreground="#667278",
+            wraplength=220,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 6))
+        ttk.Label(self.system_end_uses_editor, text="Available").grid(row=1, column=0, sticky="w")
         self.system_available_demands_list = tk.Listbox(
             self.system_end_uses_editor, height=4, exportselection=False
         )
-        self.system_available_demands_list.grid(row=1, column=0, sticky="ew", pady=(2, 4))
+        self.system_available_demands_list.grid(row=2, column=0, sticky="ew", pady=(2, 4))
         self.system_add_demand_button = ttk.Button(
             self.system_end_uses_editor,
             text="Add selected",
             command=self.add_demand_to_selected_end_uses,
         )
-        self.system_add_demand_button.grid(row=2, column=0, sticky="ew")
-        ttk.Label(self.system_end_uses_editor, text="Assigned").grid(row=3, column=0, sticky="w", pady=(8, 0))
+        self.system_add_demand_button.grid(row=3, column=0, sticky="ew")
+        ttk.Label(self.system_end_uses_editor, text="Assigned").grid(row=4, column=0, sticky="w", pady=(8, 0))
         self.system_assigned_demands_list = tk.Listbox(
             self.system_end_uses_editor, height=4, exportselection=False
         )
-        self.system_assigned_demands_list.grid(row=4, column=0, sticky="ew", pady=(2, 4))
+        self.system_assigned_demands_list.grid(row=5, column=0, sticky="ew", pady=(2, 4))
         self.system_remove_demand_button = ttk.Button(
             self.system_end_uses_editor,
             text="Remove selected",
             command=self.remove_demand_from_selected_end_uses,
         )
-        self.system_remove_demand_button.grid(row=5, column=0, sticky="ew")
+        self.system_remove_demand_button.grid(row=6, column=0, sticky="ew")
         self.system_available_demands_list.bind(
             "<Double-1>", lambda _event: self.add_demand_to_selected_end_uses()
         )
         self.system_assigned_demands_list.bind(
             "<Double-1>", lambda _event: self.remove_demand_from_selected_end_uses()
         )
+        for variable in (self.system_component_name_var, *editor_vars.values()):
+            variable.trace_add("write", self._system_component_editor_field_changed)
         ttk.Label(
             self.indirect_system_diagram_frame,
             text=("Link objects by selecting either an output or input node, then the opposite node. "
@@ -3187,6 +3345,8 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_pending_source = None
         self.system_builder_pending_target = None
         self.system_builder_pending_target_port = "in"
+        self.system_component_editor_drafts.clear()
+        self.system_component_editor_loaded_id = None
         self._populate_from_model()
         self._render_system_builder()
         self.status_var.set(f"Applied custom system template: {name}")
@@ -3296,6 +3456,8 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_pending_target = None
         self.system_builder_pending_target_port = "in"
         self.system_builder_port_drag = None
+        self.system_component_editor_drafts.clear()
+        self.system_component_editor_loaded_id = None
         self._render_system_builder()
         self.status_var.set(f"Applied {system_type.lower()} template")
 
@@ -3416,6 +3578,39 @@ class RainwaterTkApp(tk.Tk):
             float(self.system_builder_canvas.cget("height")),
         ) / maximum_zoom_out
         return width, height
+
+    @staticmethod
+    def _required_system_builder_canvas_size(
+        layout: list[dict[str, object]],
+        minimum_width: float = 760.0,
+        minimum_height: float = 420.0,
+    ) -> tuple[int, int]:
+        """Return a canvas size that contains every system object and its ports."""
+        right_edge = float(minimum_width)
+        bottom_edge = float(minimum_height)
+        for item in layout:
+            try:
+                x = float(item.get("x", 0.0))
+                y = float(item.get("y", 0.0))
+                width = max(float(item.get("width", 124.0)), 80.0)
+                height = max(float(item.get("height", 60.0)), 44.0)
+            except (TypeError, ValueError):
+                continue
+            # Leave room for inlet/outlet circles, their +/- affordances, and the
+            # canvas highlight so edge objects are never visually clipped.
+            right_edge = max(right_edge, x + width / 2.0 + 32.0)
+            bottom_edge = max(bottom_edge, y + height / 2.0 + 16.0)
+        return math.ceil(right_edge), math.ceil(bottom_edge)
+
+    def _resize_system_builder_canvas_to_objects(self) -> None:
+        canvas = self.system_builder_canvas
+        width, height = self._required_system_builder_canvas_size(
+            self.config_model.system_layout
+        )
+        if int(float(canvas.cget("width"))) != width or int(float(canvas.cget("height"))) != height:
+            canvas.configure(width=width, height=height)
+            if hasattr(self, "system_builder_scroll_canvas"):
+                self.after_idle(self._update_system_builder_scroll_region)
 
     def _change_system_builder_zoom(self, delta: float) -> None:
         self.system_builder_zoom = self._bounded_system_builder_zoom(
@@ -4132,12 +4327,129 @@ class RainwaterTkApp(tk.Tk):
             if connection.get("source_component") != removed_id
             and connection.get("target_component") != removed_id
         ]
+        self.system_component_editor_drafts.pop(removed_id, None)
         self.system_builder_selected_id = None
         self._render_system_builder()
 
-    def _refresh_system_component_editor(self) -> None:
+    @staticmethod
+    def _system_component_editor_field_names(component_type: str) -> tuple[str, ...]:
+        return {
+            "primary_tank": (
+                "selected_tank_size", "initial_fill", "reserve", "graph_start",
+                "graph_end", "graph_step", "graph_auto_step_count",
+            ),
+            "filtration_pump": ("filtration_pump_capacity",),
+            "filtration_system": ("filter_recovery",),
+            "booster_tank": (
+                "booster_tank_size", "booster_initial_fill", "booster_refill_level",
+            ),
+            "booster_pump": ("pump_capacity",),
+            "municipal_backup": ("municipal_backup_enabled",),
+        }.get(component_type, ())
+
+    def _system_component_editor_snapshot(
+        self, item: dict[str, object]
+    ) -> dict[str, object]:
+        component_type = str(item.get("component_type", ""))
+        values: dict[str, object] = {"name": self.system_component_name_var.get()}
+        for field in self._system_component_editor_field_names(component_type):
+            values[field] = self.system_component_parameter_vars[field].get()
+        return values
+
+    def _system_component_model_snapshot(
+        self, item: dict[str, object]
+    ) -> dict[str, object]:
+        cfg = self.config_model
+        component_type = str(item.get("component_type", ""))
+        values: dict[str, object] = {"name": str(item.get("name", ""))}
+        if component_type == "primary_tank":
+            values.update({
+                "selected_tank_size": f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}",
+                "initial_fill": f"{cfg.tank_parameters.initial_fill_percent:.0f}",
+                "reserve": f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}",
+                "graph_start": f"{volume_to_display(cfg.graph_start_gal, cfg):.0f}",
+                "graph_end": f"{volume_to_display(cfg.graph_end_gal, cfg):.0f}",
+                "graph_step": f"{volume_to_display(cfg.graph_step_gal, cfg):.0f}",
+                "graph_auto_step_count": str(cfg.graph_auto_step_count),
+            })
+        elif component_type == "filtration_pump":
+            values["filtration_pump_capacity"] = (
+                f"{volume_to_display(cfg.system_parameters.filtration_pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+            )
+        elif component_type == "filtration_system":
+            values["filter_recovery"] = f"{cfg.system_parameters.filter_recovery_percent:.2f}"
+        elif component_type == "booster_tank":
+            values.update({
+                "booster_tank_size": f"{volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg):.2f}",
+                "booster_initial_fill": f"{cfg.system_parameters.booster_initial_fill_percent:.2f}",
+                "booster_refill_level": f"{cfg.system_parameters.booster_refill_level_percent:.2f}",
+            })
+        elif component_type == "booster_pump":
+            values["pump_capacity"] = (
+                f"{volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+            )
+        elif component_type == "municipal_backup":
+            values["municipal_backup_enabled"] = bool(
+                cfg.system_parameters.municipal_backup_enabled
+            )
+        return values
+
+    def _load_system_component_editor_values(
+        self, item: dict[str, object], values: dict[str, object]
+    ) -> None:
+        self.system_component_editor_loading = True
+        try:
+            self.system_component_name_var.set(str(values.get("name", "")))
+            component_type = str(item.get("component_type", ""))
+            for field in self._system_component_editor_field_names(component_type):
+                variable = self.system_component_parameter_vars[field]
+                value = values.get(field, False if isinstance(variable, tk.BooleanVar) else "")
+                variable.set(value)
+        finally:
+            self.system_component_editor_loading = False
+
+    def _update_system_component_editor_state(self, *, restored: bool = False) -> None:
+        item = self._system_layout_item(self.system_component_editor_loaded_id or "")
+        if item is None:
+            self.apply_system_component_name_button.state(["disabled"])
+            self.system_component_validation_var.set("")
+            return
+        values = self._system_component_editor_snapshot(item)
+        dirty = values != self.system_component_editor_baseline
+        component_id = str(item.get("id", ""))
+        if dirty:
+            self.system_component_editor_drafts[component_id] = values
+        else:
+            self.system_component_editor_drafts.pop(component_id, None)
+        component_type_key = str(item.get("component_type", ""))
+        errors = _system_object_editor_validation(component_type_key, values)
+        self.system_component_validation_var.set("\n".join(errors))
+        self.apply_system_component_name_button.state(
+            ["!disabled"] if dirty and not errors else ["disabled"]
+        )
+        component_type = self._system_component_templates().get(
+            component_type_key, component_type_key or "System object"
+        )
+        if errors:
+            suffix = " — fix the validation message below."
+        elif dirty:
+            suffix = " — unapplied changes restored." if restored else " — unapplied changes."
+        else:
+            suffix = ""
+        self.system_component_edit_status_var.set(f"Object type: {component_type}{suffix}")
+
+    def _system_component_editor_field_changed(self, *_args: object) -> None:
+        if self.system_component_editor_loading or self.system_component_editor_loaded_id is None:
+            return
+        self._update_system_component_editor_state()
+
+    def _refresh_system_component_editor(self, *, force_reload: bool = False) -> None:
         if not hasattr(self, "system_component_name_entry"):
             return
+        if self.system_component_editor_model is not self.config_model:
+            self.system_component_editor_model = self.config_model
+            self.system_component_editor_drafts.clear()
+            self.system_component_editor_loaded_id = None
         item = (
             self._system_layout_item(self.system_builder_selected_id)
             if self.system_builder_selected_id is not None
@@ -4147,35 +4459,41 @@ class RainwaterTkApp(tk.Tk):
             frame.grid_remove()
         self.system_municipal_backup_editor.grid_remove()
         if item is None:
+            self.system_component_editor_loaded_id = None
+            self.system_component_editor_baseline = {}
+            self.system_component_editor_loading = True
             self.system_component_name_var.set("")
+            self.system_component_editor_loading = False
             self.system_component_name_entry.state(["disabled"])
             self.apply_system_component_name_button.state(["disabled"])
             self.system_component_edit_status_var.set("Select a system object to edit.")
+            self.system_component_validation_var.set("")
             self.system_component_parameters_editor.grid_remove()
             self.system_end_uses_editor.grid_remove()
             return
-        self.system_component_name_var.set(str(item.get("name", "")))
+        component_id = str(item.get("id", ""))
+        restored = False
+        if force_reload or component_id != self.system_component_editor_loaded_id:
+            model_values = self._system_component_model_snapshot(item)
+            values = self.system_component_editor_drafts.get(component_id, model_values)
+            restored = component_id in self.system_component_editor_drafts
+            self.system_component_editor_loaded_id = component_id
+            self.system_component_editor_baseline = model_values
+            self._load_system_component_editor_values(item, values)
         self.system_component_name_entry.state(["!disabled"])
-        self.apply_system_component_name_button.state(["!disabled"])
         component_type_key = str(item.get("component_type", ""))
-        component_type = self._system_component_templates().get(
-            component_type_key, str(item.get("component_type", "System object"))
-        )
-        self.system_component_edit_status_var.set(f"Editing: {component_type}")
+        self.system_component_parameters_editor.grid()
         parameter_frame = self.system_parameter_frames.get(component_type_key)
         if parameter_frame is not None:
-            self.system_component_parameters_editor.grid()
             parameter_frame.grid()
         elif component_type_key == "municipal_backup":
-            self.system_component_parameters_editor.grid()
             self.system_municipal_backup_editor.grid()
-        else:
-            self.system_component_parameters_editor.grid_remove()
         if component_type_key == "end_uses":
             self.system_end_uses_editor.grid()
             self._refresh_end_uses_demand_editor(item)
         else:
             self.system_end_uses_editor.grid_remove()
+        self._update_system_component_editor_state(restored=restored)
 
     def _refresh_end_uses_demand_editor(self, item: dict[str, object]) -> None:
         demand_objects = self.config_model.demand.demand_objects
@@ -4235,19 +4553,91 @@ class RainwaterTkApp(tk.Tk):
         item = self._system_layout_item(self.system_builder_selected_id)
         if item is None:
             return
-        name = self.system_component_name_var.get().strip()
-        if not name:
-            messagebox.showwarning(APP_TITLE, "System object name cannot be blank.", parent=self)
-            self.system_component_name_entry.focus_set()
+        values = self._system_component_editor_snapshot(item)
+        component_type = str(item.get("component_type", ""))
+        errors = _system_object_editor_validation(component_type, values)
+        if errors:
+            self.system_component_validation_var.set("\n".join(errors))
             return
-        item["name"] = name
+        if values == self.system_component_editor_baseline:
+            return
+        number = lambda field: float(str(values[field]).strip().replace(",", ""))
+        cfg = self.config_model
+        cfg.unit_system = self.unit_var.get() or "Imperial"
+        item["name"] = str(values["name"]).strip()
+        if component_type == "primary_tank":
+            cfg.selected_tank_size_gal = volume_to_internal(number("selected_tank_size"), cfg)
+            cfg.tank_parameters.initial_fill_percent = number("initial_fill")
+            cfg.tank_parameters.minimum_operating_volume_percent = number("reserve")
+            cfg.graph_start_gal = max(1, int(round(volume_to_internal(number("graph_start"), cfg))))
+            cfg.graph_end_gal = max(2, int(round(volume_to_internal(number("graph_end"), cfg))))
+            cfg.graph_step_gal = max(1, int(round(volume_to_internal(number("graph_step"), cfg))))
+            cfg.graph_auto_step_count = int(number("graph_auto_step_count"))
+            self.selected_tank_var.set(str(values["selected_tank_size"]))
+            self.initial_fill_var.set(str(values["initial_fill"]))
+            self.reserve_var.set(str(values["reserve"]))
+            self.graph_start_var.set(str(values["graph_start"]))
+            self.graph_end_var.set(str(values["graph_end"]))
+            self.graph_step_var.set(str(values["graph_step"]))
+            self.graph_auto_step_count_var.set(str(values["graph_auto_step_count"]))
+        elif component_type == "filtration_pump":
+            cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = volume_to_internal(
+                number("filtration_pump_capacity") * 60.0, cfg
+            )
+            self.filtration_pump_capacity_var.set(str(values["filtration_pump_capacity"]))
+        elif component_type == "filtration_system":
+            cfg.system_parameters.filter_recovery_percent = number("filter_recovery")
+            self.filter_recovery_var.set(str(values["filter_recovery"]))
+        elif component_type == "booster_tank":
+            cfg.system_parameters.booster_tank_size_gallons = volume_to_internal(
+                number("booster_tank_size"), cfg
+            )
+            cfg.system_parameters.booster_initial_fill_percent = number("booster_initial_fill")
+            cfg.system_parameters.booster_refill_level_percent = number("booster_refill_level")
+            self.booster_tank_size_var.set(str(values["booster_tank_size"]))
+            self.booster_initial_fill_var.set(str(values["booster_initial_fill"]))
+            self.booster_refill_level_var.set(str(values["booster_refill_level"]))
+        elif component_type == "booster_pump":
+            cfg.system_parameters.pump_capacity_gallons_per_hour = volume_to_internal(
+                number("pump_capacity") * 60.0, cfg
+            )
+            self.pump_capacity_var.set(str(values["pump_capacity"]))
+        elif component_type == "municipal_backup":
+            enabled = bool(values["municipal_backup_enabled"])
+            cfg.system_parameters.municipal_backup_enabled = enabled
+            self.municipal_backup_enabled_var.set(enabled)
+
+        component_id = str(item.get("id", ""))
+        self.system_component_editor_drafts.pop(component_id, None)
+        self.system_component_editor_baseline = dict(values)
+        self.apply_system_component_name_button.state(["disabled"])
+        self.system_component_validation_var.set("")
         self._render_system_builder()
-        self.system_component_name_entry.focus_set()
-        self.system_component_name_entry.selection_range(0, tk.END)
+        component_label = self._system_component_templates().get(component_type, component_type)
+        self.system_component_edit_status_var.set(f"Object type: {component_label} — changes applied.")
+        self.status_var.set(f"Applied changes to {item['name']}")
 
     def _apply_system_component_name_from_event(self, _event: tk.Event) -> str:
         self.apply_system_component_name()
         return "break"
+
+    def _auto_set_system_component_graph_step(self) -> None:
+        item = self._system_layout_item(self.system_builder_selected_id or "")
+        if item is None or str(item.get("component_type")) != "primary_tank":
+            return
+        values = self._system_component_editor_snapshot(item)
+        try:
+            start = float(str(values["graph_start"]).replace(",", ""))
+            end = float(str(values["graph_end"]).replace(",", ""))
+            step_count_value = float(str(values["graph_auto_step_count"]).replace(",", ""))
+        except ValueError:
+            self._update_system_component_editor_state()
+            return
+        if not step_count_value.is_integer() or step_count_value < 1 or end <= start:
+            self._update_system_component_editor_state()
+            return
+        step = max((end - start) / int(step_count_value), 1.0)
+        self.system_component_parameter_vars["graph_step"].set(f"{step:.0f}")
 
     @staticmethod
     def _system_connection_points(
@@ -4308,6 +4698,7 @@ class RainwaterTkApp(tk.Tk):
     def _render_system_builder(self) -> None:
         if not hasattr(self, "system_builder_canvas"):
             return
+        self._resize_system_builder_canvas_to_objects()
         canvas = self.system_builder_canvas
         canvas.delete("all")
         self.system_builder_hover_port = None
@@ -4812,14 +5203,41 @@ class RainwaterTkApp(tk.Tk):
         event_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         ttk.Label(event_frame, text="Antecedent dry period").grid(row=0, column=0, sticky="w")
         ttk.Entry(
-            event_frame, textvariable=self.first_flush_antecedent_days_var, width=10
+            event_frame, textvariable=self.first_flush_antecedent_var, width=10
         ).grid(row=0, column=1, sticky="w", padx=(8, 4))
-        ttk.Label(event_frame, text="days").grid(row=0, column=2, sticky="w")
+        antecedent_unit_combo = ttk.Combobox(
+            event_frame,
+            textvariable=self.first_flush_antecedent_unit_var,
+            values=("days", "hours"),
+            state="readonly",
+            width=7,
+        )
+        antecedent_unit_combo.grid(row=0, column=2, sticky="w")
+        antecedent_unit_combo.bind(
+            "<<ComboboxSelected>>", self._first_flush_antecedent_unit_changed
+        )
         ttk.Label(
             event_frame,
-            text="A wet day starts a new event after this many dry calendar days.",
+            text="A wet observation starts a new event after this continuous dry period.",
             foreground="#667278",
         ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
+    def _first_flush_antecedent_unit_changed(self, _event: tk.Event | None = None) -> None:
+        new_unit = self.first_flush_antecedent_unit_var.get().casefold()
+        if new_unit not in {"days", "hours"}:
+            new_unit = "days"
+            self.first_flush_antecedent_unit_var.set(new_unit)
+        old_unit = self.first_flush_antecedent_display_unit
+        try:
+            displayed_value = float(self.first_flush_antecedent_var.get())
+            if not math.isfinite(displayed_value):
+                raise ValueError
+            duration_days = _antecedent_dry_period_to_days(displayed_value, old_unit)
+        except ValueError:
+            duration_days = self.config_model.first_flush_antecedent_dry_days
+        converted = _antecedent_dry_period_from_days(duration_days, new_unit)
+        self.first_flush_antecedent_display_unit = new_unit
+        self.first_flush_antecedent_var.set(f"{converted:g}")
 
     def _build_schedules_tab(self) -> None:
         self.schedules_tab.columnconfigure(1, weight=1)
@@ -6614,8 +7032,18 @@ class RainwaterTkApp(tk.Tk):
         self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
         self.reserve_var.set(f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}")
-        self.first_flush_antecedent_days_var.set(
-            f"{cfg.first_flush_antecedent_dry_days:g}"
+        antecedent_unit = (
+            cfg.first_flush_antecedent_dry_unit
+            if cfg.first_flush_antecedent_dry_unit in {"days", "hours"}
+            else "days"
+        )
+        self.first_flush_antecedent_display_unit = antecedent_unit
+        self.first_flush_antecedent_unit_var.set(antecedent_unit)
+        antecedent_display_value = _antecedent_dry_period_from_days(
+            cfg.first_flush_antecedent_dry_days, antecedent_unit
+        )
+        self.first_flush_antecedent_var.set(
+            f"{antecedent_display_value:g}"
         )
         self._update_setting_unit_labels()
         self._populate_surfaces()
@@ -6718,8 +7146,19 @@ class RainwaterTkApp(tk.Tk):
         cfg.tank_parameters.minimum_operating_volume_percent = min(
             max(_float(self.reserve_var.get(), 0), 0), 100
         )
+        antecedent_unit = self.first_flush_antecedent_unit_var.get().casefold()
+        if antecedent_unit not in {"days", "hours"}:
+            antecedent_unit = "days"
+        cfg.first_flush_antecedent_dry_unit = antecedent_unit
+        antecedent_default = _antecedent_dry_period_from_days(
+            cfg.first_flush_antecedent_dry_days, antecedent_unit
+        )
         cfg.first_flush_antecedent_dry_days = max(
-            _float(self.first_flush_antecedent_days_var.get(), 1.0), 0.0
+            _antecedent_dry_period_to_days(
+                _float(self.first_flush_antecedent_var.get(), antecedent_default),
+                antecedent_unit,
+            ),
+            0.0,
         )
         return True
 
@@ -6890,6 +7329,8 @@ class RainwaterTkApp(tk.Tk):
                 self.selected_tank_var,
                 self.initial_fill_var,
                 self.reserve_var,
+                self.first_flush_antecedent_var,
+                self.first_flush_antecedent_unit_var,
                 self.pump_capacity_var,
                 self.filtration_pump_capacity_var,
                 self.filter_recovery_var,
@@ -9144,6 +9585,11 @@ class RainwaterTkApp(tk.Tk):
             ),
             "surfaces": _report_surface_rows(cfg),
             "first_flush_antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
+            "first_flush_antecedent_dry_value": _antecedent_dry_period_from_days(
+                cfg.first_flush_antecedent_dry_days,
+                cfg.first_flush_antecedent_dry_unit,
+            ),
+            "first_flush_antecedent_dry_unit": cfg.first_flush_antecedent_dry_unit,
             "first_flush_event_count": int(
                 self.results_df.get("RainfallEventStart", pd.Series(dtype=bool)).fillna(False).sum()
             ),
@@ -9592,7 +10038,7 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient & First flush ({_lat
 \bottomrule
 \end{{longtable}}
 
-\noindent First-flush event definition: {_latex_number(report.get('first_flush_antecedent_dry_days', 1.0))} antecedent dry days. Events: {int(report.get('first_flush_event_count', 0))}. Diverted volume: {_latex_number(report.get('first_flush_loss', 0.0))} {_latex_escape(volume)}.
+\noindent First-flush event dry-period threshold: {_latex_number(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0)))} {_latex_escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0))}. Diverted volume: {_latex_number(report.get('first_flush_loss', 0.0))} {_latex_escape(volume)}.
 
 \section{{Tank Summary}}
 \begin{{tabular}}{{@{{}}lr@{{}}}}
@@ -10140,7 +10586,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
-<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>Rainfall-history event definition: {float(report.get('first_flush_antecedent_dry_days', 1.0)):g} antecedent dry days. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
+<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))):g} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
 <section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
