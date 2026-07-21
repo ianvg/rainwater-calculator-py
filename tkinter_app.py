@@ -78,9 +78,11 @@ from rainwater_app.models import (
     migrate_legacy_demand_inputs,
 )
 from rainwater_app.rainfall import (
+    HOURLY_PRECIPITATION_COLUMNS,
     disaggregate_daily_rainfall_hyetos,
     has_hourly_rainfall,
     load_rainfall_csv,
+    remove_hourly_rainfall,
 )
 from rainwater_app.rainfall_quality import (
     RAINFALL_DATA_TYPE_LABELS,
@@ -711,6 +713,12 @@ class RainwaterTkApp(tk.Tk):
             value=self.config_model.use_synthetic_hourly_rainfall
         )
         self.synthetic_hourly_rainfall_status_var = tk.StringVar()
+        self.hourly_profile_reference_var = tk.StringVar(
+            value="Hourly profile: Not generated - manage in Hourly data."
+        )
+        self.hourly_profile_preview_var = tk.StringVar(
+            value="Generate a profile to preview its distribution by hour."
+        )
         self.hourly_results_year_var = tk.StringVar(value="--")
         self.simple_daily_unit_var = tk.StringVar()
         self.flush_count_unit_var = tk.StringVar(value="flushes/person")
@@ -5024,13 +5032,116 @@ class RainwaterTkApp(tk.Tk):
         self.rainwater_data_notebook.add(self.daily_rainwater_tab, text="Daily data")
         self.rainwater_data_notebook.add(self.hourly_rainwater_tab, text="Hourly data")
         self.daily_rainwater_tab.columnconfigure(0, weight=1)
-        self.daily_rainwater_tab.rowconfigure(0, weight=1)
+        self.daily_rainwater_tab.rowconfigure(1, weight=1)
         self.hourly_rainwater_tab.columnconfigure(0, weight=1)
+        self.hourly_rainwater_tab.rowconfigure(3, weight=1)
         ttk.Label(
             self.hourly_rainwater_tab,
-            text="Hourly rainwater data is a work in progress.",
+            text=(
+                "Generate and review derived hourly rainfall profiles. The imported daily "
+                "totals remain the source record and are not replaced."
+            ),
             foreground="#667278",
-        ).grid(row=0, column=0, sticky="nw")
+            wraplength=980,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 10))
+
+        hourly_profile_frame = ttk.LabelFrame(
+            self.hourly_rainwater_tab, text="Synthetic hourly profile", padding=10
+        )
+        hourly_profile_frame.grid(row=1, column=0, sticky="ew")
+        hourly_profile_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            hourly_profile_frame,
+            textvariable=self.rainfall_summary_var,
+            wraplength=820,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew")
+        ttk.Label(
+            hourly_profile_frame,
+            textvariable=self.synthetic_hourly_rainfall_status_var,
+            foreground="#667278",
+            wraplength=820,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 8))
+        hourly_actions = ttk.Frame(hourly_profile_frame)
+        hourly_actions.grid(row=2, column=0, columnspan=2, sticky="w")
+        self.generate_hourly_rainfall_button = ttk.Button(
+            hourly_actions,
+            text="Generate Synthetic Hourly Rainfall...",
+            command=self.generate_hourly_rainfall,
+        )
+        self.generate_hourly_rainfall_button.pack(side="left")
+        self.remove_hourly_rainfall_button = ttk.Button(
+            hourly_actions,
+            text="Remove Generated Profile",
+            command=self.remove_generated_hourly_rainfall,
+        )
+        self.remove_hourly_rainfall_button.pack(side="left", padx=(8, 0))
+
+        assumptions_frame = ttk.LabelFrame(
+            self.hourly_rainwater_tab, text="Distribution assumptions", padding=10
+        )
+        assumptions_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        assumptions_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            assumptions_frame,
+            text=(
+                "Hyetos-style Bartlett-Lewis rectangular pulses generate candidate within-day "
+                "profiles. A repetition step selects a plausible wet-hour pattern, and an "
+                "adjusting step makes the 24 hourly depths sum exactly to each daily total. "
+                "The random seed makes regeneration reproducible. The built-in stochastic "
+                "parameters are general-purpose defaults, not a local calibration."
+            ),
+            wraplength=980,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+
+        preview_frame = ttk.LabelFrame(
+            self.hourly_rainwater_tab, text="Hourly distribution preview", padding=10
+        )
+        preview_frame.grid(row=3, column=0, sticky="nsew", pady=(10, 0))
+        preview_frame.columnconfigure(0, weight=1)
+        preview_frame.rowconfigure(1, weight=1)
+        ttk.Label(
+            preview_frame,
+            textvariable=self.hourly_profile_preview_var,
+            foreground="#667278",
+            wraplength=960,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.hourly_profile_tree = ttk.Treeview(
+            preview_frame,
+            columns=("Hour", "Precipitation", "Share"),
+            show="headings",
+            height=8,
+        )
+        self.hourly_profile_tree.heading("Hour", text="Hour")
+        self.hourly_profile_tree.heading("Precipitation", text="Record precipitation")
+        self.hourly_profile_tree.heading("Share", text="Share of generated total (%)")
+        self.hourly_profile_tree.column("Hour", width=150, anchor="center")
+        self.hourly_profile_tree.column("Precipitation", width=220, anchor="e")
+        self.hourly_profile_tree.column("Share", width=220, anchor="e")
+        self.hourly_profile_tree.grid(row=1, column=0, sticky="nsew")
+        hourly_preview_scroll = ttk.Scrollbar(
+            preview_frame, orient="vertical", command=self.hourly_profile_tree.yview
+        )
+        hourly_preview_scroll.grid(row=1, column=1, sticky="ns")
+        self.hourly_profile_tree.configure(yscrollcommand=hourly_preview_scroll.set)
+        daily_hourly_reference = ttk.Frame(self.daily_rainwater_tab, padding=(0, 0, 0, 8))
+        daily_hourly_reference.grid(row=0, column=0, columnspan=2, sticky="ew")
+        daily_hourly_reference.columnconfigure(0, weight=1)
+        ttk.Label(
+            daily_hourly_reference,
+            textvariable=self.hourly_profile_reference_var,
+            foreground="#667278",
+            justify="left",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            daily_hourly_reference,
+            text="Open Hourly Data",
+            command=self.open_hourly_rainwater_tab,
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
         frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
         self.import_canvas = tk.Canvas(
             self.daily_rainwater_tab,
@@ -5038,11 +5149,11 @@ class RainwaterTkApp(tk.Tk):
             borderwidth=0,
             background=frame_background,
         )
-        self.import_canvas.grid(row=0, column=0, sticky="nsew")
+        self.import_canvas.grid(row=1, column=0, sticky="nsew")
         import_scroll_y = ttk.Scrollbar(
             self.daily_rainwater_tab, orient="vertical", command=self.import_canvas.yview
         )
-        import_scroll_y.grid(row=0, column=1, sticky="ns")
+        import_scroll_y.grid(row=1, column=1, sticky="ns")
         self.import_canvas.configure(yscrollcommand=import_scroll_y.set)
         import_content = ttk.Frame(self.import_canvas, padding=(0, 0, 8, 8))
         self.import_canvas_window = self.import_canvas.create_window(
@@ -5068,15 +5179,10 @@ class RainwaterTkApp(tk.Tk):
         csv_frame.columnconfigure(0, weight=1)
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
         ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
-        ttk.Button(
-            csv_frame,
-            text="Generate Synthetic Hourly Rainfall",
-            command=self.generate_hourly_rainfall,
-        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         provenance_frame = ttk.LabelFrame(
             csv_frame, text="Quality and provenance", padding=8
         )
-        provenance_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        provenance_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         provenance_frame.columnconfigure(1, weight=1)
         ttk.Label(
             provenance_frame,
@@ -5128,6 +5234,7 @@ class RainwaterTkApp(tk.Tk):
             justify="left",
             foreground="#5f6b70",
         ).grid(row=4, column=1, sticky="ew", pady=2)
+        self._refresh_synthetic_hourly_rainfall_status()
 
         self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
         self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -8284,10 +8391,13 @@ class RainwaterTkApp(tk.Tk):
                 APP_TITLE, "Load or import daily rainfall before generating hourly data."
             )
             return
+        previous_seed = re.search(
+            r"\(seed (\d+)\)", self.config_model.rainfall_timing_type
+        )
         seed = simpledialog.askinteger(
             APP_TITLE,
             "Random seed for reproducible Hyetos-style hourly rainfall:",
-            initialvalue=1,
+            initialvalue=int(previous_seed.group(1)) if previous_seed else 1,
             minvalue=0,
             parent=self,
         )
@@ -8314,6 +8424,77 @@ class RainwaterTkApp(tk.Tk):
             )
         except Exception as exc:  # noqa: BLE001
             messagebox.showerror(APP_TITLE, f"Could not generate hourly rainfall:\n{exc}")
+
+    def open_hourly_rainwater_tab(self) -> None:
+        self.rainwater_data_notebook.select(self.hourly_rainwater_tab)
+
+    def remove_generated_hourly_rainfall(self) -> None:
+        if not has_hourly_rainfall(self.rainfall_df):
+            return
+        if not messagebox.askyesno(
+            APP_TITLE,
+            "Remove the generated hourly profile?\n\n"
+            "The imported daily rainfall totals will be retained.",
+            parent=self,
+        ):
+            return
+        self.rainfall_df = remove_hourly_rainfall(self.rainfall_df)
+        self.use_synthetic_hourly_rainfall_var.set(False)
+        self.config_model.use_synthetic_hourly_rainfall = False
+        self.config_model.rainfall_timing_type = (
+            "Observed daily totals; within-day timing not observed"
+            if self.config_model.rainfall_data_type == "observed"
+            else "Daily totals; within-day timing not observed"
+        )
+        self.rainfall_timing_var.set(self.config_model.rainfall_timing_type)
+        self.curve_df = pd.DataFrame()
+        self.results_df = pd.DataFrame()
+        self.reliability_var.set("Reliability: --")
+        self._clear_results()
+        self._update_rainfall_summary()
+        self.status_var.set(
+            "Removed the generated hourly profile; daily rainfall was retained"
+        )
+
+    def _refresh_hourly_profile_preview(self) -> None:
+        if not hasattr(self, "hourly_profile_tree"):
+            return
+        tree = self.hourly_profile_tree
+        tree.delete(*tree.get_children())
+        tree.heading(
+            "Precipitation",
+            text=f"Record precipitation ({precip_unit(self.config_model)})",
+        )
+        if not has_hourly_rainfall(self.rainfall_df):
+            self.hourly_profile_preview_var.set(
+                "Generate a profile to preview its distribution by hour."
+            )
+            return
+        hourly_totals = (
+            self.rainfall_df.loc[:, HOURLY_PRECIPITATION_COLUMNS]
+            .apply(pd.to_numeric, errors="coerce")
+            .fillna(0.0)
+            .clip(lower=0.0)
+            .sum(axis=0)
+        )
+        record_total = float(hourly_totals.sum())
+        for hour, column in enumerate(HOURLY_PRECIPITATION_COLUMNS):
+            total = float(hourly_totals[column])
+            share = 100.0 * total / record_total if record_total > 0.0 else 0.0
+            tree.insert(
+                "",
+                "end",
+                values=(
+                    f"{hour:02d}:00-{(hour + 1) % 24:02d}:00",
+                    f"{precip_to_display(total, self.config_model):,.3f}",
+                    f"{share:.2f}",
+                ),
+            )
+        wet_hours = int((hourly_totals > 0.0).sum())
+        self.hourly_profile_preview_var.set(
+            f"Record-wide distribution across 24 clock hours; {wet_hours} hour bin(s) "
+            "contain generated rainfall. Daily totals are conserved exactly."
+        )
 
     def find_acis_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
@@ -9303,7 +9484,7 @@ class RainwaterTkApp(tk.Tk):
         elif enabled:
             message = (
                 "Synthetic hourly rainfall is selected, but no generated profiles are available. "
-                "Generate them on the Rainfall Data tab before running analysis."
+                "Generate them under Rainwater Data > Hourly data before running analysis."
             )
         elif available:
             message = (
@@ -9316,6 +9497,27 @@ class RainwaterTkApp(tk.Tk):
                 "23:00 during hourly analysis."
             )
         self.synthetic_hourly_rainfall_status_var.set(message)
+        if hasattr(self, "hourly_profile_reference_var"):
+            reference = (
+                "Hourly profile: Synthetic profile generated - manage in Hourly data."
+                if available
+                else "Hourly profile: Not generated - manage in Hourly data."
+            )
+            self.hourly_profile_reference_var.set(reference)
+        if hasattr(self, "generate_hourly_rainfall_button"):
+            self.generate_hourly_rainfall_button.configure(
+                text=(
+                    "Regenerate Synthetic Hourly Rainfall..."
+                    if available
+                    else "Generate Synthetic Hourly Rainfall..."
+                ),
+                state="normal" if not self.rainfall_df.empty else "disabled",
+            )
+        if hasattr(self, "remove_hourly_rainfall_button"):
+            self.remove_hourly_rainfall_button.configure(
+                state="normal" if available else "disabled"
+            )
+        self._refresh_hourly_profile_preview()
 
     def _refresh_schedule_management(self, select_name: str | None = None) -> None:
         if not hasattr(self, "schedule_list"):

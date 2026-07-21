@@ -33,6 +33,18 @@ def has_hourly_rainfall(rainfall_df: pd.DataFrame) -> bool:
     return all(column in rainfall_df.columns for column in HOURLY_PRECIPITATION_COLUMNS)
 
 
+def remove_hourly_rainfall(rainfall_df: pd.DataFrame) -> pd.DataFrame:
+    """Return the daily record without generated hourly-profile columns."""
+    attributes = dict(rainfall_df.attrs)
+    columns = [
+        column for column in HOURLY_PRECIPITATION_COLUMNS
+        if column in rainfall_df.columns
+    ]
+    result = rainfall_df.drop(columns=columns).copy()
+    result.attrs.update(attributes)
+    return result
+
+
 def _rectangular_pulse_profile(
     rng: np.random.Generator, parameters: HyetosParameters
 ) -> np.ndarray:

@@ -8,6 +8,7 @@ from rainwater_app.rainfall import (
     expand_hourly_rainfall,
     has_hourly_rainfall,
     load_rainfall_csv,
+    remove_hourly_rainfall,
 )
 
 
@@ -43,6 +44,19 @@ def test_hyetos_disaggregation_rejects_negative_precipitation() -> None:
 
     with pytest.raises(ValueError, match="cannot be negative"):
         disaggregate_daily_rainfall_hyetos(rainfall, seed=1)
+
+
+def test_remove_hourly_rainfall_preserves_daily_data_and_attributes() -> None:
+    rainfall = disaggregate_daily_rainfall_hyetos(_daily_rainfall(), seed=12)
+    rainfall.attrs["known_missing_dates"] = ["2025-01-03"]
+
+    daily = remove_hourly_rainfall(rainfall)
+
+    assert not has_hourly_rainfall(daily)
+    assert daily[["Date", "Precipitation"]].equals(
+        rainfall[["Date", "Precipitation"]]
+    )
+    assert daily.attrs["known_missing_dates"] == ["2025-01-03"]
 
 
 def test_expand_hourly_rainfall_uses_profiles_and_legacy_fallback() -> None:
