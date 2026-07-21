@@ -492,6 +492,7 @@ def simulate_tank(
     municipal_makeup: list[float] = []
     system_unmet_demand: list[float] = []
     treatment_loss: list[float] = []
+    pump_flow: list[float] = []
     overflow: list[float] = []
     reliable_days = 0
 
@@ -543,6 +544,11 @@ def simulate_tank(
         )
         system_unmet_today = max(unmet_today - municipal_makeup_today, 0.0)
         treatment_loss_today = max(withdrawn_today - supplied_today, 0.0)
+        pump_flow_today = (
+            withdrawn_today
+            if system.filtration_path
+            else supplied_today if system.distribution_pump_path else 0.0
+        )
         sewer_eligible_supplied_today = (
             supplied_today * sewer_eligible_demand_today / demand_today
             if demand_today > 0.0 else 0.0
@@ -561,6 +567,7 @@ def simulate_tank(
         municipal_makeup.append(float(municipal_makeup_today))
         system_unmet_demand.append(float(system_unmet_today))
         treatment_loss.append(float(treatment_loss_today))
+        pump_flow.append(float(pump_flow_today))
         overflow.append(float(overflow_today))
 
         if met_today:
@@ -588,6 +595,7 @@ def simulate_tank(
             "MainsMakeupGallons": municipal_makeup,
             "SystemUnmetDemandGallons": system_unmet_demand,
             "FilterLossGallons": treatment_loss,
+            "PumpFlowGallons": pump_flow,
             "OverflowGallons": overflow,
             "WaterInTankGallons": water_level,
         }
@@ -881,6 +889,7 @@ def reliability_curve(
             "AverageAnnualSewerEligibleRainwaterSuppliedGallons": (
                 sewer_eligible_supplied / year_count
             ),
+            "AverageAnnualPumpFlowGallons": column_total("PumpFlowGallons") / year_count,
             "UnmetDemandGallons": column_total("UnmetDemandGallons"),
             "MunicipalMakeupGallons": column_total("MainsMakeupGallons"),
             "SystemUnmetDemandGallons": column_total("SystemUnmetDemandGallons"),

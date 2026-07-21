@@ -24,6 +24,7 @@ nav:
   - Home: index.md
   - Getting started: getting-started.md
   - Projects: projects.md
+  - Project storage and recovery: project-storage.md
   - Rainfall data: rainfall-data.md
   - Collection surfaces: collection-surfaces.md
   - Water demand: water-demand.md

@@ -1,2 +1,0 @@
-mongod
-python main.py

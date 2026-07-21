@@ -4,24 +4,27 @@ from pypdf import PdfReader
 
 from rainwater_app.defaults import default_project_config
 from rainwater_app.models import DemandObject, Surface, WEEKDAY_KEYS
-from tkinter_app import (
-    RainwaterTkApp,
-    _antecedent_dry_period_from_days,
-    _antecedent_dry_period_to_days,
-    _demand_flow_from_gallons_per_minute,
-    _demand_flow_to_gallons_per_minute,
-    _normalized_demand_object_indices,
-    _parse_coordinates,
-    _validated_demand_object_library,
-    _validated_schedule_library,
-    _report_average_annual_precipitation,
-    _report_demand_summary,
-    _report_surface_rows,
-    _report_tank_level_distribution,
-    _system_object_editor_validation,
-    _tank_volume_capacity_label,
-    _yearly_demand_reliability,
+from rainwater_app.reporting import (
+    ReportModel,
+    report_average_annual_precipitation as _report_average_annual_precipitation,
+    report_demand_summary as _report_demand_summary,
+    report_surface_rows as _report_surface_rows,
+    report_tank_level_distribution as _report_tank_level_distribution,
+    tank_volume_capacity_label as _tank_volume_capacity_label,
+    yearly_demand_reliability as _yearly_demand_reliability,
 )
+from rainwater_app.ui_logic import (
+    antecedent_dry_period_from_days as _antecedent_dry_period_from_days,
+    antecedent_dry_period_to_days as _antecedent_dry_period_to_days,
+    demand_flow_from_gallons_per_minute as _demand_flow_from_gallons_per_minute,
+    demand_flow_to_gallons_per_minute as _demand_flow_to_gallons_per_minute,
+    normalized_demand_object_indices as _normalized_demand_object_indices,
+    parse_coordinates as _parse_coordinates,
+    system_object_editor_validation as _system_object_editor_validation,
+    validated_demand_object_library as _validated_demand_object_library,
+    validated_schedule_library as _validated_schedule_library,
+)
+from tkinter_app import RainwaterTkApp
 
 
 def test_antecedent_dry_period_converts_between_days_and_hours() -> None:
@@ -201,7 +204,7 @@ def test_report_surfaces_only_include_positive_areas() -> None:
     assert [row["name"] for row in rows] == ["Used roof"]
 
 
-def test_report_charts_mark_selected_tank_with_red_circle() -> None:
+def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     monthly_demand = [
         {
             "month": month,
@@ -275,6 +278,38 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
             "FinalStorageGallons": 610.0, "NetAnnualSavings": 420.0,
             "SimplePaybackYears": 12.5,
         }],
+        "recommendation_assumptions": {
+            "reliability_target_percent": 80.0,
+            "marginal_gain_threshold": 1.0,
+        },
+        "recommendations": [{
+            "role": "Smallest tank meeting reliability target",
+            "tank_size": 1000.0,
+            "volume_unit": "gal",
+            "reliability_percent": 75.0,
+            "detail": "First candidate meeting the configured target.",
+        }],
+        "review_warnings": ["Rainfall record contains an incomplete calendar year."],
+        "rainfall_quality": {
+            "completeness_percent": 99.73, "completeness_rating": "Good",
+            "expected_days": 731, "observed_days": 729, "missing_days": 2,
+            "duplicate_dates": 0, "invalid_precipitation_rows": 0,
+            "partial_years": [2024],
+            "missing_periods": [{"start": "2024-03-04", "end": "2024-03-05", "days": 2}],
+        },
+        "yearly_rainfall_summary": [{
+            "year": 2024, "expected_days": 366, "observed_days": 364,
+            "missing_days": 2, "completeness_percent": 99.45,
+            "precipitation": 42.25, "wet_days": 108, "partial_year": True,
+        }],
+        "rainfall_event_summary": {
+            "event_count": 75, "average_event_precipitation": 0.563,
+            "largest_event_precipitation": 3.25, "antecedent_dry_days": 1.0,
+            "largest_events": [{
+                "event_number": 31, "start": "2024-08-12", "end": "2024-08-13",
+                "duration_days": 2, "wet_days": 2, "precipitation": 3.25,
+            }],
+        },
         "water_balance": {
             "potential_surface_rainfall": 250000.0, "runoff_coefficient_loss": 25000.0,
             "gross_runoff": 225000.0, "first_flush_loss": 2400.0,
@@ -300,12 +335,28 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
             "gross_annual_savings": 444.0, "annual_maintenance_cost": 160.0,
             "net_annual_savings": 284.0, "net_installed_cost": 5250.0,
             "simple_payback_years": 18.49, "analysis_period_net_benefit": 430.0,
-            "methodology": "Simple-rate, undiscounted estimate based only on simulated delivery.",
+            "discount_rate_percent": 5.0,
+            "utility_rate_escalation_percent": 2.5,
+            "maintenance_escalation_percent": 2.0,
+            "electricity_escalation_percent": 2.0,
+            "equipment_replacement_escalation_percent": 2.0,
+            "average_annual_pump_energy_kwh": 420.0,
+            "annual_pump_energy_cost": 63.0,
+            "total_replacement_cost": 1500.0,
+            "lifecycle_net_present_value": 825.0,
+            "internal_rate_of_return_percent": 6.75,
+            "discounted_payback_years": 19.2,
+            "annual_cash_flows": [-5250.0, 281.0, 288.0],
+            "methodology": "Discounted lifecycle cash-flow estimate based on simulated delivery.",
         },
         "provenance": {
             "rainfall_source": "Example station (TEST)", "record_start": "2024-01-01",
             "record_end": "2025-12-31", "calendar_years": 2, "observations": 731,
             "missing_calendar_days": 0, "rainfall_resolution": "Daily",
+            "rainfall_data_type": "Observed station data",
+            "rainfall_timezone": "America/New_York",
+            "rainfall_timing_metadata": "Observed daily totals; within-day timing not observed",
+            "rainfall_retrieved_at": "2026-07-18T10:30:00-04:00",
             "simulation_timestep": "Daily mass balance", "rainfall_timing_assumption": "Daily total",
             "system_type": "Indirect system", "municipal_backup": "Enabled",
             "initial_tank_fill_percent": 50.0, "filter_recovery_percent": 95.0,
@@ -396,12 +447,24 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert "Primary tank size" in html
     assert "Executive design summary" in html
     assert "Candidate tank performance" in html
+    assert "Design recommendations and review conditions" in html
+    assert "Smallest tank meeting reliability target" in html
+    assert "Rainfall record contains an incomplete calendar year." in html
+    assert "Reliability curve data" in html
+    assert "Yearly demand reliability data" in html
+    assert "Tank level distribution data" in html
     assert "data-sortable-table" in html
     assert "Reconciled water balance" in html
     assert "Less runoff-coefficient loss" in html
     assert "End-use demand and savings" in html
     assert "Landscape irrigation" in html
     assert "Financial assumptions and results" in html
+    assert "Lifecycle net present value" in html
+    assert "Internal rate of return" in html
+    assert "420.0 kWh/year" in html
+    assert "Annual lifecycle cash flow" in html
+    assert "Cumulative discounted cash flow" in html
+    assert "Annual lifecycle cash flow" in latex
     assert "Analysis provenance and reproducibility" in html
     assert "Example station (TEST)" in html
     assert "<h2>Tank summary</h2>" in html
@@ -413,7 +476,16 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert 'id="project-location-map"' in html
     assert "Project location" in html
     assert "Weather station" in html
-    assert "tile.openstreetmap.org" in html
+    assert "tile.openstreetmap.org" not in html
+    assert "unpkg.com" not in html
+    assert "Portable coordinate diagram" in html
+    assert "Rainfall quality and completeness" in html
+    assert "99.73% (Good)" in html
+    assert "2024-03-04" in html
+    assert "Yearly rainfall summary" in html
+    assert "Rainfall-event summary" in html
+    assert "Observed station data" in html
+    assert "America/New_York" in html
     assert html.index('id="tank-summary"') < html.index('id="system-visualization"') < html.index('id="demand-summary"')
     assert "750 gal" in html
     assert "<h2>Demand summary</h2>" in html
@@ -474,6 +546,24 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert r"\usepackage[hidelinks]{hyperref}" in latex
     assert r"\tableofcontents" in latex
     assert r"\section{Tank Summary}" in latex
+    assert r"\section{Design Recommendations and Review Conditions}" in latex
+    for section in (
+        "Executive Summary",
+        "Candidate Performance",
+        "Reconciled Water Balance",
+        "End-use Performance",
+        "Financial Analysis",
+        "Rainfall Quality and Completeness",
+        "Yearly Rainfall Summary",
+        "Rainfall-event Summary",
+        "Analysis Provenance",
+    ):
+        assert rf"\section{{{section}}}" in latex
+    assert "99.73" in latex
+    assert "Observed station data" in latex
+    assert r"America/New\_York" in latex
+    assert "Smallest tank meeting reliability target" in latex
+    assert "Rainfall record contains an incomplete calendar year." in latex
     assert r"\section{System Visualization - Indirect system}" in latex
     assert r"\textbf{Selected tank size} & 750 gal" in latex
     assert r"\section{Notes}" in latex
@@ -503,6 +593,28 @@ def test_report_charts_mark_selected_tank_with_red_circle() -> None:
     assert any("0.79 0.30 0.30 rg" in command for command in yearly_pdf_commands)
     assert any("0.18 0.55 0.34 rg" in command for command in distribution_pdf_commands)
     assert any("5,000-6,000" in command for command in distribution_pdf_commands)
+
+    pdf_path = tmp_path / "parity.pdf"
+    app = object.__new__(RainwaterTkApp)
+    app._write_fallback_pdf_report(pdf_path, ReportModel.from_payload(report))
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf_path).pages)
+    assert "Design Recommendations" in pdf_text
+    assert "Smallest tank meeting reliability target" in pdf_text
+    assert "Rainfall record contains an incomplete calendar year." in pdf_text
+    for section in (
+        "Executive Summary",
+        "Candidate Performance",
+        "Reconciled Water Balance",
+        "End-use Performance",
+        "Financial Analysis",
+        "Rainfall Quality and Completeness",
+        "Yearly Rainfall Summary",
+        "Rainfall-event Summary",
+        "Analysis Provenance",
+    ):
+        assert section in pdf_text
+    assert "Observed station data" in pdf_text
+    assert "America/New_York" in pdf_text
 
     report["metadata"]["author_name"] = ""
     assert "Produced by" not in RainwaterTkApp._build_report_html(None, report)

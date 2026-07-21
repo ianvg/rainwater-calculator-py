@@ -50,7 +50,7 @@ Choose the CSV import action and select a rainfall file. The standard input cont
 | `Date` | Observation date |
 | `Precipitation` | Daily precipitation amount |
 
-Header capitalization and surrounding spaces are ignored, and additional columns are allowed. Use one row per day and preferably format dates as `YYYY-MM-DD`. Precipitation must be numeric and use inches for an Imperial project or millimetres for a Metric project. Blank or nonnumeric precipitation values are treated as zero.
+Header capitalization and surrounding spaces are ignored, and additional columns are allowed. Use one row per day and preferably format dates as `YYYY-MM-DD`. Precipitation must be numeric and use inches for an Imperial project or millimetres for a Metric project. Blank or nonnumeric precipitation values are treated as zero by the simulation but retained in the quality metadata as missing observations.
 
 ```csv
 Date,Precipitation
@@ -60,6 +60,14 @@ Date,Precipitation
 ```
 
 Review the rainfall summary after importing. Confirm that the date range, row count, units, and source are reasonable before running an analysis.
+
+## Quality and provenance
+
+The **Quality and provenance** panel scores coverage against every calendar day in the complete years spanned by the record. This deliberately counts unobserved days before the first observation and after the last observation in a boundary year, so a partial year cannot appear complete. The panel reports observed and expected days, missing days grouped into continuous periods, partial or incomplete years, and duplicate dates. Provider-reported missing values and nonnumeric CSV precipitation values remain identified as missing even when the daily simulation substitutes zero precipitation.
+
+Classify a user-supplied record as **Observed station data**, **Synthetic rainfall data**, **Interpolated rainfall data**, **Gridded reanalysis data**, or leave it explicitly unclassified. Record the temporal resolution and source timezone; an IANA timezone such as `America/Toronto` is preferred when it is known. These fields describe provenance and do not convert or resample the rainfall. The current calculation engine expects daily totals and reports a review warning if the record is labeled with another resolution.
+
+ACIS and ECCC imports are automatically labeled as observed daily station data. Because their current import responses do not provide a dependable UTC offset, the timezone is recorded as station-local with the missing offset disclosed. Generating Hyetos-style profiles preserves the classification of the source daily totals and separately labels the within-day timing as synthetic.
 
 ## Generate synthetic hourly rainfall
 

@@ -7,6 +7,7 @@ from rainwater_app.rainfall import (
     disaggregate_daily_rainfall_hyetos,
     expand_hourly_rainfall,
     has_hourly_rainfall,
+    load_rainfall_csv,
 )
 
 
@@ -54,3 +55,12 @@ def test_expand_hourly_rainfall_uses_profiles_and_legacy_fallback() -> None:
     assert legacy.iloc[24:47]["Precipitation"].sum() == pytest.approx(0.0)
     assert generated.iloc[24:48]["Precipitation"].sum() == pytest.approx(0.35)
     assert generated.iloc[24:48]["Precipitation"].gt(0.0).any()
+
+
+def test_csv_loader_retains_nonnumeric_precipitation_as_known_missing() -> None:
+    rainfall = load_rainfall_csv(
+        b"Date,Precipitation\n2025-01-01,0.2\n2025-01-02,missing\n"
+    )
+
+    assert rainfall["Precipitation"].tolist() == [0.2, 0.0]
+    assert rainfall.attrs["known_missing_dates"] == ["2025-01-02"]

@@ -1,5 +1,9 @@
 # Getting started
 
+The Tkinter desktop application is the complete supported RWH Calculator product. Project creation, editing, rainfall import, simulation, optimization, reporting, and project-file management are desktop workflows.
+
+An optional Streamlit companion can display already-saved project inputs and results in a browser, but it is deliberately read-only and is not a substitute for the desktop application. The former Flask interface has been retired.
+
 ## Start the Windows application
 
 Open `RainwaterCalculator.exe`. The application opens to the project workspace.

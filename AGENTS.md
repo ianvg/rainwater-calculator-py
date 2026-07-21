@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-The primary desktop interface is `tkinter_app.py`. Shared domain code lives in `rainwater_app/`: `engine.py` performs simulations, `models.py` defines project data, `storage.py` handles persistence, and `acis.py`, `eccc.py`, and `geocoding.py` integrate external services. `streamlit_app.py` provides the alternate web interface. Tests are under `tests/` and mirror the shared modules. Store application images and diagrams in `assets/`, user documentation in `docs/`, and packaging configuration in `RainwaterCalculator.spec` and `build_exe.ps1`. Treat sample rainfall files and `Weather Station Data Folder/` as data, not source code.
+The full supported product interface is the Tkinter desktop application in `tkinter_app.py`. Shared domain code lives in `rainwater_app/`: `engine.py` performs simulations, `models.py` defines project data, `storage.py` handles persistence, and `acis.py`, `eccc.py`, and `geocoding.py` integrate external services. `streamlit_app.py` is a deliberately limited, read-only viewer for saved projects and must not become a second authoring or analysis interface. Tests are under `tests/` and mirror the shared modules. Store application images and diagrams in `assets/`, user documentation in `docs/`, and packaging configuration in `RainwaterCalculator.spec` and `build_exe.ps1`. Treat sample rainfall files and `Weather Station Data Folder/` as data, not source code.
 
 ## Build, Test, and Development Commands
 
@@ -13,7 +13,7 @@ python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -e ".[dev,docs]"
 ```
 
-Run the desktop application with `.\.venv\Scripts\python.exe tkinter_app.py`. Run the alternate interface with `.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py`.
+Run the desktop product with `.\.venv\Scripts\python.exe tkinter_app.py`. Install `.[viewer]` and run `.\.venv\Scripts\python.exe -m streamlit run streamlit_app.py` only when testing the optional read-only viewer.
 
 Use `.\.venv\Scripts\python.exe -m pytest` for the complete test suite. Build documentation with `.\.venv\Scripts\python.exe -m mkdocs build --strict`, or preview it with `mkdocs serve`. Create the Windows executable with `powershell -ExecutionPolicy Bypass -File .\build_exe.ps1`.
 

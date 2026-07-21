@@ -10,9 +10,17 @@ The **Reconciled water balance** keeps two accounting stages separate. The colle
 
 The **End-use demand and savings** table reports each demand object's type, operating schedule, sewer eligibility, average annual demand, allocated rainwater supply, demand met, and water and sewer savings. When several objects operate on the same day, supplied rainwater is allocated in proportion to their simulated demand for that day.
 
-The **Financial assumptions and results** section records tariffs, billing units, legacy sewer eligibility, installed cost, incentives, maintenance, analysis period, delivered rainwater, savings, net cost, payback, and undiscounted analysis-period net benefit.
+The **Financial assumptions and results** section records tariffs, billing units, legacy sewer eligibility, installed cost, incentives, maintenance, pump energy, electricity, escalation and replacement assumptions, discount rate, analysis period, delivered rainwater, first-year savings, net cost, simple and discounted payback, nominal analysis-period net benefit, lifecycle NPV, and IRR.
 
-The **Analysis provenance and reproducibility** section identifies the rainfall source and record coverage, missing calendar days, timestep and rainfall-timing assumptions, system and municipal-backup state, initial tank fill, filter recovery, application and algorithm versions, analysis signature, and report-generation timestamp.
+The **Rainfall quality and completeness** section reports a calendar-year completeness score and rating, observed and expected days, missing periods, explicit partial-year labels, duplicate dates, and invalid precipitation rows. The **Yearly rainfall summary** reports precipitation, wet days, missing days, and completeness for every year. The **Rainfall-event summary** reports the event count and up to the ten largest events using the project's antecedent-dry-period rule.
+
+The **Analysis provenance and reproducibility** section identifies the rainfall source, explicit data classification, record coverage, temporal resolution, source timezone, timing metadata, import or retrieval timestamp, timestep and rainfall-timing assumptions, system and municipal-backup state, initial tank fill, filter recovery, application and algorithm versions, analysis signature, and report-generation timestamp.
+
+All report formats consume the same validated report model. The model currently uses report schema version 2 and rejects missing required sections, unsupported schema versions, and non-finite numeric values before rendering. The HTML, LaTeX, and direct PDF outputs include the same design recommendations, review conditions, rainfall quality, yearly rainfall, rainfall-event, lifecycle financial, and provenance sections.
+
+The HTML report is self-contained: its styles, scripts, charts, and coordinate diagram are embedded and it does not require Leaflet, map tiles, or another online asset. The coordinate diagram is intentionally labeled as a schematic rather than a street map. Every HTML chart includes a data table directly beneath it, so its values remain available when JavaScript is disabled, in print, and to assistive technology.
+
+HTML and PDF exports are generated into temporary sibling files, checked for non-empty or valid output, and atomically replace the requested destination only after generation succeeds. An interrupted or failed export therefore does not overwrite an existing completed report.
 
 Project information includes mean annual precipitation, calculated as the mean of the yearly precipitation totals in the imported record. The value is displayed in inches for Imperial projects and millimeters for Metric projects. The report also identifies whether the rainfall import uses **Total precipitation** or **Rain only**.
 

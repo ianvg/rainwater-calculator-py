@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import copy
 import datetime as dt
-import html
 import http.server
 import importlib.metadata as importlib_metadata
 import json
@@ -29,21 +28,22 @@ from urllib.parse import parse_qs, quote, urlparse
 import pandas as pd
 import pycountry
 from tkintermapview import TkinterMapView, decimal_to_osm
-from pypdf import PdfWriter
-from pypdf.annotations import Link
-from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from rainwater_app.acis import (
     default_complete_calendar_range,
     fetch_daily_station_data,
-    fetch_station_by_id,
     fetch_station_options,
     fetch_station_options_bbox,
 )
 from rainwater_app.analysis_state import ANALYSIS_ALGORITHM_VERSION, analysis_input_signature
+from rainwater_app.analysis_service import AnalysisProgressEvent, AnalysisService
+from rainwater_app.app_paths import (
+    migrate_legacy_application_data,
+    project_backup_dir,
+    user_data_dir,
+)
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.eccc import (
-    fetch_canadian_station_by_id,
     fetch_canadian_daily_station_data,
     fetch_canadian_station_options,
     fetch_canadian_station_options_bbox,
@@ -52,9 +52,7 @@ from rainwater_app.engine import (
     AnalysisCancelledError,
     demand_object_daily_value_for_date,
     demand_object_sewer_eligible_fraction,
-    reliability_curve,
     simulate_hourly_tank,
-    simulate_tank,
 )
 from rainwater_app.execution_log import (
     DETAIL_LEVELS,
@@ -62,11 +60,9 @@ from rainwater_app.execution_log import (
     ExecutionLogger,
     normalize_log_detail,
 )
-from rainwater_app.financial import (
-    calculate_financial_results,
-    calculate_financial_results_from_annual_supply,
-    tariff_rate_per_gallon,
-)
+from rainwater_app.financial import tariff_rate_per_gallon
+from rainwater_app.financial_service import FinancialAnalysisService
+from rainwater_app.candidate_service import CandidateAnalysisService
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
     DemandObject,
@@ -86,6 +82,35 @@ from rainwater_app.rainfall import (
     has_hourly_rainfall,
     load_rainfall_csv,
 )
+from rainwater_app.rainfall_quality import (
+    RAINFALL_DATA_TYPE_LABELS,
+    RainfallQualityAssessment,
+    assess_rainfall_record,
+    rainfall_data_type_label,
+)
+from rainwater_app.recommendations import (
+    RecommendationSet,
+    recommend_tank_sizes,
+    selected_design_warnings,
+)
+from rainwater_app.reporting import (
+    REPORT_SCHEMA_VERSION,
+    ReportModel,
+    atomic_write_text,
+    report_average_annual_precipitation as _report_average_annual_precipitation,
+    report_demand_summary as _report_demand_summary,
+    report_surface_rows as _report_surface_rows,
+    report_tank_level_distribution as _report_tank_level_distribution,
+    tank_volume_capacity_label as _tank_volume_capacity_label,
+    yearly_demand_reliability as _yearly_demand_reliability,
+)
+from rainwater_app.report_service import ReportRenderingService
+from rainwater_app.pdf_rendering import (
+    _draw_pdf_reliability_curve as draw_pdf_reliability_curve,
+    _draw_pdf_tank_level_distribution as draw_pdf_tank_level_distribution,
+    _draw_pdf_yearly_demand_reliability as draw_pdf_yearly_demand_reliability,
+    _write_pdf_with_pypdf as write_pdf_with_pypdf,
+)
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.system_model import (
     compile_builder_system,
@@ -93,6 +118,20 @@ from rainwater_app.system_model import (
     validate_builder_system,
 )
 from rainwater_app.stations import bounding_box, nearest_stations
+from rainwater_app.ui_logic import (
+    antecedent_dry_period_from_days as _antecedent_dry_period_from_days,
+    antecedent_dry_period_to_days as _antecedent_dry_period_to_days,
+    common_demand_object_templates as _common_demand_object_templates,
+    demand_flow_from_gallons_per_minute as _demand_flow_from_gallons_per_minute,
+    demand_flow_to_gallons_per_minute as _demand_flow_to_gallons_per_minute,
+    normalized_demand_object_indices as _normalized_demand_object_indices,
+    parse_coordinates as _parse_coordinates,
+    safe_project_file_name as _safe_project_file_name,
+    state_code as _state_code,
+    system_object_editor_validation as _system_object_editor_validation,
+    validated_demand_object_library as _validated_demand_object_library,
+    validated_schedule_library as _validated_schedule_library,
+)
 from rainwater_app.units import (
     LITERS_PER_GALLON,
     area_to_display,
@@ -121,44 +160,16 @@ DEFAULT_WINDOW_HEIGHT = 680
 MINIMUM_WINDOW_WIDTH = 1000
 MAX_RECENT_PROJECTS = 8
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
-
-
-def _demand_flow_to_gallons_per_minute(value: float, unit: str) -> float:
-    if unit == "gpm":
-        return value
-    if unit == "gal/hr":
-        return value / 60.0
-    if unit == "lpm":
-        return value / LITERS_PER_GALLON
-    if unit == "liter/hr":
-        return value / (LITERS_PER_GALLON * 60.0)
-    raise ValueError(f"Unsupported demand flow unit: {unit}")
-
-
-def _demand_flow_from_gallons_per_minute(value: float, unit: str) -> float:
-    if unit == "gpm":
-        return value
-    if unit == "gal/hr":
-        return value * 60.0
-    if unit == "lpm":
-        return value * LITERS_PER_GALLON
-    if unit == "liter/hr":
-        return value * LITERS_PER_GALLON * 60.0
-    raise ValueError(f"Unsupported demand flow unit: {unit}")
-
-
-def _normalized_demand_object_indices(value: object, demand_object_count: int) -> list[int]:
-    if not isinstance(value, list):
-        return []
-    normalized: list[int] = []
-    for raw_index in value:
-        try:
-            index = int(raw_index)
-        except (TypeError, ValueError):
-            continue
-        if 0 <= index < demand_object_count and index not in normalized:
-            normalized.append(index)
-    return normalized
+RAINFALL_DATA_TYPE_BY_LABEL = {
+    label: key for key, label in RAINFALL_DATA_TYPE_LABELS.items()
+}
+RAINFALL_RESOLUTION_LABELS = {
+    "daily": "Daily",
+    "hourly": "Hourly",
+    "subhourly": "Subhourly",
+    "monthly": "Monthly",
+    "unknown": "Unknown",
+}
 
 
 ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
@@ -336,91 +347,6 @@ def _app_dir() -> Path:
     return Path(__file__).resolve().parent
 
 
-def _validated_schedule_library(payload: object) -> dict[str, dict[str, list[float]]]:
-    if not isinstance(payload, dict):
-        return {}
-    library: dict[str, dict[str, list[float]]] = {}
-    for raw_name, raw_schedule in payload.items():
-        name = str(raw_name).strip()
-        if not name or not isinstance(raw_schedule, dict):
-            continue
-        schedule: dict[str, list[float]] = {}
-        valid = True
-        for day in WEEKDAY_KEYS:
-            raw_values = raw_schedule.get(day)
-            if not isinstance(raw_values, list) or len(raw_values) != 24:
-                valid = False
-                break
-            try:
-                values = [min(max(float(value), 0.0), 1.0) for value in raw_values]
-            except (TypeError, ValueError):
-                valid = False
-                break
-            schedule[day] = values
-        if valid:
-            library[name] = schedule
-    return library
-
-
-def _common_demand_object_templates() -> dict[str, DemandObject]:
-    monthly_types = (
-        ("Ice making", "Ice making"), ("Cooling tower", "Cooling tower"),
-        ("Ice skating", "Ice skating"), ("Other indoor", "Other indoor"),
-        ("Spray irrigation", "Irrigation system"),
-        ("Drip irrigation", "Irrigation system"),
-        ("Vehicle washing", "Vehicle washing"), ("Other outdoor", "Other outdoor"),
-    )
-    templates = {
-        "Simple recurring demand": DemandObject(
-            "Simple recurring demand", "Other", demand_mode="recurring_daily"
-        ),
-        "Toilet": DemandObject("Toilet", "Toilet", 3.0),
-        "Urinal": DemandObject("Urinal", "Urinal", 1.0),
-    }
-    templates.update({
-        name: DemandObject(name, object_type, demand_mode="monthly_volume")
-        for name, object_type in monthly_types
-    })
-    return templates
-
-
-def _validated_demand_object_library(payload: object) -> dict[str, DemandObject]:
-    if not isinstance(payload, dict):
-        return {}
-    library: dict[str, DemandObject] = {}
-    for raw_name, raw_object in payload.items():
-        name = str(raw_name).strip()
-        if not name or not isinstance(raw_object, dict):
-            continue
-        try:
-            flow = max(float(raw_object.get("instantaneous_demand_gallons_per_minute", 0.0)), 0.0)
-        except (TypeError, ValueError):
-            continue
-        library[name] = DemandObject(
-            name=name,
-            object_type=str(raw_object.get("object_type", "Other")),
-            instantaneous_demand_gallons_per_minute=flow,
-            demand_mode=str(raw_object.get("demand_mode", "scheduled_flow")),
-            recurring_daily_gallons=max(_float(raw_object.get("recurring_daily_gallons")), 0.0),
-            operating_days_per_week=min(max(int(_float(raw_object.get("operating_days_per_week"), 7)), 0), 7),
-            operating_weekdays=(
-                [int(day) for day in raw_object.get("operating_weekdays", [])]
-                if isinstance(raw_object.get("operating_weekdays"), list)
-                else None
-            ),
-            monthly_daily_demand_gallons={
-                month: max(_float(dict(raw_object.get("monthly_daily_demand_gallons", {})).get(month)), 0.0)
-                for month in MONTH_KEYS
-            },
-            monthly_demand_gallons={
-                month: max(_float(dict(raw_object.get("monthly_demand_gallons", {})).get(month)), 0.0)
-                for month in MONTH_KEYS
-            },
-            sewer_eligible=raw_object.get("sewer_eligible"),
-        )
-    return library
-
-
 def _resource_path(relative_path: str) -> Path:
     bundled_root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
     return bundled_root / relative_path
@@ -437,288 +363,6 @@ def _float(value: object, default: float = 0.0) -> float:
         return float(value)
     except (TypeError, ValueError):
         return default
-
-
-def _antecedent_dry_period_to_days(value: float, unit: str) -> float:
-    return value / 24.0 if unit.casefold() == "hours" else value
-
-
-def _antecedent_dry_period_from_days(days: float, unit: str) -> float:
-    return days * 24.0 if unit.casefold() == "hours" else days
-
-
-def _system_object_editor_validation(
-    component_type: str, values: dict[str, object]
-) -> list[str]:
-    """Return user-facing validation errors for a staged system-object edit."""
-    errors: list[str] = []
-    if not str(values.get("name", "")).strip():
-        errors.append("Name cannot be blank.")
-
-    numeric_labels = {
-        "selected_tank_size": "Primary tank size",
-        "initial_fill": "Initial fill",
-        "reserve": "Minimum operating level",
-        "graph_start": "Graph start tank size",
-        "graph_end": "Graph end tank size",
-        "graph_step": "Graph step",
-        "graph_auto_step_count": "Number of steps",
-        "filtration_pump_capacity": "Pump capacity",
-        "filter_recovery": "Filter recovery",
-        "booster_tank_size": "Tank size",
-        "booster_initial_fill": "Initial fill",
-        "booster_refill_level": "Refill level",
-        "pump_capacity": "Pump capacity",
-    }
-    fields_by_type = {
-        "primary_tank": (
-            "selected_tank_size", "initial_fill", "reserve", "graph_start",
-            "graph_end", "graph_step", "graph_auto_step_count",
-        ),
-        "filtration_pump": ("filtration_pump_capacity",),
-        "filtration_system": ("filter_recovery",),
-        "booster_tank": (
-            "booster_tank_size", "booster_initial_fill", "booster_refill_level",
-        ),
-        "booster_pump": ("pump_capacity",),
-    }
-    parsed: dict[str, float] = {}
-    for field in fields_by_type.get(component_type, ()):
-        raw = str(values.get(field, "")).strip().replace(",", "")
-        try:
-            number = float(raw)
-            if not math.isfinite(number):
-                raise ValueError
-            parsed[field] = number
-        except ValueError:
-            errors.append(f"{numeric_labels[field]} must be a valid number.")
-
-    if errors:
-        return errors
-
-    nonnegative_fields = {
-        "filtration_pump_capacity", "booster_tank_size", "pump_capacity",
-    }
-    for field in nonnegative_fields.intersection(parsed):
-        if parsed[field] < 0:
-            errors.append(f"{numeric_labels[field]} cannot be negative.")
-
-    for field in ("initial_fill", "reserve", "filter_recovery", "booster_initial_fill", "booster_refill_level"):
-        if field in parsed and not 0 <= parsed[field] <= 100:
-            errors.append(f"{numeric_labels[field]} must be between 0 and 100%.")
-
-    if component_type == "primary_tank":
-        if parsed["selected_tank_size"] <= 0:
-            errors.append("Primary tank size must be greater than zero.")
-        if parsed["graph_start"] <= 0:
-            errors.append("Graph start tank size must be greater than zero.")
-        if parsed["graph_end"] <= parsed["graph_start"]:
-            errors.append("Graph end tank size must be greater than graph start tank size.")
-        if parsed["graph_step"] <= 0:
-            errors.append("Graph step must be greater than zero.")
-        elif parsed["graph_end"] > parsed["graph_start"] and parsed["graph_step"] > (
-            parsed["graph_end"] - parsed["graph_start"]
-        ):
-            errors.append("Graph step cannot exceed the graph range.")
-        step_count = parsed["graph_auto_step_count"]
-        if not step_count.is_integer() or not 1 <= step_count <= 1000:
-            errors.append("Number of steps must be a whole number from 1 to 1000.")
-
-    return errors
-
-
-def _parse_coordinates(latitude_text: str, longitude_text: str) -> tuple[float | None, float | None]:
-    latitude_value = latitude_text.strip()
-    longitude_value = longitude_text.strip()
-    if not latitude_value and not longitude_value:
-        return None, None
-    if not latitude_value or not longitude_value:
-        raise ValueError("Enter both latitude and longitude, or leave both fields blank.")
-    try:
-        latitude = float(latitude_value)
-        longitude = float(longitude_value)
-    except ValueError as exc:
-        raise ValueError("Latitude and longitude must be numbers.") from exc
-    if not -90 <= latitude <= 90:
-        raise ValueError("Latitude must be between -90 and 90 degrees.")
-    if not -180 <= longitude <= 180:
-        raise ValueError("Longitude must be between -180 and 180 degrees.")
-    return latitude, longitude
-
-
-def _state_code(value: str) -> str:
-    return value.split(" - ", 1)[0].strip().upper()
-
-
-def _safe_project_file_name(name: str) -> str:
-    safe = "".join(char if char.isalnum() or char in " ._-" else "_" for char in name).strip()
-    return f"{safe or 'rainwater_project'}.db"
-
-
-def _latex_escape(value: object) -> str:
-    replacements = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&",
-        "%": r"\%",
-        "$": r"\$",
-        "#": r"\#",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "~": r"\textasciitilde{}",
-        "^": r"\textasciicircum{}",
-    }
-    return "".join(replacements.get(char, char) for char in str(value))
-
-
-def _latex_row(*values: object) -> str:
-    return " & ".join(_latex_escape(value) for value in values) + r" \\"
-
-
-def _latex_number(value: object) -> str:
-    return f"{float(value):.6g}"
-
-
-def _pdf_escape(value: object) -> str:
-    text = str(value).replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
-    return text.encode("latin-1", errors="replace").decode("latin-1")
-
-
-def _clip_pdf_text(value: object, max_chars: int) -> str:
-    text = str(value)
-    if len(text) <= max_chars:
-        return text
-    return text[: max(0, max_chars - 3)] + "..."
-
-
-def _wrap_pdf_text(value: str, width: int) -> list[str]:
-    words = value.split()
-    if not words:
-        return [""]
-    lines: list[str] = []
-    current = words[0]
-    for word in words[1:]:
-        if len(current) + 1 + len(word) <= width:
-            current = f"{current} {word}"
-        else:
-            lines.append(current)
-            current = word
-    lines.append(current)
-    return lines
-
-
-def _report_surface_rows(config: ProjectConfig) -> list[dict[str, object]]:
-    return [
-        {
-            "name": surface.name,
-            "area": area_to_display(surface.area, config),
-            "runoff_coefficient": surface.runoff_coefficient,
-            "first_flush_depth": precip_to_display(surface.first_flush_depth_inches, config),
-        }
-        for surface in config.surfaces
-        if surface.area > 0
-    ]
-
-
-def _report_demand_summary(results_df: pd.DataFrame, config: ProjectConfig) -> tuple[list[dict[str, object]], float]:
-    if results_df.empty or not {"Date", "DemandGallons"}.issubset(results_df.columns):
-        return (
-            [
-                {"month": MONTH_LABELS[key], "demand_per_day": 0.0, "demand_per_month": 0.0}
-                for key in MONTH_KEYS
-            ],
-            0.0,
-        )
-
-    demand = results_df[["Date", "DemandGallons"]].copy()
-    demand["Date"] = pd.to_datetime(demand["Date"], errors="coerce")
-    demand["DemandGallons"] = pd.to_numeric(demand["DemandGallons"], errors="coerce").fillna(0.0)
-    demand = demand.dropna(subset=["Date"])
-    monthly_average = demand.groupby(demand["Date"].dt.month)["DemandGallons"].mean()
-    monthly_totals = demand.groupby([demand["Date"].dt.year, demand["Date"].dt.month])["DemandGallons"].sum()
-    mean_monthly_totals = monthly_totals.groupby(level=1).mean()
-    annual_average = demand.groupby(demand["Date"].dt.year)["DemandGallons"].sum().mean()
-    rows = [
-        {
-            "month": MONTH_LABELS[key],
-            "demand_per_day": volume_to_display(float(monthly_average.get(index, 0.0)), config),
-            "demand_per_month": volume_to_display(float(mean_monthly_totals.get(index, 0.0)), config),
-        }
-        for index, key in enumerate(MONTH_KEYS, start=1)
-    ]
-    return rows, volume_to_display(float(annual_average), config)
-
-
-def _yearly_demand_reliability(results_df: pd.DataFrame) -> list[dict[str, float | int]]:
-    if results_df.empty or not {"Date", "DemandMet"}.issubset(results_df.columns):
-        return []
-    values = results_df[["Date", "DemandMet"]].copy()
-    values["Date"] = pd.to_datetime(values["Date"], errors="coerce")
-    values = values.dropna(subset=["Date"])
-    values["DemandMet"] = values["DemandMet"].fillna(False).astype(bool)
-    rows: list[dict[str, float | int]] = []
-    for year, group in values.groupby(values["Date"].dt.year, sort=True):
-        total_days = len(group)
-        met_days = int(group["DemandMet"].sum())
-        met_percent = (met_days / total_days) * 100.0 if total_days else 0.0
-        rows.append(
-            {
-                "year": int(year),
-                "total_days": total_days,
-                "met_days": met_days,
-                "unmet_days": total_days - met_days,
-                "met_percent": met_percent,
-                "unmet_percent": 100.0 - met_percent,
-            }
-        )
-    return rows
-
-
-def _report_average_annual_precipitation(rainfall_df: pd.DataFrame, config: ProjectConfig) -> float:
-    if rainfall_df.empty or not {"Date", "Precipitation"}.issubset(rainfall_df.columns):
-        return 0.0
-    rainfall = rainfall_df[["Date", "Precipitation"]].copy()
-    rainfall["Date"] = pd.to_datetime(rainfall["Date"], errors="coerce")
-    rainfall["Precipitation"] = pd.to_numeric(rainfall["Precipitation"], errors="coerce").fillna(0.0)
-    rainfall = rainfall.dropna(subset=["Date"])
-    annual_average = rainfall.groupby(rainfall["Date"].dt.year)["Precipitation"].sum().mean()
-    return precip_to_display(float(annual_average), config)
-
-
-def _report_tank_level_distribution(
-    results_df: pd.DataFrame, config: ProjectConfig, bin_count: int = 6
-) -> list[dict[str, float | int]]:
-    if results_df.empty or "WaterInTankGallons" not in results_df.columns or bin_count <= 0:
-        return []
-    levels = [
-        volume_to_display(max(float(value), 0.0), config)
-        for value in pd.to_numeric(results_df["WaterInTankGallons"], errors="coerce").fillna(0.0)
-    ]
-    selected_capacity = volume_to_display(config.selected_tank_size_gal, config)
-    upper = max(selected_capacity, max(levels, default=0.0), 1.0)
-    bin_width = upper / bin_count
-    counts = [0] * bin_count
-    for level in levels:
-        index = min(max(int(level / bin_width), 0), bin_count - 1)
-        counts[index] += 1
-    return [
-        {
-            "low": index * bin_width,
-            "high": (index + 1) * bin_width,
-            "count": count,
-        }
-        for index, count in enumerate(counts)
-    ]
-
-
-def _tank_volume_capacity_label(
-    current_gallons: float, capacity_gallons: float, config: ProjectConfig
-) -> str:
-    """Format the animated tank's current volume and capacity in project units."""
-    current = volume_to_display(max(float(current_gallons), 0.0), config)
-    capacity = volume_to_display(max(float(capacity_gallons), 0.0), config)
-    unit = volume_unit(config)
-    return f"{current:,.0f} {unit} / {capacity:,.0f} {unit}"
 
 
 class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
@@ -940,14 +584,25 @@ class RainwaterTkApp(tk.Tk):
         self.progress_style.configure("SaveProject.Horizontal.TProgressbar", background="#2e8b57")
         self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
 
-        self.project_file_path = _app_dir() / "rainwater_projects.db"
-        self.store = SQLiteStore(str(self.project_file_path))
-        self.recent_projects_path = _app_dir() / "recent_projects.json"
+        self.application_data_dir = user_data_dir()
+        try:
+            self.migrated_legacy_files = migrate_legacy_application_data(
+                _app_dir(), self.application_data_dir
+            )
+        except OSError:
+            self.application_data_dir = Path(tempfile.gettempdir()) / "RWH Calculator"
+            self.application_data_dir.mkdir(parents=True, exist_ok=True)
+            self.migrated_legacy_files = ()
+        self.project_file_path = self.application_data_dir / "rainwater_projects.db"
+        self.store = SQLiteStore(
+            str(self.project_file_path),
+            backup_dir=project_backup_dir(
+                self.project_file_path, data_dir=self.application_data_dir
+            ),
+        )
+        self.recent_projects_path = self.application_data_dir / "recent_projects.json"
         self.recent_project_paths = self._load_recent_project_paths()
-        application_state_dir = _app_dir()
-        if not os.access(application_state_dir, os.W_OK):
-            fallback_root = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
-            application_state_dir = fallback_root / "RWH Calculator"
+        application_state_dir = self.application_data_dir
         self.app_preferences_path = application_state_dir / "app_preferences.json"
         self.app_preferences = self._load_app_preferences()
         try:
@@ -965,9 +620,9 @@ class RainwaterTkApp(tk.Tk):
         self.execution_log_detail_var = tk.StringVar(
             value=normalize_log_detail(self.app_preferences.get("execution_log_detail", "Normal"))
         )
-        self.custom_schedule_library_path = _app_dir() / "schedule_library.json"
+        self.custom_schedule_library_path = application_state_dir / "schedule_library.json"
         self.custom_schedule_templates = self._load_custom_schedule_templates()
-        self.custom_demand_object_library_path = _app_dir() / "demand_object_library.json"
+        self.custom_demand_object_library_path = application_state_dir / "demand_object_library.json"
         self.custom_demand_object_templates = self._load_custom_demand_object_templates()
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
@@ -1022,6 +677,16 @@ class RainwaterTkApp(tk.Tk):
         self.graph_step_var = tk.StringVar(value=str(self.config_model.graph_step_gal))
         self.graph_auto_step_count_var = tk.StringVar(value=str(self.config_model.graph_auto_step_count))
         self.selected_tank_var = tk.StringVar(value=str(self.config_model.selected_tank_size_gal))
+        self.recommendation_reliability_target_var = tk.StringVar(
+            value=str(self.config_model.recommendation_reliability_target_percent)
+        )
+        self.recommendation_marginal_gain_var = tk.StringVar(
+            value=str(self.config_model.recommendation_marginal_gain_threshold)
+        )
+        self.design_recommendations_var = tk.StringVar(
+            value="Run an analysis to generate design recommendations."
+        )
+        self.design_warnings_var = tk.StringVar(value="")
         self.comparison_tank_var = tk.StringVar()
         self.multitank_comparison_var = tk.BooleanVar(value=self.config_model.multitank_comparison_enabled)
         self.selected_tank_warning_var = tk.StringVar()
@@ -1064,10 +729,42 @@ class RainwaterTkApp(tk.Tk):
         self.financial_fixed_maintenance_var = tk.StringVar(value=str(financial.fixed_annual_maintenance))
         self.financial_maintenance_percent_var = tk.StringVar(value=str(financial.annual_maintenance_percent))
         self.financial_analysis_period_var = tk.StringVar(value=str(financial.analysis_period_years))
+        self.financial_discount_rate_var = tk.StringVar(value=str(financial.discount_rate_percent))
+        self.financial_utility_escalation_var = tk.StringVar(
+            value=str(financial.utility_rate_escalation_percent)
+        )
+        self.financial_maintenance_escalation_var = tk.StringVar(
+            value=str(financial.maintenance_escalation_percent)
+        )
+        self.financial_electricity_escalation_var = tk.StringVar(
+            value=str(financial.electricity_escalation_percent)
+        )
+        self.financial_pump_power_var = tk.StringVar(value=str(financial.pump_power_kw))
+        self.financial_pump_flow_rate_var = tk.StringVar(
+            value=str(financial.pump_flow_rate_gallons_per_hour)
+        )
+        self.financial_replacement_cost_var = tk.StringVar(
+            value=str(financial.equipment_replacement_cost)
+        )
+        self.financial_replacement_interval_var = tk.StringVar(
+            value=str(financial.equipment_replacement_interval_years)
+        )
+        self.financial_replacement_escalation_var = tk.StringVar(
+            value=str(financial.equipment_replacement_escalation_percent)
+        )
+        self.financial_power_unit_var = tk.StringVar(value="kW")
+        self.financial_pump_flow_unit_var = tk.StringVar(
+            value=f"{volume_unit(self.config_model)}/hour"
+        )
+        self.financial_electricity_unit_var = tk.StringVar(value="currency/kWh")
+        self.financial_replacement_interval_unit_var = tk.StringVar(
+            value="years; 0 disables"
+        )
         self.financial_status_var = tk.StringVar(value="Run a tank analysis to calculate financial results.")
         self.financial_result_vars = {key: tk.StringVar(value="--") for key in (
             "supplied", "sewer_eligible_supply", "water_savings", "sewer_savings", "gross",
-            "maintenance", "net", "net_cost", "payback", "period_benefit"
+            "maintenance", "energy", "net", "net_cost", "payback", "discounted_payback",
+            "period_benefit", "replacement", "npv", "irr"
         )}
         optimization = self.config_model.optimization_parameters
         self.optimization_minimum_reliability_var = tk.StringVar(
@@ -1089,6 +786,13 @@ class RainwaterTkApp(tk.Tk):
             value="Uses 27 combinations from an illustrative built-in product catalog."
         )
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
+        self.rainfall_quality_var = tk.StringVar(value="Quality assessment unavailable")
+        self.rainfall_data_type_var = tk.StringVar(
+            value=rainfall_data_type_label(self.config_model.rainfall_data_type)
+        )
+        self.rainfall_resolution_var = tk.StringVar(value="Daily")
+        self.rainfall_timezone_var = tk.StringVar(value=self.config_model.rainfall_timezone)
+        self.rainfall_timing_var = tk.StringVar(value=self.config_model.rainfall_timing_type)
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.average_annual_precipitation_var = tk.StringVar(value="Average annual precipitation: --")
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
@@ -1145,6 +849,24 @@ class RainwaterTkApp(tk.Tk):
         self._populate_from_model()
         self._center_main_window()
         self.deiconify()
+        if self.migrated_legacy_files:
+            migrated_names = ", ".join(path.name for path in self.migrated_legacy_files)
+            self.after_idle(
+                lambda: messagebox.showinfo(
+                    APP_TITLE,
+                    "Copied legacy application data into the per-user data directory:\n"
+                    f"{self.application_data_dir}\n\nFiles: {migrated_names}\n\n"
+                    "The original files were retained.",
+                    parent=self,
+                )
+            )
+        if self.store.recovery_notice:
+            recovery_notice = self.store.recovery_notice
+            self.after_idle(
+                lambda: messagebox.showwarning(
+                    APP_TITLE, recovery_notice, parent=self
+                )
+            )
 
     def _center_main_window(self) -> None:
         self.update_idletasks()
@@ -1463,8 +1185,8 @@ class RainwaterTkApp(tk.Tk):
         })
         try:
             self.app_preferences_path.parent.mkdir(parents=True, exist_ok=True)
-            self.app_preferences_path.write_text(
-                json.dumps(self.app_preferences, indent=2), encoding="utf-8"
+            atomic_write_text(
+                self.app_preferences_path, json.dumps(self.app_preferences, indent=2)
             )
         except OSError as exc:
             self.execution_log.warning(
@@ -1473,7 +1195,10 @@ class RainwaterTkApp(tk.Tk):
 
     def _save_recent_project_paths(self) -> None:
         try:
-            self.recent_projects_path.write_text(json.dumps(self.recent_project_paths, indent=2), encoding="utf-8")
+            atomic_write_text(
+                self.recent_projects_path,
+                json.dumps(self.recent_project_paths, indent=2),
+            )
         except OSError:
             pass
 
@@ -1485,9 +1210,9 @@ class RainwaterTkApp(tk.Tk):
         return _validated_schedule_library(payload)
 
     def _save_custom_schedule_templates(self) -> None:
-        self.custom_schedule_library_path.write_text(
+        atomic_write_text(
+            self.custom_schedule_library_path,
             json.dumps(self.custom_schedule_templates, indent=2),
-            encoding="utf-8",
         )
 
     def _load_custom_demand_object_templates(self) -> dict[str, DemandObject]:
@@ -1512,7 +1237,9 @@ class RainwaterTkApp(tk.Tk):
             }
             for name, demand_object in self.custom_demand_object_templates.items()
         }
-        self.custom_demand_object_library_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        atomic_write_text(
+            self.custom_demand_object_library_path, json.dumps(payload, indent=2)
+        )
 
     def _add_recent_project_path(self, path: Path) -> None:
         recent_path = str(path.expanduser().resolve(strict=False))
@@ -5346,6 +5073,61 @@ class RainwaterTkApp(tk.Tk):
             text="Generate Synthetic Hourly Rainfall",
             command=self.generate_hourly_rainfall,
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        provenance_frame = ttk.LabelFrame(
+            csv_frame, text="Quality and provenance", padding=8
+        )
+        provenance_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        provenance_frame.columnconfigure(1, weight=1)
+        ttk.Label(
+            provenance_frame,
+            textvariable=self.rainfall_quality_var,
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        ttk.Label(provenance_frame, text="Data classification").grid(
+            row=1, column=0, sticky="w", pady=2
+        )
+        rainfall_data_type_combo = ttk.Combobox(
+            provenance_frame,
+            textvariable=self.rainfall_data_type_var,
+            values=list(RAINFALL_DATA_TYPE_BY_LABEL),
+            state="readonly",
+        )
+        rainfall_data_type_combo.grid(row=1, column=1, sticky="ew", pady=2)
+        rainfall_data_type_combo.bind(
+            "<<ComboboxSelected>>", self._rainfall_provenance_changed
+        )
+        ttk.Label(provenance_frame, text="Temporal resolution").grid(
+            row=2, column=0, sticky="w", pady=2
+        )
+        rainfall_resolution_combo = ttk.Combobox(
+            provenance_frame,
+            textvariable=self.rainfall_resolution_var,
+            values=list(RAINFALL_RESOLUTION_LABELS.values()),
+            state="readonly",
+        )
+        rainfall_resolution_combo.grid(row=2, column=1, sticky="ew", pady=2)
+        rainfall_resolution_combo.bind(
+            "<<ComboboxSelected>>", self._rainfall_provenance_changed
+        )
+        ttk.Label(provenance_frame, text="Source timezone").grid(
+            row=3, column=0, sticky="w", pady=2
+        )
+        timezone_entry = ttk.Entry(
+            provenance_frame, textvariable=self.rainfall_timezone_var
+        )
+        timezone_entry.grid(row=3, column=1, sticky="ew", pady=2)
+        timezone_entry.bind("<FocusOut>", self._rainfall_provenance_changed)
+        ttk.Label(provenance_frame, text="Timing metadata").grid(
+            row=4, column=0, sticky="nw", pady=2
+        )
+        ttk.Label(
+            provenance_frame,
+            textvariable=self.rainfall_timing_var,
+            wraplength=570,
+            justify="left",
+            foreground="#5f6b70",
+        ).grid(row=4, column=1, sticky="ew", pady=2)
 
         self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
         self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
@@ -5937,7 +5719,7 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(optimization_frame, text="Optimize for").grid(row=0, column=6, sticky="w")
         ttk.Combobox(
             optimization_frame, textvariable=self.optimization_objective_var,
-            values=("Simple payback", "Net annual savings", "Rainwater reliability", "Analysis-period net benefit"),
+            values=("Simple payback", "Net annual savings", "Rainwater reliability", "Analysis-period net benefit", "Lifecycle NPV"),
             state="readonly", width=23,
         ).grid(row=0, column=7, sticky="w", padx=(8, 0))
         ttk.Label(optimization_frame, text="Maximum annual municipal makeup").grid(row=1, column=0, sticky="w")
@@ -5969,7 +5751,7 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(6, 6))
         self.optimization_tree = ttk.Treeview(
             optimization_frame,
-            columns=("rank", "tank", "pump", "booster", "reliability", "makeup", "energy", "cost", "savings", "payback"),
+            columns=("rank", "tank", "pump", "booster", "reliability", "makeup", "energy", "cost", "savings", "payback", "npv"),
             show="headings", height=6,
         )
         headings = (
@@ -5978,6 +5760,7 @@ class RainwaterTkApp(tk.Tk):
             ("makeup", "Municipal/year", 100),
             ("energy", "Energy/year", 90), ("cost", "Installed cost", 105),
             ("savings", "Net savings/year", 115), ("payback", "Simple payback", 100),
+            ("npv", "Lifecycle NPV", 110),
         )
         for column, label, width in headings:
             self.optimization_tree.heading(column, text=label)
@@ -6072,7 +5855,10 @@ class RainwaterTkApp(tk.Tk):
             ("Economic input", "Base cost / incentives", f"{financial.currency} {financial.installed_cost:,.2f} / {financial.incentives:,.2f}", "Financial analysis"),
             ("Economic input", "Annual maintenance", f"{financial.currency} {financial.fixed_annual_maintenance:,.2f} + {financial.annual_maintenance_percent:g}% of installed cost", "Financial analysis"),
             ("Economic input", "Electricity price", f"{financial.currency} {optimization.electricity_rate_per_kwh:g}/kWh", "Optimization"),
-            ("Economic input", "Analysis period", f"{financial.analysis_period_years} years; undiscounted", "Financial analysis"),
+            ("Economic input", "Analysis period / discount rate", f"{financial.analysis_period_years} years / {financial.discount_rate_percent:g}%", "Financial analysis"),
+            ("Economic input", "Utility / maintenance escalation", f"{financial.utility_rate_escalation_percent:g}% / {financial.maintenance_escalation_percent:g}%", "Financial analysis"),
+            ("Economic input", "Electricity / replacement escalation", f"{financial.electricity_escalation_percent:g}% / {financial.equipment_replacement_escalation_percent:g}%", "Financial analysis"),
+            ("Economic input", "Recurring replacement", f"{financial.currency} {financial.equipment_replacement_cost:,.2f} every {financial.equipment_replacement_interval_years} year(s)", "Financial analysis"),
             ("Search method", "Candidate enumeration", f"Exhaustive deterministic search; {math.prod(counts.values())} combinations", "Optimization backend"),
             ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs cached for 4 unchanged runs", "Optimization backend"),
         ]
@@ -6251,6 +6037,7 @@ class RainwaterTkApp(tk.Tk):
                     f"{currency} {result.total_installed_cost:,.0f}",
                     f"{currency} {result.net_annual_savings:,.0f}",
                     payback,
+                    f"{currency} {result.lifecycle_net_present_value:,.0f}",
                 ),
             )
         if feasible_count:
@@ -6262,6 +6049,8 @@ class RainwaterTkApp(tk.Tk):
                 best_value = f"{currency} {best.net_annual_savings:,.0f}/year"
             elif objective == "Rainwater reliability":
                 best_value = f"{best.reliability_percent:.1f}%"
+            elif objective == "Lifecycle NPV":
+                best_value = f"{currency} {best.lifecycle_net_present_value:,.0f}"
             else:
                 best_value = f"{currency} {best.analysis_period_net_benefit:,.0f}"
             self.optimization_status_var.set(
@@ -6282,20 +6071,46 @@ class RainwaterTkApp(tk.Tk):
 
     def _build_financial_tab(self) -> None:
         self.financial_tab.columnconfigure(0, weight=1)
-        self.financial_tab.columnconfigure(1, weight=1)
-        self.financial_tab.rowconfigure(1, weight=1)
-        self.financial_tab.rowconfigure(2, weight=1)
+        self.financial_tab.rowconfigure(0, weight=1)
+        financial_canvas = tk.Canvas(self.financial_tab, highlightthickness=0)
+        financial_scrollbar = ttk.Scrollbar(
+            self.financial_tab, orient="vertical", command=financial_canvas.yview
+        )
+        financial_canvas.configure(yscrollcommand=financial_scrollbar.set)
+        financial_canvas.grid(row=0, column=0, sticky="nsew")
+        financial_scrollbar.grid(row=0, column=1, sticky="ns")
+        content = ttk.Frame(financial_canvas)
+        content_window = financial_canvas.create_window(
+            (0, 0), window=content, anchor="nw"
+        )
+        content.columnconfigure(0, weight=1)
+        content.columnconfigure(1, weight=1)
+        content.rowconfigure(1, weight=1)
+        content.rowconfigure(2, weight=1)
+        content.bind(
+            "<Configure>",
+            lambda _event: financial_canvas.configure(
+                scrollregion=financial_canvas.bbox("all")
+            ),
+        )
+        financial_canvas.bind(
+            "<Configure>",
+            lambda event: financial_canvas.itemconfigure(
+                content_window, width=event.width
+            ),
+        )
         ttk.Label(
-            self.financial_tab,
+            content,
             text=(
-                "This simple-rate estimate values only rainwater delivered to demand by the latest simulation. "
-                "Overflow, unmet demand, municipal makeup, treatment loss, and water left in storage are excluded."
+                "Lifecycle cash flow values rainwater delivered to demand by the latest simulation. "
+                "It includes escalation, pump electricity, recurring equipment replacement, discounting, NPV, "
+                "and IRR. Tariff tiers are excluded because billing-period tier rules are not configured."
             ),
             foreground="#667278",
             wraplength=950,
         ).grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 10))
 
-        inputs = ttk.LabelFrame(self.financial_tab, text="Financial assumptions", padding=12)
+        inputs = ttk.LabelFrame(content, text="Financial assumptions", padding=12)
         inputs.grid(row=1, column=0, sticky="nsew", padx=(0, 6))
         inputs.columnconfigure(1, weight=1)
         ttk.Label(inputs, text="Currency").grid(row=0, column=0, sticky="w", pady=3)
@@ -6330,11 +6145,21 @@ class RainwaterTkApp(tk.Tk):
             textvariable=self.financial_analysis_period_var, width=10,
         ).grid(row=9, column=1, sticky="w", pady=3)
         ttk.Label(inputs, text="years").grid(row=9, column=2, sticky="w", padx=(6, 0), pady=3)
+        self._labeled_entry(inputs, 10, "Discount rate", self.financial_discount_rate_var, self.percent_unit_var)
+        self._labeled_entry(inputs, 11, "Utility-rate escalation", self.financial_utility_escalation_var, self.percent_unit_var)
+        self._labeled_entry(inputs, 12, "Electricity price", self.optimization_electricity_rate_var, self.financial_electricity_unit_var)
+        self._labeled_entry(inputs, 13, "Electricity-price escalation", self.financial_electricity_escalation_var, self.percent_unit_var)
+        self._labeled_entry(inputs, 14, "Maintenance-cost escalation", self.financial_maintenance_escalation_var, self.percent_unit_var)
+        self._labeled_entry(inputs, 15, "Pump rated power", self.financial_pump_power_var, self.financial_power_unit_var)
+        self._labeled_entry(inputs, 16, "Pump rated flow", self.financial_pump_flow_rate_var, self.financial_pump_flow_unit_var)
+        self._labeled_entry(inputs, 17, "Recurring equipment replacement", self.financial_replacement_cost_var, self.financial_currency_var)
+        self._labeled_entry(inputs, 18, "Replacement interval", self.financial_replacement_interval_var, self.financial_replacement_interval_unit_var)
+        self._labeled_entry(inputs, 19, "Replacement-cost escalation", self.financial_replacement_escalation_var, self.percent_unit_var)
         ttk.Button(inputs, text="Update financial analysis", command=self.update_financial_analysis).grid(
-            row=10, column=0, columnspan=3, sticky="ew", pady=(12, 0)
+            row=20, column=0, columnspan=3, sticky="ew", pady=(12, 0)
         )
 
-        outputs = ttk.LabelFrame(self.financial_tab, text="Selected-tank financial results", padding=12)
+        outputs = ttk.LabelFrame(content, text="Selected-tank financial results", padding=12)
         outputs.grid(row=1, column=1, sticky="nsew", padx=(6, 0))
         outputs.columnconfigure(1, weight=1)
         result_rows = (
@@ -6344,10 +6169,15 @@ class RainwaterTkApp(tk.Tk):
             ("Annual sewer savings", "sewer_savings"),
             ("Gross annual utility savings", "gross"),
             ("Annual maintenance cost", "maintenance"),
+            ("Annual pump electricity", "energy"),
             ("Net annual savings", "net"),
             ("Net installed cost after incentives", "net_cost"),
             ("Simple payback", "payback"),
+            ("Discounted payback", "discounted_payback"),
             ("Net benefit over analysis period", "period_benefit"),
+            ("Nominal replacement costs", "replacement"),
+            ("Lifecycle net present value", "npv"),
+            ("Internal rate of return", "irr"),
         )
         for row, (label, key) in enumerate(result_rows):
             ttk.Label(outputs, text=label).grid(row=row, column=0, sticky="w", pady=5)
@@ -6366,12 +6196,12 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=len(result_rows) + 1, column=0, columnspan=2, sticky="ew")
 
         comparison = ttk.LabelFrame(
-            self.financial_tab, text="Primary and comparison tank financial performance", padding=10
+            content, text="Primary and comparison tank financial performance", padding=10
         )
         comparison.grid(row=2, column=0, columnspan=2, sticky="nsew", pady=(10, 0))
         comparison.columnconfigure(0, weight=1)
         comparison.rowconfigure(0, weight=1)
-        columns = ("tank", "supplied", "gross", "net", "payback")
+        columns = ("tank", "supplied", "gross", "net", "payback", "npv")
         self.financial_comparison_tree = ttk.Treeview(
             comparison, columns=columns, show="headings", height=6
         )
@@ -6381,6 +6211,7 @@ class RainwaterTkApp(tk.Tk):
             "gross": "Gross annual savings",
             "net": "Net annual savings",
             "payback": "Simple payback",
+            "npv": "Lifecycle NPV",
         }
         for column, heading in headings.items():
             self.financial_comparison_tree.heading(column, text=heading)
@@ -6409,18 +6240,7 @@ class RainwaterTkApp(tk.Tk):
             return
         params = self.config_model.financial_parameters
         try:
-            results = calculate_financial_results(
-                source,
-                water_rate=params.water_rate,
-                sewer_rate=params.sewer_rate,
-                billing_unit=params.tariff_billing_unit,
-                sewer_eligible_percent=params.sewer_eligible_percent,
-                installed_cost=params.installed_cost,
-                incentives=params.incentives,
-                fixed_annual_maintenance=params.fixed_annual_maintenance,
-                maintenance_percent=params.annual_maintenance_percent,
-                analysis_period_years=params.analysis_period_years,
-            )
+            results = FinancialAnalysisService(self.config_model).calculate(source)
         except ValueError as exc:
             self.financial_status_var.set(str(exc))
             for variable in self.financial_result_vars.values():
@@ -6448,6 +6268,10 @@ class RainwaterTkApp(tk.Tk):
         )
         self.financial_result_vars["gross"].set(f"{currency} {results.gross_annual_savings:,.2f}/year")
         self.financial_result_vars["maintenance"].set(f"{currency} {results.annual_maintenance_cost:,.2f}/year")
+        self.financial_result_vars["energy"].set(
+            f"{results.average_annual_pump_energy_kwh:,.1f} kWh; "
+            f"{currency} {results.annual_pump_energy_cost:,.2f}/year"
+        )
         self.financial_result_vars["net"].set(f"{currency} {results.net_annual_savings:,.2f}/year")
         self.financial_result_vars["net_cost"].set(f"{currency} {results.net_installed_cost:,.2f}")
         self.financial_result_vars["payback"].set(
@@ -6455,14 +6279,30 @@ class RainwaterTkApp(tk.Tk):
             if results.simple_payback_years is not None
             else "Not achieved"
         )
+        self.financial_result_vars["discounted_payback"].set(
+            f"{results.discounted_payback_years:,.1f} years"
+            if results.discounted_payback_years is not None
+            else "Not achieved"
+        )
         self.financial_result_vars["period_benefit"].set(
             f"{currency} {results.analysis_period_net_benefit:,.2f}"
+        )
+        self.financial_result_vars["replacement"].set(
+            f"{currency} {results.total_replacement_cost:,.2f}"
+        )
+        self.financial_result_vars["npv"].set(
+            f"{currency} {results.lifecycle_net_present_value:,.2f}"
+        )
+        self.financial_result_vars["irr"].set(
+            f"{results.internal_rate_of_return_percent:,.2f}%"
+            if results.internal_rate_of_return_percent is not None
+            else "Not uniquely defined"
         )
         source_label = "hourly" if source is self.hourly_results_df else "daily"
         self.financial_status_var.set(
             f"Based on average annual delivered rainwater from the latest {source_label} simulation. "
-            "This is a simple-rate, undiscounted estimate; tariff tiers, escalation, financing, energy, "
-            "replacement costs, NPV, and IRR are not included."
+            "Year 0 contains net installed cost; operating cash flows occur at each year end. "
+            "IRR is withheld for non-conventional cash flows with multiple sign changes."
         )
         self._populate_financial_comparison()
         self._populate_candidate_performance()
@@ -6481,18 +6321,7 @@ class RainwaterTkApp(tk.Tk):
                 continue
             seen.add(rounded_size)
             try:
-                results = calculate_financial_results(
-                    source,
-                    water_rate=params.water_rate,
-                    sewer_rate=params.sewer_rate,
-                    billing_unit=params.tariff_billing_unit,
-                    sewer_eligible_percent=params.sewer_eligible_percent,
-                    installed_cost=params.installed_cost,
-                    incentives=params.incentives,
-                    fixed_annual_maintenance=params.fixed_annual_maintenance,
-                    maintenance_percent=params.annual_maintenance_percent,
-                    analysis_period_years=params.analysis_period_years,
-                )
+                results = FinancialAnalysisService(self.config_model).calculate(source)
             except ValueError:
                 continue
             tank_display = volume_to_display(tank_size, self.config_model)
@@ -6513,6 +6342,7 @@ class RainwaterTkApp(tk.Tk):
                     f"{params.currency} {results.gross_annual_savings:,.2f}",
                     f"{params.currency} {results.net_annual_savings:,.2f}",
                     payback,
+                    f"{params.currency} {results.lifecycle_net_present_value:,.2f}",
                 ),
             )
 
@@ -6645,7 +6475,7 @@ class RainwaterTkApp(tk.Tk):
 
         candidate = self.candidate_results_tab
         candidate.columnconfigure(0, weight=1)
-        candidate.rowconfigure(1, weight=1)
+        candidate.rowconfigure(2, weight=1)
         candidate_toolbar = ttk.Frame(candidate)
         candidate_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Label(
@@ -6659,13 +6489,61 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(
             candidate_toolbar, text="Export CSV...", command=self.export_candidate_performance
         ).pack(side="right", padx=(0, 8))
+        recommendation_frame = ttk.LabelFrame(
+            candidate, text="Design recommendations", padding=(10, 8)
+        )
+        recommendation_frame.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        recommendation_frame.columnconfigure(7, weight=1)
+        ttk.Label(recommendation_frame, text="Reliability target").grid(
+            row=0, column=0, sticky="w"
+        )
+        target_entry = ttk.Entry(
+            recommendation_frame,
+            textvariable=self.recommendation_reliability_target_var,
+            width=7,
+        )
+        target_entry.grid(row=0, column=1, padx=(5, 2))
+        ttk.Label(recommendation_frame, text="%").grid(row=0, column=2, sticky="w")
+        ttk.Label(recommendation_frame, text="Diminishing-return threshold").grid(
+            row=0, column=3, sticky="w", padx=(18, 0)
+        )
+        gain_entry = ttk.Entry(
+            recommendation_frame,
+            textvariable=self.recommendation_marginal_gain_var,
+            width=7,
+        )
+        gain_entry.grid(row=0, column=4, padx=(5, 2))
+        ttk.Label(recommendation_frame, text="reliability points / 1,000 gal").grid(
+            row=0, column=5, sticky="w"
+        )
+        ttk.Button(
+            recommendation_frame,
+            text="Refresh",
+            command=self._refresh_design_recommendations,
+        ).grid(row=0, column=6, padx=(18, 0))
+        ttk.Label(
+            recommendation_frame,
+            textvariable=self.design_recommendations_var,
+            justify="left",
+            wraplength=1080,
+        ).grid(row=1, column=0, columnspan=8, sticky="ew", pady=(8, 0))
+        ttk.Label(
+            recommendation_frame,
+            textvariable=self.design_warnings_var,
+            foreground="#a33a00",
+            justify="left",
+            wraplength=1080,
+        ).grid(row=2, column=0, columnspan=8, sticky="ew", pady=(4, 0))
+        for entry in (target_entry, gain_entry):
+            entry.bind("<Return>", lambda _event: self._refresh_design_recommendations())
+            entry.bind("<FocusOut>", lambda _event: self._refresh_design_recommendations())
         candidate_columns = (
             "TankSizeGallons", "ReliabilityPercent", "TotalDemandGallons",
             "RainwaterSuppliedGallons", "SewerEligibleRainwaterSuppliedGallons",
             "UnmetDemandGallons", "MunicipalMakeupGallons",
             "SystemUnmetDemandGallons", "OverflowGallons", "FirstFlushLossGallons",
             "TreatmentLossGallons", "FinalStorageGallons", "NetAnnualSavings",
-            "SimplePaybackYears",
+            "SimplePaybackYears", "LifecycleNPV",
         )
         self.candidate_performance_tree = ttk.Treeview(
             candidate, columns=candidate_columns, show="headings", height=18, selectmode="browse"
@@ -6678,7 +6556,7 @@ class RainwaterTkApp(tk.Tk):
             "SystemUnmetDemandGallons": "System unmet", "OverflowGallons": "Overflow",
             "FirstFlushLossGallons": "First-flush loss", "TreatmentLossGallons": "Treatment loss",
             "FinalStorageGallons": "Final storage", "NetAnnualSavings": "Net savings/year",
-            "SimplePaybackYears": "Simple payback",
+            "SimplePaybackYears": "Simple payback", "LifecycleNPV": "Lifecycle NPV",
         }
         for column in candidate_columns:
             self.candidate_performance_tree.heading(
@@ -6687,15 +6565,15 @@ class RainwaterTkApp(tk.Tk):
                 command=lambda selected=column: self._sort_candidate_performance(selected),
             )
             self.candidate_performance_tree.column(column, width=130, anchor="e", stretch=False)
-        self.candidate_performance_tree.grid(row=1, column=0, sticky="nsew")
+        self.candidate_performance_tree.grid(row=2, column=0, sticky="nsew")
         candidate_scroll_y = ttk.Scrollbar(
             candidate, orient="vertical", command=self.candidate_performance_tree.yview
         )
-        candidate_scroll_y.grid(row=1, column=1, sticky="ns")
+        candidate_scroll_y.grid(row=2, column=1, sticky="ns")
         candidate_scroll_x = ttk.Scrollbar(
             candidate, orient="horizontal", command=self.candidate_performance_tree.xview
         )
-        candidate_scroll_x.grid(row=2, column=0, sticky="ew")
+        candidate_scroll_x.grid(row=3, column=0, sticky="ew")
         self.candidate_performance_tree.configure(
             yscrollcommand=candidate_scroll_y.set, xscrollcommand=candidate_scroll_x.set
         )
@@ -7280,6 +7158,30 @@ class RainwaterTkApp(tk.Tk):
         self.financial_fixed_maintenance_var.set(f"{financial.fixed_annual_maintenance:g}")
         self.financial_maintenance_percent_var.set(f"{financial.annual_maintenance_percent:g}")
         self.financial_analysis_period_var.set(str(financial.analysis_period_years))
+        self.financial_discount_rate_var.set(f"{financial.discount_rate_percent:g}")
+        self.financial_utility_escalation_var.set(
+            f"{financial.utility_rate_escalation_percent:g}"
+        )
+        self.financial_maintenance_escalation_var.set(
+            f"{financial.maintenance_escalation_percent:g}"
+        )
+        self.financial_electricity_escalation_var.set(
+            f"{financial.electricity_escalation_percent:g}"
+        )
+        self.financial_pump_power_var.set(f"{financial.pump_power_kw:g}")
+        self.financial_pump_flow_rate_var.set(
+            f"{volume_to_display(financial.pump_flow_rate_gallons_per_hour, cfg):g}"
+        )
+        self.financial_pump_flow_unit_var.set(f"{volume_unit(cfg)}/hour")
+        self.financial_replacement_cost_var.set(
+            f"{financial.equipment_replacement_cost:g}"
+        )
+        self.financial_replacement_interval_var.set(
+            str(financial.equipment_replacement_interval_years)
+        )
+        self.financial_replacement_escalation_var.set(
+            f"{financial.equipment_replacement_escalation_percent:g}"
+        )
         optimization = cfg.optimization_parameters
         self.optimization_minimum_reliability_var.set(f"{optimization.minimum_reliability_percent:g}")
         self.optimization_electricity_rate_var.set(f"{optimization.electricity_rate_per_kwh:g}")
@@ -7308,6 +7210,12 @@ class RainwaterTkApp(tk.Tk):
         self.use_synthetic_hourly_rainfall_var.set(
             bool(cfg.use_synthetic_hourly_rainfall)
         )
+        self.rainfall_data_type_var.set(rainfall_data_type_label(cfg.rainfall_data_type))
+        self.rainfall_resolution_var.set(
+            RAINFALL_RESOLUTION_LABELS.get(cfg.rainfall_temporal_resolution, "Unknown")
+        )
+        self.rainfall_timezone_var.set(cfg.rainfall_timezone or "Unspecified")
+        self.rainfall_timing_var.set(cfg.rainfall_timing_type)
         self.hourly_schedule_summary_var.set(
             "Custom typical-week hourly profile" if cfg.demand.hourly_schedule_enabled else "Even 24-hour demand profile"
         )
@@ -7320,6 +7228,12 @@ class RainwaterTkApp(tk.Tk):
         self.graph_step_var.set(f"{volume_to_display(cfg.graph_step_gal, cfg):.0f}")
         self.graph_auto_step_count_var.set(str(cfg.graph_auto_step_count))
         self.selected_tank_var.set(f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}")
+        self.recommendation_reliability_target_var.set(
+            f"{cfg.recommendation_reliability_target_percent:g}"
+        )
+        self.recommendation_marginal_gain_var.set(
+            f"{cfg.recommendation_marginal_gain_threshold:g}"
+        )
         self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
         self.reserve_var.set(f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}")
@@ -7345,6 +7259,7 @@ class RainwaterTkApp(tk.Tk):
         self._refresh_synthetic_hourly_rainfall_status()
         self._refresh_system_animation_dates()
         self._refresh_optimization_assumptions()
+        self._refresh_design_recommendations()
 
     def _update_setting_unit_labels(self) -> None:
         unit = volume_unit(self.config_model)
@@ -7388,6 +7303,18 @@ class RainwaterTkApp(tk.Tk):
         cfg.use_synthetic_hourly_rainfall = bool(
             self.use_synthetic_hourly_rainfall_var.get()
         )
+        cfg.rainfall_data_type = RAINFALL_DATA_TYPE_BY_LABEL.get(
+            self.rainfall_data_type_var.get(), "unclassified"
+        )
+        cfg.rainfall_temporal_resolution = next(
+            (
+                key
+                for key, label in RAINFALL_RESOLUTION_LABELS.items()
+                if label == self.rainfall_resolution_var.get()
+            ),
+            "unknown",
+        )
+        cfg.rainfall_timezone = self.rainfall_timezone_var.get().strip() or "Unspecified"
         cfg.system_parameters.pump_capacity_gallons_per_hour = max(
             0.0, volume_to_internal(_float(self.pump_capacity_var.get(), 0.0) * 60.0, cfg)
         )
@@ -7432,6 +7359,13 @@ class RainwaterTkApp(tk.Tk):
         cfg.graph_step_gal = max(1, int(round(volume_to_internal(_float(self.graph_step_var.get(), 500), cfg))))
         cfg.graph_auto_step_count = max(1, int(_float(self.graph_auto_step_count_var.get(), 20)))
         cfg.selected_tank_size_gal = max(0.0, volume_to_internal(_float(self.selected_tank_var.get(), 5000), cfg))
+        cfg.recommendation_reliability_target_percent = min(
+            max(_float(self.recommendation_reliability_target_var.get(), 90.0), 0.0),
+            100.0,
+        )
+        cfg.recommendation_marginal_gain_threshold = max(
+            _float(self.recommendation_marginal_gain_var.get(), 1.0), 0.0
+        )
         cfg.multitank_comparison_enabled = bool(self.multitank_comparison_var.get())
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.minimum_operating_volume_percent = min(
@@ -7467,6 +7401,32 @@ class RainwaterTkApp(tk.Tk):
             self.financial_maintenance_percent_var.get(), 0.0
         )
         params.analysis_period_years = int(_float(self.financial_analysis_period_var.get(), 20.0))
+        params.discount_rate_percent = _float(self.financial_discount_rate_var.get(), 5.0)
+        params.utility_rate_escalation_percent = _float(
+            self.financial_utility_escalation_var.get(), 0.0
+        )
+        params.maintenance_escalation_percent = _float(
+            self.financial_maintenance_escalation_var.get(), 0.0
+        )
+        params.electricity_escalation_percent = _float(
+            self.financial_electricity_escalation_var.get(), 0.0
+        )
+        params.pump_power_kw = _float(self.financial_pump_power_var.get(), 0.0)
+        params.pump_flow_rate_gallons_per_hour = volume_to_internal(
+            _float(self.financial_pump_flow_rate_var.get(), 0.0), self.config_model
+        )
+        params.equipment_replacement_cost = _float(
+            self.financial_replacement_cost_var.get(), 0.0
+        )
+        params.equipment_replacement_interval_years = int(
+            _float(self.financial_replacement_interval_var.get(), 0.0)
+        )
+        params.equipment_replacement_escalation_percent = _float(
+            self.financial_replacement_escalation_var.get(), 0.0
+        )
+        self.config_model.optimization_parameters.electricity_rate_per_kwh = _float(
+            self.optimization_electricity_rate_var.get(), 0.15
+        )
 
     def _populate_surfaces(self) -> None:
         self.surface_tree.heading("area", text=f"Area ({area_unit(self.config_model)})")
@@ -7578,6 +7538,7 @@ class RainwaterTkApp(tk.Tk):
     def _update_rainfall_summary(self) -> None:
         if self.rainfall_df.empty:
             self.rainfall_summary_var.set("No rainfall file loaded")
+            self.rainfall_quality_var.set("Quality assessment unavailable")
             self._refresh_system_animation_dates()
             self._refresh_synthetic_hourly_rainfall_status()
             return
@@ -7588,8 +7549,43 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_summary_var.set(
             f"{len(self.rainfall_df):,} rainfall rows loaded ({start} to {end}){source}{hourly}"
         )
+        quality = self._rainfall_quality_assessment()
+        partial_years = ", ".join(str(year) for year in quality.partial_years)
+        quality_parts = [
+            f"Completeness: {quality.completeness_percent:.2f}% ({quality.completeness_rating}); "
+            f"{quality.observed_days:,} of {quality.expected_days:,} calendar days observed",
+            f"{quality.missing_days:,} missing day(s) in {len(quality.missing_periods):,} period(s)",
+        ]
+        if partial_years:
+            quality_parts.append(f"partial/incomplete year(s): {partial_years}")
+        if quality.duplicate_dates:
+            quality_parts.append(f"{quality.duplicate_dates:,} duplicate date(s)")
+        self.rainfall_quality_var.set("; ".join(quality_parts) + ".")
         self._refresh_system_animation_dates()
         self._refresh_synthetic_hourly_rainfall_status()
+
+    def _rainfall_quality_assessment(self) -> RainfallQualityAssessment:
+        return assess_rainfall_record(
+            self.rainfall_df,
+            known_missing_dates=self.config_model.rainfall_known_missing_dates,
+            antecedent_dry_days=self.config_model.first_flush_antecedent_dry_days,
+        )
+
+    def _rainfall_provenance_changed(self, _event: tk.Event | None = None) -> None:
+        cfg = self.config_model
+        cfg.rainfall_data_type = RAINFALL_DATA_TYPE_BY_LABEL.get(
+            self.rainfall_data_type_var.get(), "unclassified"
+        )
+        cfg.rainfall_temporal_resolution = next(
+            (
+                key
+                for key, label in RAINFALL_RESOLUTION_LABELS.items()
+                if label == self.rainfall_resolution_var.get()
+            ),
+            "unknown",
+        )
+        cfg.rainfall_timezone = self.rainfall_timezone_var.get().strip() or "Unspecified"
+        self._update_rainfall_summary()
 
     def _change_units(self) -> None:
         new_unit = self.unit_var.get()
@@ -8075,7 +8071,12 @@ class RainwaterTkApp(tk.Tk):
                 self._refresh_recent_projects_menu()
                 return
             self._set_progress(25, "Opening project: reading project file", "OpenProject.Horizontal.TProgressbar")
-            selected_store = SQLiteStore(str(selected_path))
+            selected_store = SQLiteStore(
+                str(selected_path),
+                backup_dir=project_backup_dir(
+                    selected_path, data_dir=self.application_data_dir
+                ),
+            )
             projects = selected_store.list_projects()
             if not projects:
                 self.analysis_progress_var.set(0)
@@ -8085,6 +8086,10 @@ class RainwaterTkApp(tk.Tk):
             self._set_progress(50, "Opening project: loading project data", "OpenProject.Horizontal.TProgressbar")
             self.project_file_path = selected_path
             self.store = selected_store
+            if selected_store.recovery_notice:
+                messagebox.showwarning(
+                    APP_TITLE, selected_store.recovery_notice, parent=self
+                )
             self._refresh_system_template_library()
             self.saved_project_var.set(projects[0])
             self._load_project_list()
@@ -8130,7 +8135,12 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "Project name cannot be blank.")
             return
         self.project_file_path = Path(path)
-        self.store = SQLiteStore(str(self.project_file_path))
+        self.store = SQLiteStore(
+            str(self.project_file_path),
+            backup_dir=project_backup_dir(
+                self.project_file_path, data_dir=self.application_data_dir
+            ),
+        )
         self._refresh_system_template_library()
         self.config_model.name = name
         self.project_name_var.set(name)
@@ -8162,6 +8172,18 @@ class RainwaterTkApp(tk.Tk):
                 "SaveProject.Horizontal.TProgressbar",
             )
             self.execution_log.info("Project", f"Saved project file {self.project_file_path.name}")
+            if self.store.last_backup_error:
+                self.execution_log.warning(
+                    "Project",
+                    "Project saved, but the automatic backup failed",
+                    details=self.store.last_backup_error,
+                )
+                messagebox.showwarning(
+                    APP_TITLE,
+                    "The project was saved, but its automatic backup failed:\n"
+                    f"{self.store.last_backup_error}",
+                    parent=self,
+                )
         except Exception as exc:  # noqa: BLE001
             self.analysis_progress_var.set(0)
             self.status_var.set("Project save failed")
@@ -8187,6 +8209,33 @@ class RainwaterTkApp(tk.Tk):
             for tank_size, rows in frame.groupby("ComparisonTankSizeGallons", sort=True)
         }
 
+    def _set_rainfall_provenance(
+        self,
+        *,
+        data_type: str,
+        temporal_resolution: str,
+        timezone: str,
+        timing_type: str,
+        known_missing_dates: object = (),
+    ) -> None:
+        cfg = self.config_model
+        cfg.rainfall_data_type = data_type
+        cfg.rainfall_temporal_resolution = temporal_resolution
+        cfg.rainfall_timezone = timezone
+        cfg.rainfall_timing_type = timing_type
+        cfg.rainfall_retrieved_at = dt.datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        cfg.rainfall_known_missing_dates = [
+            str(value) for value in (known_missing_dates or [])
+        ]
+        self.rainfall_data_type_var.set(rainfall_data_type_label(data_type))
+        self.rainfall_resolution_var.set(
+            RAINFALL_RESOLUTION_LABELS.get(temporal_resolution, "Unknown")
+        )
+        self.rainfall_timezone_var.set(timezone)
+        self.rainfall_timing_var.set(timing_type)
+
     def load_rainfall_csv(self) -> None:
         self._apply_form_to_model()
         path = filedialog.askopenfilename(
@@ -8203,8 +8252,15 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = rainfall
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
-            self.rainfall_source_label = None
-            self.config_model.rainfall_source_label = None
+            self.rainfall_source_label = f"CSV file: {Path(path).name}"
+            self.config_model.rainfall_source_label = self.rainfall_source_label
+            self._set_rainfall_provenance(
+                data_type="unclassified",
+                temporal_resolution="daily",
+                timezone="Unspecified",
+                timing_type="Daily totals; within-day timing not observed",
+                known_missing_dates=rainfall.attrs.get("known_missing_dates", []),
+            )
             self.config_model.weather_station_latitude = None
             self.config_model.weather_station_longitude = None
             self.curve_df = pd.DataFrame()
@@ -8243,6 +8299,11 @@ class RainwaterTkApp(tk.Tk):
             )
             self.use_synthetic_hourly_rainfall_var.set(True)
             self.config_model.use_synthetic_hourly_rainfall = True
+            self.config_model.rainfall_timing_type = (
+                "Synthetic hourly timing derived from daily totals using a "
+                f"Hyetos-style profile (seed {seed})"
+            )
+            self.rainfall_timing_var.set(self.config_model.rainfall_timing_type)
             self.curve_df = pd.DataFrame()
             self.results_df = pd.DataFrame()
             self.reliability_var.set("Reliability: --")
@@ -8497,6 +8558,13 @@ class RainwaterTkApp(tk.Tk):
                 f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
             )
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self._set_rainfall_provenance(
+                data_type="observed",
+                temporal_resolution="daily",
+                timezone="Station local time; UTC offset not supplied by ACIS import",
+                timing_type="Observed daily totals; within-day timing not observed",
+                known_missing_dates=weather_df.attrs.get("known_missing_dates", []),
+            )
             self.config_model.weather_station_latitude = None
             self.config_model.weather_station_longitude = None
             station_coordinates = self._station_coordinates(station)
@@ -8572,6 +8640,13 @@ class RainwaterTkApp(tk.Tk):
                 f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
             )
             self.config_model.rainfall_source_label = self.rainfall_source_label
+            self._set_rainfall_provenance(
+                data_type="observed",
+                temporal_resolution="daily",
+                timezone="Station local time; UTC offset not supplied by ECCC import",
+                timing_type="Observed daily totals; within-day timing not observed",
+                known_missing_dates=weather_df.attrs.get("known_missing_dates", []),
+            )
             self.config_model.weather_station_latitude = None
             self.config_model.weather_station_longitude = None
             station_coordinates = self._station_coordinates(station)
@@ -9384,103 +9459,66 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_cancel_requested = False
         self.cancel_analysis_button.state(["!disabled"])
         try:
-            tank_sizes = sorted(
-                {
-                    *(float(size) for size in range(cfg.graph_start_gal, cfg.graph_end_gal + 1, cfg.graph_step_gal)),
-                    float(cfg.selected_tank_size_gal),
-                    *(float(size) for size in cfg.comparison_tank_sizes_gal if include_comparisons),
-                }
-            )
-            total_parts = 2
             self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
             self.analysis_progress_var.set(0)
-            self.status_var.set(f"{analysis_label} running: Part A - reliability curve")
-            self.execution_log.info(
-                "Analysis", f"Calculating reliability curve for {len(tank_sizes)} tank sizes"
-            )
-            self.update_idletasks()
 
-            def update_curve_progress(index: int, total: int, _tank_size: float) -> None:
-                part_progress = index / total if total else 1.0
-                self.analysis_progress_var.set((part_progress / total_parts) * 100)
-                self.status_var.set(f"{analysis_label} running: Part A - reliability curve ({index}/{total})")
-                self.execution_log.debug(
-                    "Analysis", f"Reliability curve tank {index} of {total}: {_tank_size:g} gal"
-                )
+            def update_analysis_progress(event: AnalysisProgressEvent) -> None:
                 self.update()
+                if event.phase == "reliability_curve":
+                    part_progress = event.current / event.total if event.total else 1.0
+                    self.analysis_progress_var.set(part_progress * 50.0)
+                    self.status_var.set(
+                        f"{analysis_label} running: Part A - reliability curve "
+                        f"({event.current}/{event.total})"
+                    )
+                    self.execution_log.debug(
+                        "Analysis",
+                        f"Reliability curve tank {event.current} of {event.total}: "
+                        f"{float(event.tank_size_gallons or 0.0):g} gal",
+                    )
+                elif event.phase == "selected_tank":
+                    self.analysis_progress_var.set(50)
+                    self.status_var.set(
+                        f"{analysis_label} running: Part B - selected tank simulation"
+                    )
+                    self.execution_log.info("Analysis", "Simulating the selected tank")
+                else:
+                    self.status_var.set(
+                        f"{analysis_label} running: Part B - comparison tank simulation "
+                        f"({event.current}/{event.total})"
+                    )
+                    self.execution_log.debug(
+                        "Analysis",
+                        f"Comparison tank {event.current} of {event.total}: "
+                        f"{float(event.tank_size_gallons or 0.0):g} gal",
+                    )
+                self.update_idletasks()
 
             def cancellation_requested() -> bool:
                 self.update()
                 return self.analysis_cancel_requested
 
-            curve_df = reliability_curve(
+            outcome = AnalysisService().run(
                 cfg,
                 self.rainfall_df,
-                tank_sizes,
-                progress_callback=update_curve_progress,
+                include_comparisons=include_comparisons,
+                progress_callback=update_analysis_progress,
                 cancel_callback=cancellation_requested,
             )
-            self.analysis_progress_var.set(50)
-            self.status_var.set(f"{analysis_label} running: Part B - selected tank simulation")
-            self.execution_log.info("Analysis", "Simulating the selected tank")
-            self.update_idletasks()
-            results_df = simulate_tank(
-                cfg,
-                self.rainfall_df,
-                cfg.selected_tank_size_gal,
-                cancel_callback=cancellation_requested,
-            )
-            hourly_results_df = (
-                simulate_hourly_tank(
-                    cfg,
-                    self.rainfall_df,
-                    cfg.selected_tank_size_gal,
-                    cancel_callback=cancellation_requested,
-                )
-                if cfg.demand.hourly_schedule_enabled
-                else pd.DataFrame()
-            )
-            if cfg.demand.hourly_schedule_enabled:
-                self.execution_log.info("Analysis", "Completed hourly tank simulation")
-            comparison_results: dict[float, pd.DataFrame] = {}
-            comparison_sizes = (
-                sorted(set(float(size) for size in cfg.comparison_tank_sizes_gal))
-                if include_comparisons
-                else []
-            )
-            for index, tank_size in enumerate(comparison_sizes, start=1):
-                self.status_var.set(
-                    f"{analysis_label} running: Part B - comparison tank simulation "
-                    f"({index}/{len(comparison_sizes)})"
-                )
-                self.execution_log.debug(
-                    "Analysis",
-                    f"Comparison tank {index} of {len(comparison_sizes)}: {tank_size:g} gal",
-                )
-                self.update()
-                if self.analysis_cancel_requested:
-                    raise AnalysisCancelledError("Analysis cancelled by user.")
-                if abs(tank_size - cfg.selected_tank_size_gal) < 0.01:
-                    comparison_results[tank_size] = results_df.copy()
-                else:
-                    comparison_results[tank_size] = simulate_tank(
-                        cfg,
-                        self.rainfall_df,
-                        tank_size,
-                        cancel_callback=cancellation_requested,
-                    )
-            if self.analysis_cancel_requested:
-                raise AnalysisCancelledError("Analysis cancelled by user.")
-            self.curve_df = curve_df
-            self.results_df = results_df
-            self.hourly_results_df = hourly_results_df
-            self.comparison_results = comparison_results
+            self.curve_df = outcome.curve
+            self.results_df = outcome.selected_tank
+            self.hourly_results_df = outcome.hourly_selected_tank
+            self.comparison_results = outcome.comparison_tanks
             self._populate_comparison_tanks()
             self.analysis_progress_var.set(75)
             self.status_var.set(f"{analysis_label} running: Part B - drawing results")
             self.execution_log.info("Analysis", "Rendering analysis results")
             self.update_idletasks()
-            reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
+            reliability = (
+                float(self.results_df["ReliabilityPercent"].iloc[0])
+                if not self.results_df.empty
+                else 0.0
+            )
             self._set_selected_tank_reliability(reliability)
             self._populate_results()
             self.update_financial_analysis(show_errors=False)
@@ -9492,7 +9530,8 @@ class RainwaterTkApp(tk.Tk):
             self.status_var.set(f"{analysis_label} complete")
             self.execution_log.info(
                 "Analysis",
-                f"{analysis_label} completed in {time.perf_counter() - analysis_started:.2f} seconds",
+                f"{analysis_label} completed in "
+                f"{time.perf_counter() - analysis_started:.2f} seconds",
             )
         except AnalysisCancelledError:
             self.analysis_progress_var.set(0)
@@ -9619,7 +9658,7 @@ class RainwaterTkApp(tk.Tk):
             self.execution_log.error("Report", "Could not export HTML report", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not export HTML report:\n{exc}")
 
-    def _request_report_content(self, report_format: str) -> dict[str, object] | None:
+    def _request_report_content(self, report_format: str) -> ReportModel | None:
         self._apply_form_to_model()
         self.execution_log.debug("Report", f"Preparing {report_format} report content")
         if self.curve_df.empty:
@@ -9639,16 +9678,40 @@ class RainwaterTkApp(tk.Tk):
     def _default_report_filename(self, suffix: str) -> str:
         return _safe_project_file_name(self.config_model.name).replace(".db", f"_report{suffix}")
 
-    def _write_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
+    def _write_pdf_report(
+        self, pdf_path: Path, report: ReportModel | dict[str, object]
+    ) -> None:
+        report = ReportModel.from_payload(report)
         self.execution_log.debug("Report", "Building LaTeX report source")
         tex_path = pdf_path.with_suffix(".tex")
         latex = self._build_report_latex(report)
-        tex_path.write_text(latex, encoding="utf-8")
-        self._compile_latex_report(tex_path, pdf_path, report)
+        atomic_write_text(tex_path, latex)
+        temporary_pdf: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{pdf_path.name}.",
+                suffix=".tmp.pdf",
+                dir=pdf_path.parent,
+                delete=False,
+            ) as handle:
+                temporary_pdf = Path(handle.name)
+            self._compile_latex_report(tex_path, temporary_pdf, report)
+            if temporary_pdf.stat().st_size < 5 or temporary_pdf.read_bytes()[:5] != b"%PDF-":
+                raise ValueError("Generated report is not a valid PDF artifact.")
+            os.replace(temporary_pdf, pdf_path)
+        finally:
+            if temporary_pdf is not None and temporary_pdf.exists():
+                temporary_pdf.unlink()
 
-    def _write_html_report(self, html_path: Path, report: dict[str, object]) -> None:
+    def _write_html_report(
+        self, html_path: Path, report: ReportModel | dict[str, object]
+    ) -> None:
+        report = ReportModel.from_payload(report)
         self.execution_log.debug("Report", "Building HTML report document")
-        html_path.write_text(self._build_report_html(report), encoding="utf-8")
+        document = self._build_report_html(report)
+        if "<!doctype html>" not in document.casefold():
+            raise ValueError("Generated HTML report is missing its document declaration.")
+        atomic_write_text(html_path, document)
 
     def _new_report_preview_directory(self) -> Path:
         preview = tempfile.TemporaryDirectory(prefix="rwh-calculator-report-")
@@ -9760,20 +9823,8 @@ class RainwaterTkApp(tk.Tk):
             (item for item in self.station_options if str(item.get("sid", "")) == station_id),
             None,
         )
-        if station is None:
-            try:
-                station = (
-                    fetch_canadian_station_by_id(station_id)
-                    if cfg.country_code == "CAN" or "ECCC" in source.upper()
-                    else fetch_station_by_id(station_id)
-                )
-            except (OSError, TypeError, ValueError):
-                station = None
         coordinates = self._station_coordinates(station) if station is not None else None
-        if coordinates is None:
-            return None, None
-        cfg.weather_station_latitude, cfg.weather_station_longitude = coordinates
-        return coordinates
+        return coordinates if coordinates is not None else (None, None)
 
     @staticmethod
     def _average_annual_result_total(results: pd.DataFrame, column: str) -> float:
@@ -9907,6 +9958,9 @@ class RainwaterTkApp(tk.Tk):
             )
             output["NetAnnualSavings"] = None if pd.isna(row.get("NetAnnualSavings")) else float(row["NetAnnualSavings"])
             output["SimplePaybackYears"] = None if pd.isna(row.get("SimplePaybackYears")) else float(row["SimplePaybackYears"])
+            output["LifecycleNPV"] = (
+                None if pd.isna(row.get("LifecycleNPV")) else float(row["LifecycleNPV"])
+            )
             rows.append(output)
         return rows
 
@@ -9948,7 +10002,7 @@ class RainwaterTkApp(tk.Tk):
             }.items()
         }
 
-    def _build_report_content(self, metadata: dict[str, object]) -> dict[str, object]:
+    def _build_report_content(self, metadata: dict[str, object]) -> ReportModel:
         cfg = self.config_model
         station_latitude, station_longitude = self._report_weather_station_coordinates()
         monthly_demand, total_annual_demand = _report_demand_summary(self.results_df, cfg)
@@ -9959,37 +10013,32 @@ class RainwaterTkApp(tk.Tk):
         if not self.results_df.empty and "ReliabilityPercent" in self.results_df:
             selected_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
         params = cfg.financial_parameters
-        financial_results = calculate_financial_results(
-            self.results_df,
-            water_rate=params.water_rate,
-            sewer_rate=params.sewer_rate,
-            billing_unit=params.tariff_billing_unit,
-            sewer_eligible_percent=params.sewer_eligible_percent,
-            installed_cost=params.installed_cost,
-            incentives=params.incentives,
-            fixed_annual_maintenance=params.fixed_annual_maintenance,
-            maintenance_percent=params.annual_maintenance_percent,
-            analysis_period_years=params.analysis_period_years,
-        )
-        financial_configured = any(float(value) > 0.0 for value in (
-            params.water_rate, params.sewer_rate, params.installed_cost, params.incentives,
-            params.fixed_annual_maintenance, params.annual_maintenance_percent,
-        ))
+        financial_results = FinancialAnalysisService(cfg).calculate(self.results_df)
+        financial_configured = self._financial_inputs_configured()
         result_dates = pd.to_datetime(self.results_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
         rainfall_dates = pd.to_datetime(self.rainfall_df.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce").dropna()
         record_start = rainfall_dates.min().date().isoformat() if not rainfall_dates.empty else "Not available"
         record_end = rainfall_dates.max().date().isoformat() if not rainfall_dates.empty else "Not available"
-        unique_rainfall_dates = pd.DatetimeIndex(rainfall_dates.dt.normalize().unique())
-        expected_days = (
-            len(pd.date_range(unique_rainfall_dates.min(), unique_rainfall_dates.max(), freq="D"))
-            if len(unique_rainfall_dates) else 0
-        )
-        missing_days = max(expected_days - len(unique_rainfall_dates), 0)
+        rainfall_quality = self._rainfall_quality_assessment()
+        yearly_rainfall = []
+        for summary in rainfall_quality.yearly_summaries:
+            row = summary.to_dict()
+            row["precipitation"] = precip_to_display(summary.precipitation, cfg)
+            yearly_rainfall.append(row)
+        rainfall_events = []
+        for summary in sorted(
+            rainfall_quality.event_summaries,
+            key=lambda item: (-item.precipitation, item.start),
+        )[:10]:
+            row = summary.to_dict()
+            row["precipitation"] = precip_to_display(summary.precipitation, cfg)
+            rainfall_events.append(row)
+        event_depths = [item.precipitation for item in rainfall_quality.event_summaries]
         try:
             application_version = importlib_metadata.version("rainwater-calculator-standalone")
         except importlib_metadata.PackageNotFoundError:
             application_version = "development build"
-        return {
+        return ReportModel.from_payload({
             "metadata": dict(metadata),
             "notes": cfg.notes,
             "area_unit": area_unit(cfg),
@@ -10054,9 +10103,43 @@ class RainwaterTkApp(tk.Tk):
                 ),
                 "net_annual_savings": financial_results.net_annual_savings,
                 "simple_payback_years": financial_results.simple_payback_years,
+                "lifecycle_net_present_value": financial_results.lifecycle_net_present_value,
+                "internal_rate_of_return_percent": financial_results.internal_rate_of_return_percent,
                 "financial_configured": financial_configured,
             },
             "candidate_performance": self._report_candidate_rows(),
+            "recommendation_assumptions": {
+                "reliability_target_percent": cfg.recommendation_reliability_target_percent,
+                "marginal_gain_threshold": cfg.recommendation_marginal_gain_threshold,
+                "marginal_gain_unit": "reliability percentage points per 1,000 gal",
+            },
+            "recommendations": self._recommendation_report_rows(),
+            "review_warnings": self._design_review_warnings(),
+            "rainfall_quality": {
+                "completeness_percent": rainfall_quality.completeness_percent,
+                "completeness_rating": rainfall_quality.completeness_rating,
+                "expected_days": rainfall_quality.expected_days,
+                "observed_days": rainfall_quality.observed_days,
+                "missing_days": rainfall_quality.missing_days,
+                "duplicate_dates": rainfall_quality.duplicate_dates,
+                "invalid_precipitation_rows": rainfall_quality.invalid_precipitation_rows,
+                "partial_years": list(rainfall_quality.partial_years),
+                "missing_periods": [
+                    period.to_dict() for period in rainfall_quality.missing_periods
+                ],
+            },
+            "yearly_rainfall_summary": yearly_rainfall,
+            "rainfall_event_summary": {
+                "event_count": rainfall_quality.event_count,
+                "average_event_precipitation": precip_to_display(
+                    sum(event_depths) / len(event_depths) if event_depths else 0.0, cfg
+                ),
+                "largest_event_precipitation": precip_to_display(
+                    max(event_depths, default=0.0), cfg
+                ),
+                "largest_events": rainfall_events,
+                "antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
+            },
             "water_balance": self._report_water_balance(),
             "end_use_rows": self._report_end_use_rows(),
             "financial_summary": {
@@ -10071,6 +10154,20 @@ class RainwaterTkApp(tk.Tk):
                 "fixed_annual_maintenance": params.fixed_annual_maintenance,
                 "annual_maintenance_percent": params.annual_maintenance_percent,
                 "analysis_period_years": params.analysis_period_years,
+                "discount_rate_percent": params.discount_rate_percent,
+                "utility_rate_escalation_percent": params.utility_rate_escalation_percent,
+                "maintenance_escalation_percent": params.maintenance_escalation_percent,
+                "electricity_rate_per_kwh": cfg.optimization_parameters.electricity_rate_per_kwh,
+                "electricity_escalation_percent": params.electricity_escalation_percent,
+                "pump_power_kw": params.pump_power_kw,
+                "pump_flow_rate": volume_to_display(
+                    params.pump_flow_rate_gallons_per_hour, cfg
+                ),
+                "equipment_replacement_cost": params.equipment_replacement_cost,
+                "equipment_replacement_interval_years": params.equipment_replacement_interval_years,
+                "equipment_replacement_escalation_percent": (
+                    params.equipment_replacement_escalation_percent
+                ),
                 "average_annual_supply": volume_to_display(financial_results.average_annual_supplied_gallons, cfg),
                 "average_annual_sewer_eligible_supply": volume_to_display(
                     financial_results.average_annual_sewer_eligible_supplied_gallons, cfg
@@ -10079,28 +10176,55 @@ class RainwaterTkApp(tk.Tk):
                 "sewer_savings": financial_results.annual_sewer_savings,
                 "gross_annual_savings": financial_results.gross_annual_savings,
                 "annual_maintenance_cost": financial_results.annual_maintenance_cost,
+                "average_annual_pump_energy_kwh": financial_results.average_annual_pump_energy_kwh,
+                "annual_pump_energy_cost": financial_results.annual_pump_energy_cost,
                 "net_annual_savings": financial_results.net_annual_savings,
                 "net_installed_cost": financial_results.net_installed_cost,
                 "simple_payback_years": financial_results.simple_payback_years,
                 "analysis_period_net_benefit": financial_results.analysis_period_net_benefit,
-                "methodology": "Simple-rate, undiscounted estimate based only on simulated rainwater delivered to demand.",
+                "total_replacement_cost": financial_results.total_replacement_cost,
+                "lifecycle_net_present_value": financial_results.lifecycle_net_present_value,
+                "internal_rate_of_return_percent": financial_results.internal_rate_of_return_percent,
+                "discounted_payback_years": financial_results.discounted_payback_years,
+                "annual_cash_flows": list(financial_results.annual_cash_flows),
+                "methodology": (
+                    "Year-end discounted cash flow based on simulated rainwater delivered to demand, "
+                    "with configured utility, maintenance, and electricity escalation plus recurring "
+                    "equipment replacement. Tariff tiers and financing are excluded."
+                ),
             },
             "provenance": {
                 "rainfall_source": self.rainfall_source_label or cfg.rainfall_source_label or "Imported rainfall data",
                 "record_start": record_start,
                 "record_end": record_end,
-                "calendar_years": int(rainfall_dates.dt.year.nunique()) if not rainfall_dates.empty else 0,
-                "observations": len(unique_rainfall_dates),
-                "missing_calendar_days": missing_days,
-                "rainfall_resolution": "Daily",
+                "calendar_years": len(rainfall_quality.yearly_summaries),
+                "observations": rainfall_quality.observed_days,
+                "missing_calendar_days": rainfall_quality.missing_days,
+                "incomplete_calendar_years": len(rainfall_quality.partial_years),
+                "rainfall_completeness_percent": rainfall_quality.completeness_percent,
+                "rainfall_completeness_rating": rainfall_quality.completeness_rating,
+                "rainfall_data_type": rainfall_data_type_label(cfg.rainfall_data_type),
+                "rainfall_data_type_code": cfg.rainfall_data_type,
+                "rainfall_resolution": RAINFALL_RESOLUTION_LABELS.get(
+                    cfg.rainfall_temporal_resolution, "Unknown"
+                ),
+                "rainfall_timezone": cfg.rainfall_timezone,
+                "rainfall_timing_metadata": cfg.rainfall_timing_type,
+                "rainfall_retrieved_at": cfg.rainfall_retrieved_at or "Not recorded",
                 "simulation_timestep": "Daily mass balance",
-                "rainfall_timing_assumption": "Each daily rainfall total is applied within that simulated day; hourly demand analysis places it after hour 23.",
+                "rainfall_timing_assumption": (
+                    "Synthetic hourly timing is used for hourly analysis."
+                    if cfg.use_synthetic_hourly_rainfall and has_hourly_rainfall(self.rainfall_df)
+                    else "Each daily rainfall total is applied within that simulated day; "
+                    "hourly demand analysis places it after hour 23."
+                ),
                 "initial_tank_fill_percent": cfg.tank_parameters.initial_fill_percent,
                 "municipal_backup": "Enabled" if cfg.system_parameters.municipal_backup_enabled else "Disabled",
                 "filter_recovery_percent": cfg.system_parameters.filter_recovery_percent,
                 "system_type": cfg.system_type,
                 "application_version": application_version,
                 "algorithm_version": ANALYSIS_ALGORITHM_VERSION,
+                "report_schema_version": REPORT_SCHEMA_VERSION,
                 "analysis_input_signature": cfg.analysis_input_signature or "Not stored",
                 "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 "result_years": int(result_dates.dt.year.nunique()) if not result_dates.empty else 0,
@@ -10113,7 +10237,7 @@ class RainwaterTkApp(tk.Tk):
             "weather_station_latitude": station_latitude,
             "weather_station_longitude": station_longitude,
             "multitank_charts": self._multitank_report_chart_data(),
-        }
+        })
 
     def _multitank_report_chart_data(self) -> list[dict[str, object]]:
         if not self.config_model.multitank_comparison_enabled:
@@ -10215,1234 +10339,19 @@ class RainwaterTkApp(tk.Tk):
             },
         ]
 
-    def _build_report_latex(self, report: dict[str, object]) -> str:
-        metadata = report["metadata"]
-        area = report["area_unit"]
-        volume = report["volume_unit"]
-        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
-        surface_rows = "\n".join(
-            _latex_row(
-                surface["name"],
-                f"{surface['area']:,.2f}",
-                f"{surface['runoff_coefficient']:.2f}",
-                f"{surface.get('first_flush_depth', 0.0):.3f}",
-            )
-            for surface in report["surfaces"]
-        )
-        if not surface_rows:
-            surface_rows = _latex_row("No collection surfaces", "0.00", "0.000", "0.000")
-        demand_rows = "\n".join(
-            _latex_row(
-                report["monthly_demand"][index]["month"],
-                f"{report['monthly_demand'][index]['demand_per_day']:,.0f}",
-                f"{report['monthly_demand'][index]['demand_per_month']:,.0f}",
-                report["monthly_demand"][index + 6]["month"],
-                f"{report['monthly_demand'][index + 6]['demand_per_day']:,.0f}",
-                f"{report['monthly_demand'][index + 6]['demand_per_month']:,.0f}",
-            )
-            for index in range(6)
-        )
+    def _build_report_latex(
+        self, report: ReportModel | dict[str, object]
+    ) -> str:
+        return ReportRenderingService().latex(report)
 
-        coordinates = "\n".join(
-            f"({_latex_number(point['tank_size'])},{_latex_number(point['reliability'])})"
-            for point in report["curve"]
-        )
-        selected_reliability = "--"
-        if report["selected_reliability"] is not None:
-            selected_reliability = f"{report['selected_reliability']:.2f}\\%"
-        author_line = ""
-        if metadata.get("author_name", "").strip():
-            author_line = rf"\noindent\textbf{{Produced by:}} {_latex_escape(metadata['author_name'])}\par\medskip"
-        notes_latex = _latex_escape(report.get("notes", "").strip() or "No notes provided.")
-        notes_latex = notes_latex.replace("\n\n", r"\par\medskip ").replace("\n", r"\par ")
-        selected_marker = ""
-        if report["selected_reliability"] is not None:
-            selected_marker = rf"""
-\addplot+[only marks, mark=o, red, mark size=7pt, very thick] coordinates {{
-({_latex_number(report['selected_tank_size'])},{_latex_number(report['selected_reliability'])})
-}};
-\addlegendimage{{only marks, mark=o, red, mark size=5pt, very thick}}
-\addlegendentry{{Primary tank size}}
-"""
-        yearly_met_coordinates = " ".join(
-            f"({_latex_number(row['year'])},{_latex_number(row['met_percent'])})"
-            for row in report["yearly_reliability"]
-        )
-        yearly_unmet_coordinates = " ".join(
-            f"({_latex_number(row['year'])},{_latex_number(row['unmet_percent'])})"
-            for row in report["yearly_reliability"]
-        )
-        yearly_average_label = "Average"
-        yearly_average_reliability = float(report["selected_reliability"] or 0.0)
-        yearly_marker_coordinates = " ".join(
-            [
-                *(
-                    f"({_latex_number(row['year'])},{_latex_number(row['met_percent'])})"
-                    for row in report["yearly_reliability"]
-                ),
-                f"({yearly_average_label},{_latex_number(yearly_average_reliability)})",
-            ]
-        )
-        yearly_met_coordinates += f" ({yearly_average_label},0)"
-        yearly_unmet_coordinates += f" ({yearly_average_label},0)"
-        yearly_symbolic_coordinates = ",".join(
-            [*(str(int(row["year"])) for row in report["yearly_reliability"]), yearly_average_label]
-        )
-        distribution_coordinates = " ".join(
-            f"({_latex_number(index + 1)},{_latex_number(row['count'])})"
-            for index, row in enumerate(report["tank_level_distribution"])
-        )
-        distribution_labels = ",".join(
-            _latex_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
-            for row in report["tank_level_distribution"]
-        )
-        multitank_latex = ""
-        if report.get("include_multitank_charts"):
-            for chart in report.get("multitank_charts", []):
-                if chart.get("type") == "yearly_stacked":
-                    yearly_rows = chart["yearly_reliability"]
-                    symbolic = ",".join(
-                        [*(str(int(row["year"])) for row in yearly_rows), "Average"]
-                    )
-                    met_points = " ".join(
-                        [
-                            *(f"({int(row['year'])},{_latex_number(row['met_percent'])})" for row in yearly_rows),
-                            "(Average,0)",
-                        ]
-                    )
-                    unmet_points = " ".join(
-                        [
-                            *(f"({int(row['year'])},{_latex_number(row['unmet_percent'])})" for row in yearly_rows),
-                            "(Average,0)",
-                        ]
-                    )
-                    marker_points = " ".join(
-                        [
-                            *(f"({int(row['year'])},{_latex_number(row['met_percent'])})" for row in yearly_rows),
-                            f"(Average,{_latex_number(chart['selected_reliability'])})",
-                        ]
-                    )
-                    multitank_latex += rf"""
-\clearpage
-\section{{{_latex_escape(chart['title'])}}}
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[
-    width=6.6in,height=3.8in,ybar stacked,ymin=0,ymax=100,
-    ylabel={{Days (\%)}},xlabel={{Year}},symbolic x coords={{{symbolic}}},xtick=data,
-    label style={{font=\bfseries\normalsize}},
-    x tick label style={{rotate=45,anchor=east,font=\scriptsize}},
-    legend style={{at={{(0.5,-0.25)}},anchor=north,legend columns=3}},grid=major,
-]
-\addplot+[fill=green!65!black,draw=green!45!black] coordinates {{{met_points}}};
-\addlegendentry{{Demand met}}
-\addplot+[fill=red!65,draw=red!60!black] coordinates {{{unmet_points}}};
-\addlegendentry{{Demand not met}}
-\addplot+[only marks,mark=*,mark size=3pt,fill=yellow!80!orange,draw=yellow!40!black]
-coordinates {{{marker_points}}};
-\addlegendentry{{Tank reliability}}
-\end{{axis}}
-\end{{tikzpicture}}
-\par\small The Average marker reports tank reliability across {len(yearly_rows)} analyzed years.
-\end{{center}}
-"""
-                    continue
-                plots = []
-                legends = []
-                for series in chart["series"]:
-                    coordinates_text = " ".join(
-                        f"({_latex_number(x_value)},{_latex_number(y_value)})"
-                        for x_value, y_value in series["points"]
-                    )
-                    plots.append(rf"\addplot+[thick, no marks] coordinates {{{coordinates_text}}};")
-                    legends.append(_latex_escape(series["label"]))
-                multitank_latex += rf"""
-\clearpage
-\section{{{_latex_escape(chart['title'])}}}
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[
-    width=6.6in,
-    height=3.8in,
-    xlabel={{{_latex_escape(chart['x_label'])}}},
-    ylabel={{{_latex_escape(chart['y_label'])}}},
-    label style={{font=\bfseries\normalsize}},
-    ymin=0,
-    grid=major,
-    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
-]
-{chr(10).join(plots)}
-\legend{{{','.join(legends)}}}
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-"""
+    def _build_report_html(
+        self, report: ReportModel | dict[str, object]
+    ) -> str:
+        return ReportRenderingService().html(report)
 
-        system_visualization_latex = ""
-        if report.get("include_system_visualization"):
-            system_type = _latex_escape(report.get("system_type", "Direct system"))
-            if report.get("system_type") == "Indirect system":
-                equipment = r"""
-\draw (2.2,1.0) -- (2.9,1.0); \draw (3.25,1.0) circle (0.35);
-\draw (3.60,1.0) -- (3.075,1.303) -- (3.075,0.697) -- cycle;
-\node[below] at (3.25,0.55) {Filtration pump};
-\draw (3.60,1.0) -- (4.2,1.0); \draw (4.2,0.7) rectangle (5.5,1.3);
-\node at (4.85,1.0) {Filtration}; \draw (5.5,1.0) -- (6.1,1.0);
-\draw (6.1,0.35) rectangle (7.7,1.65); \node at (6.9,1.4) {Buffer tank};
-\draw[->,>=stealth] (6.9,2.45) -- (6.9,1.65); \node[left] at (6.85,2.1) {Municipal water backup};
-\draw (7.7,1.0) -- (7.9,1.0); \draw (8.2,1.0) circle (0.3);
-\draw (8.5,1.0) -- (8.05,1.26) -- (8.05,0.74) -- cycle;
-\node[below] at (8.2,0.6) {Booster pump};
-\draw[->,>=stealth] (8.5,1.0) -- (9.7,1.0); \node[above] at (9.1,1.0) {Flow to end-uses};
-"""
-            else:
-                equipment = r"""
-\draw (2.2,1.0) -- (3.2,1.0); \draw (3.55,1.0) circle (0.35);
-\draw (3.90,1.0) -- (3.3,1.18) -- (3.3,0.82) -- cycle;
-\node[below] at (3.55,0.55) {Distribution pump};
-\draw[->,>=stealth] (3.90,1.0) -- (7.2,1.0); \node[above] at (5.55,1.0) {Flow directly to end-uses};
-"""
-            system_visualization_latex = rf"""
-\section{{System Visualization - {system_type}}}
-\begin{{center}}\begin{{tikzpicture}}[line width=1pt,font=\small]
-\draw (0,0.25) rectangle (2.2,1.75); \node[font=\bfseries] at (1.1,1.48) {{Primary tank}};
-\node at (1.1,1.22) {{{_latex_number(report['selected_tank_size'])} {_latex_escape(volume)}}};
-\draw[domain=0:2.2,samples=45,smooth] plot (\x,{{0.92+0.05*sin(720*\x)}});
-{equipment}\end{{tikzpicture}}\end{{center}}
-"""
-
-        return rf"""\documentclass[11pt]{{article}}
-\usepackage[margin=0.75in]{{geometry}}
-\usepackage{{booktabs}}
-\usepackage{{pgfplots}}
-\usepackage{{longtable}}
-\usepackage{{array}}
-\usepackage[hidelinks]{{hyperref}}
-\pgfplotsset{{compat=1.18}}
-
-\title{{{_latex_escape(report_title)}}}
-\date{{}}
-
-\begin{{document}}
-\maketitle
-{author_line}
-\tableofcontents
-\newpage
-
-\section{{Project Information}}
-\begin{{tabular}}{{@{{}}p{{1.6in}}p{{4.8in}}@{{}}}}
-\textbf{{Client name}} & {_latex_escape(metadata["client_name"])} \\
-\textbf{{Date}} & {_latex_escape(metadata["date"])} \\
-\textbf{{Location}} & {_latex_escape(metadata["location"])} \\
-\textbf{{Project name}} & {_latex_escape(metadata["project_name"])} \\
-\textbf{{End-uses of water}} & {_latex_escape(metadata["end_uses"])} \\
-\textbf{{Average annual precipitation}} & {_latex_number(report['average_annual_precipitation'])} {_latex_escape(report['precipitation_unit'])} \\
-\textbf{{Precipitation basis}} & {_latex_escape(report['precipitation_basis'])} \\
-\textbf{{Selected tank size}} & {_latex_number(report['selected_tank_size'])} {_latex_escape(report['volume_unit'])} \\
-\textbf{{Selected tank reliability}} & {selected_reliability} \\
-\end{{tabular}}
-
-\section{{Notes}}
-{notes_latex}
-
-\section{{Surface Area Summary}}
-\begin{{longtable}}{{@{{}}p{{2.4in}}rrr@{{}}}}
-\toprule
-Surface & Area ({_latex_escape(area)}) & Runoff coefficient & First flush ({_latex_escape(report['precipitation_unit'])}) \\
-\midrule
-{surface_rows}
-\bottomrule
-\end{{longtable}}
-
-\noindent First-flush event dry-period threshold: {_latex_number(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0)))} {_latex_escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0))}. Diverted volume: {_latex_number(report.get('first_flush_loss', 0.0))} {_latex_escape(volume)}.
-
-\section{{Tank Summary}}
-\begin{{tabular}}{{@{{}}lr@{{}}}}
-\toprule
-Tank property & Value \\
-\midrule
-Size & {_latex_number(report['selected_tank_size'])} {_latex_escape(volume)} \\
-\bottomrule
-\end{{tabular}}
-
-{system_visualization_latex}
-
-\section{{Demand Summary}}
-\small
-\begin{{tabular}}{{@{{}}lrrlrr@{{}}}}
-\toprule
-Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/month) & Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/month) \\
-\midrule
-{demand_rows}
-\midrule
-\addlinespace[1pt]
-\midrule
-\multicolumn{{5}}{{r}}{{\textbf{{Total Annual Demand}}}} & \textbf{{{_latex_escape(f"{float(report['total_annual_demand']):,.0f}")} {_latex_escape(volume)}}} \\
-\bottomrule
-\end{{tabular}}
-\normalsize
-
-\section{{Reliability Curve}}
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[
-    width=6.6in,
-    height=3.8in,
-    xlabel={{Tank size ({_latex_escape(volume)})}},
-    ylabel={{Reliability (\%)}},
-    label style={{font=\bfseries\normalsize}},
-    ymin=0,
-    ymax=100,
-    grid=major,
-    mark=*,
-    legend style={{at={{(0.5,-0.22)}}, anchor=north}},
-]
-\addplot+[blue, thick] coordinates {{
-{coordinates}
-}};
-{selected_marker}
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-
-\section{{Yearly Demand Reliability - {_latex_number(report['selected_tank_size'])} {_latex_escape(volume)} tank}}
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[
-    width=6.6in,
-    height=3.8in,
-    ybar stacked,
-    ymin=0,
-    ymax=100,
-    ylabel={{Days (\%)}},
-    xlabel={{Year}},
-    label style={{font=\bfseries\normalsize}},
-    symbolic x coords={{{yearly_symbolic_coordinates}}},
-    xtick=data,
-    x tick label style={{rotate=45, anchor=east, font=\scriptsize}},
-    legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
-    grid=major,
-]
-\addplot+[fill=green!65!black, draw=green!45!black] coordinates {{{yearly_met_coordinates}}};
-\addlegendentry{{Demand met}}
-\addplot+[fill=red!65, draw=red!60!black] coordinates {{{yearly_unmet_coordinates}}};
-\addlegendentry{{Demand not met}}
-\addplot+[only marks, mark=*, mark size=3pt, fill=yellow!80!orange, draw=yellow!40!black]
-coordinates {{{yearly_marker_coordinates}}};
-\addlegendentry{{Tank reliability}}
-\end{{axis}}
-\end{{tikzpicture}}
-\par\small The Average marker reports tank reliability across {len(report["yearly_reliability"])} analyzed years.
-\end{{center}}
-
-\section{{Tank Level Distribution}}
-\begin{{center}}
-\begin{{tikzpicture}}
-\begin{{axis}}[
-    width=6.6in,
-    height=3.8in,
-    ybar,
-    ymin=0,
-    ylabel={{Days}},
-    xlabel={{Tank level range ({_latex_escape(volume)})}},
-    label style={{font=\bfseries\normalsize}},
-    xtick={{1,...,6}},
-    xticklabels={{{distribution_labels}}},
-    x tick label style={{rotate=30, anchor=east, font=\scriptsize}},
-    nodes near coords,
-    grid=major,
-]
-\addplot+[fill=green!65!black, draw=green!45!black] coordinates {{{distribution_coordinates}}};
-\end{{axis}}
-\end{{tikzpicture}}
-\end{{center}}
-
-{multitank_latex}
-\end{{document}}
-"""
-
-    @staticmethod
-    def _build_system_visualization_html(report: dict[str, object]) -> str:
-        if not report.get("include_system_visualization"):
-            return ""
-        system_type = str(report.get("system_type", "Direct system"))
-        size_label = html.escape(
-            f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}", quote=True
-        )
-        if system_type == "Indirect system":
-            equipment = """
-<line x1="250" y1="130" x2="315" y2="130"/><circle cx="350" cy="130" r="35"/>
-<polygon points="385,130 332.5,160.31 332.5,99.69"/><text x="350" y="185">Filtration pump</text>
-<line x1="385" y1="130" x2="445" y2="130"/><rect x="445" y="100" width="130" height="60"/>
-<text x="510" y="135">Filtration</text><line x1="575" y1="130" x2="640" y2="130"/>
-<rect x="640" y="45" width="160" height="130"/><text x="720" y="72">Buffer tank</text>
-<path d="M642 105 q7 -7 14 0 q7 7 14 0 q7 -7 14 0 q7 7 14 0 q7 -7 14 0 q7 7 14 0 q7 -7 14 0 q7 7 14 0 q7 -7 14 0 q7 7 14 0"/>
-<line x1="720" y1="4" x2="720" y2="45"/><polygon points="720,45 711,30 729,30"/>
-<text x="610" y="18">Municipal water backup</text>
-<line x1="800" y1="130" x2="812" y2="130"/><circle cx="840" cy="130" r="28"/>
-<polygon points="868,130 826,154.25 826,105.75"/><text x="840" y="190">Booster pump</text>
-<line x1="868" y1="130" x2="970" y2="130"/><polygon points="990,130 970,119 970,141"/>
-<text x="930" y="108">To end-uses</text>"""
-        else:
-            equipment = """
-<line x1="250" y1="130" x2="385" y2="130"/><circle cx="420" cy="130" r="35"/>
-<polygon points="455,130 390,148 390,112"/><text x="420" y="185">Distribution pump</text>
-<line x1="455" y1="130" x2="720" y2="130"/><polygon points="740,130 720,119 720,141"/>
-<text x="600" y="108">Flow directly to end-uses</text>"""
-        return f'''<section id="system-visualization"><h2>System visualization - {html.escape(system_type)}</h2>
-<div class="system-visualization"><svg viewBox="0 0 1000 220" role="img" aria-label="{html.escape(system_type)} schematic">
-<g fill="none" stroke="#111" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
-<rect x="30" y="25" width="220" height="150"/><path d="M32 105 q8 -7 16 0 q8 7 16 0 q8 -7 16 0 q8 7 16 0 q8 -7 16 0 q8 7 16 0 q8 -7 16 0 q8 7 16 0 q8 -7 16 0 q8 7 16 0 q8 -7 16 0 q8 7 16 0 q8 -7 16 0"/>{equipment}</g>
-<g fill="#111" font-family="Arial,sans-serif" font-size="15" font-weight="700" text-anchor="middle">
-<text x="140" y="52">Primary tank</text><text x="140" y="74" font-size="12" font-weight="400">Primary analysis size: {size_label}</text></g>
-</svg></div></section>'''
-
-    def _build_report_html(self, report: dict[str, object]) -> str:
-        metadata = report["metadata"]
-        surfaces = report["surfaces"]
-        curve = report["curve"]
-        escape = lambda value: html.escape(str(value), quote=True)
-        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
-        multitank_html = RainwaterTkApp._build_multitank_report_html(report)
-        system_visualization_html = RainwaterTkApp._build_system_visualization_html(report)
-        station_latitude = report.get("weather_station_latitude")
-        station_longitude = report.get("weather_station_longitude")
-        project_latitude = report.get("project_latitude")
-        project_longitude = report.get("project_longitude")
-        project_location_map_html = ""
-        map_points: list[dict[str, object]] = []
-        if station_latitude is not None and station_longitude is not None:
-            map_points.append({
-                    "latitude": float(station_latitude),
-                    "longitude": float(station_longitude),
-                    "color": "#d71920",
-                    "label": "Weather station",
-                })
-        if project_latitude is not None and project_longitude is not None:
-            map_points.append(
-                {
-                    "latitude": float(project_latitude),
-                    "longitude": float(project_longitude),
-                    "color": "#1565c0",
-                    "label": "Project location",
-                }
-            )
-        if map_points:
-            project_legend = (
-                '<span class="project-star">★</span> Project location '
-                if project_latitude is not None and project_longitude is not None else ""
-            )
-            station_legend = (
-                '<span class="station-star">★</span> Weather station'
-                if station_latitude is not None and station_longitude is not None else ""
-            )
-            project_location_map_html = (
-                '<div id="project-location-map" class="location-map" '
-                f'data-points="{escape(json.dumps(map_points))}" '
-                'aria-label="Project and weather-station location map"></div>'
-                f'<div class="map-legend">{project_legend}{station_legend}</div>'
-            )
-        multitank_toc_html = "".join(
-            f'<li><a href="#multitank-chart-{index}">{escape(chart.get("title", f"Multitank chart {index}"))}</a></li>'
-            for index, chart in enumerate(report.get("multitank_charts", []), start=1)
-        ) if report.get("include_multitank_charts") else ""
-        surface_rows = "".join(
-            f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
-            f"<td>{surface['runoff_coefficient']:.2f}</td>"
-            f"<td>{float(surface.get('first_flush_depth', 0.0)):.3f}</td></tr>"
-            for surface in surfaces
-        ) or '<tr><td>No collection surfaces</td><td>0.00</td><td>0.000</td><td>0.000</td></tr>'
-        demand_rows = "".join(
-            f"<tr><td>{escape(report['monthly_demand'][index]['month'])}</td>"
-            f"<td>{float(report['monthly_demand'][index]['demand_per_day']):,.0f}</td>"
-            f"<td>{float(report['monthly_demand'][index]['demand_per_month']):,.0f}</td>"
-            f"<td>{escape(report['monthly_demand'][index + 6]['month'])}</td>"
-            f"<td>{float(report['monthly_demand'][index + 6]['demand_per_day']):,.0f}</td>"
-            f"<td>{float(report['monthly_demand'][index + 6]['demand_per_month']):,.0f}</td></tr>"
-            for index in range(6)
-        )
-
-        chart_width, chart_height = 900.0, 420.0
-        left, right, top, bottom = 72.0, 24.0, 28.0, 62.0
-        plot_width = chart_width - left - right
-        plot_height = chart_height - top - bottom
-        x_values = [float(point["tank_size"]) for point in curve]
-        if report["selected_reliability"] is not None:
-            x_values.append(float(report["selected_tank_size"]))
-        x_min, x_max = min(x_values), max(x_values)
-        if x_min == x_max:
-            x_max = x_min + 1
-
-        def chart_x(value: float) -> float:
-            return left + ((value - x_min) / (x_max - x_min)) * plot_width
-
-        def chart_y(value: float) -> float:
-            return top + (1 - max(0.0, min(value, 100.0)) / 100.0) * plot_height
-
-        polyline = " ".join(
-            f"{chart_x(float(point['tank_size'])):.2f},{chart_y(float(point['reliability'])):.2f}"
-            for point in curve
-        )
-        circles = "".join(
-            f'<circle cx="{chart_x(float(point["tank_size"])):.2f}" cy="{chart_y(float(point["reliability"])):.2f}" r="4">'
-            f'<title>{float(point["tank_size"]):,.0f} {escape(report["volume_unit"])}: '
-            f'{float(point["reliability"]):.2f}% reliability</title></circle>'
-            for point in curve
-        )
-        selected_marker = ""
-        if report["selected_reliability"] is not None:
-            selected_x = chart_x(float(report["selected_tank_size"]))
-            selected_y = chart_y(float(report["selected_reliability"]))
-            selected_marker = (
-                f'<circle class="selected-tank" cx="{selected_x:.2f}" cy="{selected_y:.2f}" r="10">'
-                f'<title>Selected tank: {float(report["selected_tank_size"]):,.0f} '
-                f'{escape(report["volume_unit"])} at {float(report["selected_reliability"]):.2f}% reliability</title>'
-                "</circle>"
-            )
-        y_grid = "".join(
-            f'<line x1="{left}" y1="{chart_y(value):.2f}" x2="{left + plot_width}" y2="{chart_y(value):.2f}" />'
-            f'<text x="{left - 14}" y="{chart_y(value) + 4:.2f}" text-anchor="end">{value}</text>'
-            for value in range(0, 101, 20)
-        )
-        x_ticks = "".join(
-            f'<line x1="{chart_x(value):.2f}" y1="{top}" x2="{chart_x(value):.2f}" y2="{top + plot_height}" />'
-            f'<text x="{chart_x(value):.2f}" y="{top + plot_height + 26}" text-anchor="middle">{value:,.0f}</text>'
-            for value in [x_min + (x_max - x_min) * index / 4 for index in range(5)]
-        )
-        selected = report["selected_reliability"]
-        selected_text = "--" if selected is None else f"{selected:.2f}%"
-        author_html = ""
-        if metadata.get("author_name", "").strip():
-            author_html = f'<p class="author">Produced by {escape(metadata["author_name"])}</p>'
-        info_rows = "".join(
-            f'<div class="fact"><dt>{escape(label)}</dt><dd>{escape(value or "Not specified")}</dd></div>'
-            for label, value in [
-                ("Client name", metadata["client_name"]),
-                ("Date", metadata["date"]),
-                ("Location", metadata["location"]),
-                ("Project name", metadata["project_name"]),
-                ("End-uses of water", metadata["end_uses"]),
-                (
-                    "Average annual precipitation",
-                    f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
-                ),
-                ("Precipitation basis", report["precipitation_basis"]),
-                (
-                    "Selected tank size",
-                    f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
-                ),
-                ("Selected tank reliability", selected_text),
-            ]
-        )
-        notes_html = escape(report.get("notes", "").strip() or "No notes provided.")
-        summary = report.get("executive_summary", {})
-        summary_payback = summary.get("simple_payback_years")
-        summary_financial = (
-            f'{escape(report.get("financial_summary", {}).get("currency", "USD"))} '
-            f'{float(summary.get("net_annual_savings", 0.0)):,.2f}/year; '
-            + (f'{float(summary_payback):,.1f} years payback' if summary_payback is not None else 'payback not achieved')
-            if summary.get("financial_configured") else "Financial assumptions not configured"
-        )
-        executive_cards = "".join(
-            f'<div class="metric"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
-            for label, value in (
-                ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
-                ("Reliability", selected_text),
-                ("Average annual supply", f'{float(summary.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Municipal makeup", f'{float(summary.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("System unmet demand", f'{float(summary.get("average_annual_system_unmet", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Overflow", f'{float(summary.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("First-flush loss", f'{float(summary.get("average_annual_first_flush_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Treatment loss", f'{float(summary.get("average_annual_treatment_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Financial result", summary_financial),
-            )
-        )
-
-        candidate_columns = (
-            ("tank_size", "Tank size", "number"), ("reliability", "Reliability", "number"),
-            ("RainwaterSuppliedGallons", "Supply/year", "number"),
-            ("MunicipalMakeupGallons", "Municipal makeup/year", "number"),
-            ("SystemUnmetDemandGallons", "System unmet/year", "number"),
-            ("OverflowGallons", "Overflow/year", "number"),
-            ("FirstFlushLossGallons", "First flush/year", "number"),
-            ("TreatmentLossGallons", "Treatment loss/year", "number"),
-            ("FinalStorageGallons", "Final storage", "number"),
-            ("NetAnnualSavings", "Net savings/year", "number"),
-            ("SimplePaybackYears", "Payback", "number"),
-        )
-        candidate_head = "".join(
-            f'<th><button class="sort-button" type="button" data-column="{index}" data-sort="{kind}">{escape(label)}</button></th>'
-            for index, (_key, label, kind) in enumerate(candidate_columns)
-        )
-        candidate_rows = ""
-        currency = str(report.get("financial_summary", {}).get("currency", "USD"))
-        for candidate in report.get("candidate_performance", []):
-            cells: list[str] = []
-            for key, _label, _kind in candidate_columns:
-                value = candidate.get(key)
-                if value is None:
-                    display, sort_value = "--", ""
-                elif key == "reliability":
-                    display, sort_value = f"{float(value):.1f}%", str(float(value))
-                elif key == "NetAnnualSavings":
-                    display, sort_value = f"{currency} {float(value):,.2f}", str(float(value))
-                elif key == "SimplePaybackYears":
-                    display, sort_value = f"{float(value):,.1f} years", str(float(value))
-                else:
-                    display, sort_value = f"{float(value):,.0f}", str(float(value))
-                cells.append(f'<td data-value="{escape(sort_value)}">{escape(display)}</td>')
-            selected_class = ' class="selected-row"' if candidate.get("selected") else ""
-            candidate_rows += f'<tr{selected_class}>{"".join(cells)}</tr>'
-        candidate_rows = candidate_rows or f'<tr><td colspan="{len(candidate_columns)}">No candidate results available.</td></tr>'
-
-        balance = report.get("water_balance", {})
-        def balance_row(label: str, key: str) -> str:
-            return f'<tr><td>{escape(label)}</td><td>{float(balance.get(key, 0.0)):,.1f} {escape(report["volume_unit"])}</td></tr>'
-        collection_balance_rows = "".join((
-            balance_row("Potential rainfall volume on collection surfaces", "potential_surface_rainfall"),
-            balance_row("Less runoff-coefficient loss", "runoff_coefficient_loss"),
-            balance_row("Gross runoff after runoff coefficients", "gross_runoff"),
-            balance_row("Less first-flush diversion", "first_flush_loss"),
-            balance_row("Net collected water", "net_collected"),
-            balance_row("Reconciliation residual", "collection_residual"),
-        ))
-        storage_balance_rows = "".join((
-            balance_row("Initial primary-tank storage", "initial_storage"),
-            balance_row("Plus net collected water", "net_collected"),
-            balance_row("Less rainwater supplied", "rainwater_supplied"),
-            balance_row("Less treatment loss", "treatment_loss"),
-            balance_row("Less overflow", "overflow"),
-            balance_row("Final primary-tank storage", "final_storage"),
-            balance_row("Reconciliation residual", "storage_residual"),
-        ))
-
-        end_use_rows = "".join(
-            "<tr>"
-            f'<td>{escape(row["name"])}</td><td>{escape(row["type"])}</td><td>{escape(row["schedule"])}</td>'
-            f'<td>{escape(row["sewer_basis"])}</td><td>{float(row["annual_demand"]):,.0f}</td>'
-            f'<td>{float(row["annual_supply"]):,.0f}</td><td>{float(row["demand_met_percent"]):.1f}%</td>'
-            f'<td>{escape(currency)} {float(row["water_savings"]):,.2f}</td>'
-            f'<td>{escape(currency)} {float(row["sewer_savings"]):,.2f}</td></tr>'
-            for row in report.get("end_use_rows", [])
-        ) or '<tr><td colspan="9">No demand objects were reported.</td></tr>'
-
-        financial = report.get("financial_summary", {})
-        payback = financial.get("simple_payback_years")
-        financial_rows = "".join(
-            f'<tr><td>{escape(label)}</td><td>{escape(value)}</td></tr>'
-            for label, value in (
-                ("Water tariff", f'{currency} {float(financial.get("water_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
-                ("Sewer tariff", f'{currency} {float(financial.get("sewer_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
-                ("Legacy aggregate sewer eligibility", f'{float(financial.get("legacy_sewer_eligible_percent", 0.0)):g}%'),
-                ("Installed cost", f'{currency} {float(financial.get("installed_cost", 0.0)):,.2f}'),
-                ("Incentives", f'{currency} {float(financial.get("incentives", 0.0)):,.2f}'),
-                ("Annual maintenance", f'{currency} {float(financial.get("fixed_annual_maintenance", 0.0)):,.2f} + {float(financial.get("annual_maintenance_percent", 0.0)):g}% of installed cost'),
-                ("Average annual rainwater supplied", f'{float(financial.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Average annual sewer-eligible supply", f'{float(financial.get("average_annual_sewer_eligible_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-                ("Municipal water savings", f'{currency} {float(financial.get("municipal_water_savings", 0.0)):,.2f}/year'),
-                ("Sewer savings", f'{currency} {float(financial.get("sewer_savings", 0.0)):,.2f}/year'),
-                ("Gross annual savings", f'{currency} {float(financial.get("gross_annual_savings", 0.0)):,.2f}/year'),
-                ("Annual maintenance cost", f'{currency} {float(financial.get("annual_maintenance_cost", 0.0)):,.2f}/year'),
-                ("Net annual savings", f'{currency} {float(financial.get("net_annual_savings", 0.0)):,.2f}/year'),
-                ("Net installed cost", f'{currency} {float(financial.get("net_installed_cost", 0.0)):,.2f}'),
-                ("Simple payback", f'{float(payback):,.1f} years' if payback is not None else "Not achieved"),
-                (f'{int(financial.get("analysis_period_years", 0))}-year net benefit', f'{currency} {float(financial.get("analysis_period_net_benefit", 0.0)):,.2f}'),
-            )
-        )
-        financial_notice = "" if financial.get("configured") else '<p class="notice">Financial inputs are not configured; zero-value outputs are shown for transparency.</p>'
-
-        provenance = report.get("provenance", {})
-        provenance_rows = "".join(
-            f'<div class="fact"><dt>{escape(label)}</dt><dd>{escape(value)}</dd></div>'
-            for label, value in (
-                ("Rainfall source", provenance.get("rainfall_source", "Not available")),
-                ("Rainfall record", f'{provenance.get("record_start", "Not available")} to {provenance.get("record_end", "Not available")}'),
-                ("Record coverage", f'{int(provenance.get("calendar_years", 0))} calendar years; {int(provenance.get("observations", 0)):,} observations; {int(provenance.get("missing_calendar_days", 0)):,} missing calendar days'),
-                ("Rainfall resolution", provenance.get("rainfall_resolution", "Daily")),
-                ("Simulation timestep", provenance.get("simulation_timestep", "Daily mass balance")),
-                ("Rainfall timing", provenance.get("rainfall_timing_assumption", "Not specified")),
-                ("System", f'{provenance.get("system_type", "Not specified")}; municipal backup {str(provenance.get("municipal_backup", "Not specified")).lower()}'),
-                ("Initial tank fill", f'{float(provenance.get("initial_tank_fill_percent", 0.0)):g}%'),
-                ("Filter recovery", f'{float(provenance.get("filter_recovery_percent", 100.0)):g}%'),
-                ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
-                ("Analysis input signature", provenance.get("analysis_input_signature", "Not stored")),
-                ("Generated", provenance.get("generated_at", "Not available")),
-            )
-        )
-        yearly = report["yearly_reliability"]
-        yearly_chart_width = max(900.0, 90.0 + (len(yearly) + 1) * 24.0)
-        yearly_chart_height = 420.0
-        yearly_left, yearly_right, yearly_top, yearly_bottom = 72.0, 24.0, 38.0, 62.0
-        yearly_plot_width = yearly_chart_width - yearly_left - yearly_right
-        yearly_plot_height = yearly_chart_height - yearly_top - yearly_bottom
-        yearly_baseline = yearly_top + yearly_plot_height
-        yearly_bars = ""
-        yearly_labels = ""
-        yearly_markers = ""
-        if yearly:
-            yearly_slot = yearly_plot_width / (len(yearly) + 1)
-            yearly_label_step = max((len(yearly) + 9) // 10, 1)
-            for index, row in enumerate(yearly):
-                bar_x = yearly_left + index * yearly_slot + max(yearly_slot * 0.15, 1.0)
-                bar_width = max(yearly_slot * 0.7, 1.0)
-                met_height = yearly_plot_height * float(row["met_percent"]) / 100.0
-                unmet_height = yearly_plot_height - met_height
-                tooltip = (
-                    f"{int(row['year'])}: demand met {int(row['met_days'])} days "
-                    f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
-                    f"({float(row['unmet_percent']):.2f}%)"
-                )
-                yearly_bars += (
-                    f'<rect class="year-met" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
-                    f'width="{bar_width:.2f}" height="{met_height:.2f}" data-tooltip="{escape(tooltip)}">'
-                    "</rect>"
-                    f'<rect class="year-unmet" x="{bar_x:.2f}" y="{yearly_top:.2f}" '
-                    f'width="{bar_width:.2f}" height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}">'
-                    "</rect>"
-                )
-                marker_x = bar_x + bar_width / 2
-                marker_y = yearly_baseline - met_height
-                yearly_markers += (
-                    f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
-                    f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
-                )
-                if index % yearly_label_step == 0 or index == len(yearly) - 1:
-                    yearly_labels += (
-                        f'<text x="{bar_x + bar_width / 2:.2f}" y="{yearly_baseline + 22:.2f}" '
-                        f'text-anchor="middle">{int(row["year"])}</text>'
-                    )
-            average_reliability = float(report["selected_reliability"] or 0.0)
-            average_x = yearly_left + (len(yearly) + 0.5) * yearly_slot
-            average_y = yearly_baseline - yearly_plot_height * average_reliability / 100.0
-            year_count = len(yearly)
-            yearly_markers += (
-                f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
-                f'data-tooltip="Average tank reliability over {year_count} years: {average_reliability:.2f}%"></circle>'
-            )
-            yearly_labels += (
-                f'<text x="{average_x:.2f}" y="{yearly_baseline + 18:.2f}" text-anchor="middle">'
-                f'<tspan x="{average_x:.2f}">Average</tspan>'
-                f'<tspan x="{average_x:.2f}" dy="13">({year_count} years)</tspan></text>'
-            )
-        yearly_grid = "".join(
-            f'<line x1="{yearly_left}" y1="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" '
-            f'x2="{yearly_left + yearly_plot_width}" y2="{yearly_top + yearly_plot_height * (100 - value) / 100:.2f}" />'
-            f'<text x="{yearly_left - 12}" y="{yearly_top + yearly_plot_height * (100 - value) / 100 + 4:.2f}" '
-            f'text-anchor="end">{value}%</text>'
-            for value in range(0, 101, 25)
-        )
-        distribution = report["tank_level_distribution"]
-        distribution_width, distribution_height = 900.0, 420.0
-        distribution_left, distribution_right, distribution_top, distribution_bottom = 72.0, 24.0, 28.0, 72.0
-        distribution_plot_width = distribution_width - distribution_left - distribution_right
-        distribution_plot_height = distribution_height - distribution_top - distribution_bottom
-        distribution_max = max((int(row["count"]) for row in distribution), default=1) or 1
-        distribution_bars = ""
-        if distribution:
-            distribution_slot = distribution_plot_width / len(distribution)
-            for index, row in enumerate(distribution):
-                bar_x = distribution_left + index * distribution_slot + distribution_slot * 0.12
-                bar_width = distribution_slot * 0.76
-                bar_height = distribution_plot_height * int(row["count"]) / distribution_max
-                bar_y = distribution_top + distribution_plot_height - bar_height
-                range_label = f"{float(row['low']):,.0f}-{float(row['high']):,.0f}"
-                distribution_bars += (
-                    f'<rect class="distribution-bar" x="{bar_x:.2f}" y="{bar_y:.2f}" width="{bar_width:.2f}" '
-                    f'height="{bar_height:.2f}"><title>{escape(range_label)} {escape(report["volume_unit"])}: '
-                    f'{int(row["count"])} days</title></rect>'
-                    f'<text x="{bar_x + bar_width / 2:.2f}" y="{distribution_top + distribution_plot_height + 22:.2f}" '
-                    f'text-anchor="middle">{escape(range_label)}</text>'
-                    f'<text x="{bar_x + bar_width / 2:.2f}" y="{max(bar_y - 7, distribution_top + 11):.2f}" '
-                    f'text-anchor="middle">{int(row["count"])}</text>'
-                )
-        distribution_grid = "".join(
-            f'<line x1="{distribution_left}" y1="{distribution_top + distribution_plot_height * (4 - index) / 4:.2f}" '
-            f'x2="{distribution_left + distribution_plot_width}" y2="{distribution_top + distribution_plot_height * (4 - index) / 4:.2f}" />'
-            f'<text x="{distribution_left - 12}" y="{distribution_top + distribution_plot_height * (4 - index) / 4 + 4:.2f}" '
-            f'text-anchor="end">{distribution_max * index / 4:.0f}</text>'
-            for index in range(5)
-        )
-        return f"""<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
-<style>
-:root {{ color-scheme: light; --ink:#17242b; --muted:#64747c; --line:#dce5e8; --green:#18795b; --blue:#176b9c; --paper:#fff; --wash:#f2f6f5; }}
-* {{ box-sizing:border-box; }} html {{ scroll-behavior:smooth; }} body {{ margin:0; background:var(--wash); color:var(--ink); font:15px/1.55 Arial,Helvetica,sans-serif; }}
-.report-shell {{ display:grid; grid-template-columns:240px minmax(0,1040px); justify-content:center; gap:24px; width:min(1336px,calc(100% - 32px)); margin:32px auto; align-items:start; }}
-main {{ width:100%; min-width:0; background:var(--paper); box-shadow:0 12px 36px rgba(23,36,43,.10); }}
-header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
-.eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
-h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
-main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
-dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
-.fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
-.location-map {{ height:230px; margin-top:20px; border:1px solid var(--line); border-radius:6px; }} .map-star {{ width:24px!important; height:24px!important; margin:-12px 0 0 -12px!important; background:transparent; border:0; font-size:25px; line-height:24px; text-align:center; text-shadow:0 1px 2px #fff,0 0 2px #fff; }} .map-legend {{ margin-top:7px; color:var(--muted); font-size:12px; }} .map-legend span {{ margin-left:12px; font-size:17px; }} .map-legend span:first-child {{ margin-left:0; }} .project-star {{ color:#1565c0; }} .station-star {{ color:#d71920; }}
-.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
-table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
-.metric-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }} .metric {{ min-width:0; padding:16px; border:1px solid var(--line); border-radius:6px; background:#f8fbfa; }} .metric span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }} .metric strong {{ display:block; margin-top:5px; font-size:17px; overflow-wrap:anywhere; }}
-.table-scroll {{ overflow-x:auto; }} .table-scroll table {{ min-width:1040px; }} .selected-row {{ background:#e8f4ef; font-weight:700; }} .sort-button {{ width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:inherit; text-transform:inherit; cursor:pointer; }} .sort-button::after {{ content:' \2195'; color:#93a1a7; }} .notice {{ padding:10px 12px; border-left:4px solid #d17a00; background:#fff7e8; }} .balance-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }} .balance-grid h3 {{ margin:0 0 8px; font-size:16px; }}
-.demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
-.chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
-.curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
-.selected-tank {{ fill:none; stroke:#d71920; stroke-width:4; }} .selected-tank:hover {{ fill:none; r:11; }} .swatch.primary-tank {{ background:transparent; border:2px solid #d71920; border-radius:50%; }}
-.year-met {{ fill:#2e8b57; }} .year-unmet {{ fill:#c94c4c; }} .year-met,.year-unmet,.year-reliability {{ cursor:pointer; transition:opacity .12s ease,stroke-width .12s ease; }} .year-met:hover,.year-unmet:hover {{ opacity:.78; stroke:#17242b; stroke-width:1.5; }} .year-reliability {{ fill:#f2c94c; stroke:#8a6d00; stroke-width:1.5; }} .year-reliability:hover {{ fill:#f2c94c; stroke-width:2.5; r:7; }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:20px; margin:8px 0 0 72px; font-size:12px; color:var(--muted); }} .series-toggle {{ display:inline-flex; align-items:center; gap:5px; font-weight:700; cursor:pointer; }} .series-toggle input {{ accent-color:currentColor; }} .swatch {{ display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px; }} .swatch.year-met {{ background:#2e8b57; }} .swatch.year-unmet {{ background:#c94c4c; }} .swatch.year-reliability {{ background:#f2c94c; border:1px solid #8a6d00; border-radius:50%; }} .chart-tooltip {{ position:fixed; display:none; z-index:1000; max-width:320px; padding:7px 9px; border:1px solid #526168; background:#fffff0; color:#17242b; font-size:12px; line-height:1.35; box-shadow:0 3px 10px rgba(0,0,0,.16); pointer-events:none; }}
-.tank-history-point {{ fill:transparent; stroke:transparent; stroke-width:1; cursor:crosshair; }} .tank-history-point:hover {{ fill:#fff; stroke:currentColor; stroke-width:2; }}
-.history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
-.distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
-.axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
-@media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} .toc-collapsed .toc-toggle {{ height:auto; writing-mode:horizontal-tb; transform:none; text-align:left; }} main {{ box-shadow:none; }} }}
-@media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
-@media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
-</style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#executive-summary">Executive summary</a></li><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
-<main>
-<header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
-<section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
-<section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
-<section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
-<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))):g} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
-<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
-<section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
-<section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
-{system_visualization_html}
-<section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{float(report['total_annual_demand']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
-<section id="end-use-performance"><h2>End-use demand and savings</h2><p>Rainwater supply is allocated proportionally among the demand objects active on each simulated day. Sewer savings follow each object's eligibility setting; migrated legacy objects use the legacy aggregate percentage.</p><div class="table-scroll"><table><thead><tr><th>End use</th><th>Type</th><th>Schedule</th><th>Sewer basis</th><th>Demand ({escape(report['volume_unit'])}/year)</th><th>Supply ({escape(report['volume_unit'])}/year)</th><th>Demand met</th><th>Water savings/year</th><th>Sewer savings/year</th></tr></thead><tbody>{end_use_rows}</tbody></table></div></section>
-<section id="financial-analysis"><h2>Financial assumptions and results</h2>{financial_notice}<p>{escape(financial.get('methodology', 'Simple-rate, undiscounted estimate.'))}</p><table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>{financial_rows}</tbody></table></section>
-<section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
-<section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
-<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
-<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
-<text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
-</svg></div><div class="chart-legend"><span><i class="swatch primary-tank"></i>Primary tank size</span></div></section>
-<section id="yearly-demand-reliability"><h2>Yearly demand reliability - {float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])} tank</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
-<g class="grid">{yearly_grid}{yearly_labels}</g>{yearly_bars}{yearly_markers}
-<text class="axis-label" x="{yearly_left + yearly_plot_width / 2:.2f}" y="{yearly_chart_height - 10:.2f}" text-anchor="middle">Year</text>
-<text class="axis-label" transform="translate(18 {yearly_top + yearly_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days (%)</text>
-</svg></div><div class="chart-legend"><span><i class="swatch year-met"></i>Demand met</span><span><i class="swatch year-unmet"></i>Demand not met</span><span><i class="swatch year-reliability"></i>Tank reliability</span></div></section>
-<section id="tank-level-distribution"><h2>Tank level distribution</h2><div class="chart"><svg viewBox="0 0 {distribution_width:.0f} {distribution_height:.0f}" role="img" aria-label="Distribution of days by tank level range">
-<g class="grid">{distribution_grid}</g>{distribution_bars}
-<text class="axis-label" x="{distribution_left + distribution_plot_width / 2:.2f}" y="{distribution_height - 10:.2f}" text-anchor="middle">Tank level range ({escape(report['volume_unit'])})</text>
-<text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days</text>
-</svg></div></section>
-{multitank_html}
-<footer>Generated by RWH Calculator on {escape(dt.date.today().isoformat())}</footer>
-</main></div><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
-<script>
-const reportShell=document.querySelector('.report-shell');
-const tocToggle=document.getElementById('toc-toggle');
-function setTocCollapsed(collapsed){{
-  reportShell.classList.toggle('toc-collapsed',collapsed);
-  tocToggle.setAttribute('aria-expanded',String(!collapsed));
-  tocToggle.textContent=collapsed?'Show contents':'Hide contents';
-  try{{sessionStorage.setItem('rwh-report-toc-collapsed',collapsed?'1':'0');}}catch(_error){{}}
-}}
-let storedTocState='0';try{{storedTocState=sessionStorage.getItem('rwh-report-toc-collapsed')||'0';}}catch(_error){{}}
-setTocCollapsed(storedTocState==='1');
-tocToggle.addEventListener('click',()=>setTocCollapsed(!reportShell.classList.contains('toc-collapsed')));
-const tocLinks=[...document.querySelectorAll('.toc a[href^="#"]')];
-const tocTargets=tocLinks.map((link)=>document.querySelector(link.getAttribute('href'))).filter(Boolean);
-if('IntersectionObserver' in window){{
-  const tocObserver=new IntersectionObserver((entries)=>{{
-    const visible=entries.filter((entry)=>entry.isIntersecting).sort((a,b)=>a.boundingClientRect.top-b.boundingClientRect.top);
-    if(!visible.length)return;
-    tocLinks.forEach((link)=>link.classList.toggle('active',link.getAttribute('href')==='#'+visible[0].target.id));
-  }},{{rootMargin:'-10% 0px -75% 0px',threshold:0}});
-  tocTargets.forEach((target)=>tocObserver.observe(target));
-}}
-const chartTooltip=document.getElementById('chart-tooltip');
-const locationMapElement=document.getElementById('project-location-map');
-if(locationMapElement&&window.L){{
-  const points=JSON.parse(locationMapElement.dataset.points);
-  const map=L.map(locationMapElement,{{scrollWheelZoom:false}});
-  L.tileLayer({json.dumps(OSM_TILE_URL)},{{maxZoom:19,attribution:'&copy; OpenStreetMap contributors'}}).addTo(map);
-  const bounds=[];
-  points.forEach((point)=>{{
-    const icon=L.divIcon({{className:'map-star',html:'<span style="color:'+point.color+'">★</span>',iconSize:[24,24],iconAnchor:[12,12]}});
-    L.marker([point.latitude,point.longitude],{{icon}}).addTo(map).bindTooltip(point.label);
-    bounds.push([point.latitude,point.longitude]);
-  }});
-  if(bounds.length>1)map.fitBounds(bounds,{{padding:[35,35],maxZoom:13}});else map.setView(bounds[0],10);
-}}
-document.querySelectorAll('[data-tooltip]').forEach((element)=>{{
-  element.addEventListener('mouseenter',()=>{{chartTooltip.textContent=element.dataset.tooltip;chartTooltip.style.display='block';}});
-  element.addEventListener('mousemove',(event)=>{{
-    const left=Math.min(event.clientX+12,window.innerWidth-chartTooltip.offsetWidth-8);
-    const top=Math.min(event.clientY+12,window.innerHeight-chartTooltip.offsetHeight-8);
-    chartTooltip.style.left=Math.max(8,left)+'px';chartTooltip.style.top=Math.max(8,top)+'px';
-  }});
-  element.addEventListener('mouseleave',()=>{{chartTooltip.style.display='none';}});
-}});
-document.querySelectorAll('[data-sortable-table] .sort-button').forEach((button)=>{{
-  button.addEventListener('click',()=>{{
-    const table=button.closest('table');const body=table.querySelector('tbody');
-    const column=Number(button.dataset.column);const ascending=button.dataset.direction!=='asc';
-    const rows=[...body.querySelectorAll('tr')];
-    rows.sort((leftRow,rightRow)=>{{
-      const left=leftRow.children[column]?.dataset.value||'';const right=rightRow.children[column]?.dataset.value||'';
-      const leftNumber=Number(left),rightNumber=Number(right);
-      const comparison=(left!==''&&right!==''&&!Number.isNaN(leftNumber)&&!Number.isNaN(rightNumber))
-        ?leftNumber-rightNumber:left.localeCompare(right,undefined,{{numeric:true}});
-      return ascending?comparison:-comparison;
-    }});
-    table.querySelectorAll('.sort-button').forEach((item)=>delete item.dataset.direction);
-    button.dataset.direction=ascending?'asc':'desc';rows.forEach((row)=>body.appendChild(row));
-  }});
-}});
-function refreshTankHistory(sectionId){{
-  const section=document.getElementById(sectionId);if(!section)return;
-  const rangeMode=section.dataset.historyMode==='range';
-  section.querySelector('[data-year-controls]').hidden=rangeMode;
-  section.querySelector('[data-range-controls]').hidden=!rangeMode;
-  section.querySelector('[data-year-groups]').style.display=rangeMode?'none':'';
-  section.querySelector('[data-range-groups]').style.display=rangeMode?'':'none';
-  if(rangeMode){{
-    const startControl=section.querySelector('[data-range-start]');
-    const endControl=section.querySelector('[data-range-end]');
-    let startMonth=Number(startControl.value),endMonth=Number(endControl.value);
-    if(startMonth>endMonth){{
-      if(document.activeElement===startControl)endControl.value=String(startMonth);
-      else startControl.value=String(endMonth);
-      startMonth=Number(startControl.value);endMonth=Number(endControl.value);
-    }}
-    const monthDate=(value)=>new Date(Date.UTC(Math.floor(value/12),value%12,1));
-    const startDate=monthDate(startMonth);
-    const endDate=new Date(Date.UTC(Math.floor(endMonth/12),endMonth%12+1,1));
-    const formatMonth=(date)=>date.toLocaleDateString(undefined,{{month:'short',year:'numeric',timeZone:'UTC'}});
-    section.querySelector('[data-range-label]').textContent=formatMonth(startDate)+' to '+formatMonth(monthDate(endMonth));
-    const startMs=startDate.getTime(),endMs=endDate.getTime()-1,span=Math.max(endMs-startMs,1);
-    section.querySelectorAll('[data-history-range-series]').forEach((group)=>{{
-      const toggle=section.querySelector('[data-history-series-toggle="'+group.dataset.historyRangeSeries+'"]');
-      group.style.display=toggle&&toggle.checked?'':'none';
-      const line=group.querySelector('polyline');
-      const visiblePoints=JSON.parse(line.dataset.rangePoints).filter((point)=>point[0]>=startMs&&point[0]<=endMs);
-      line.setAttribute('points',visiblePoints.map((point)=>{{
-        const x=72+(point[0]-startMs)/span*804;
-        const circle=group.querySelector('[data-range-date="'+point[0]+'"]');
-        if(circle)circle.setAttribute('cx',x.toFixed(2));
-        return x.toFixed(2)+','+(circle?circle.getAttribute('cy'):'0');
-      }}).join(' '));
-      group.querySelectorAll('[data-range-date]').forEach((point)=>{{
-        const date=Number(point.dataset.rangeDate);
-        point.style.display=date>=startMs&&date<=endMs?'':'none';
-      }});
-    }});
-    return;
-  }}
-  const years=section.dataset.years.split(',');
-  const index=Math.max(0,Math.min(Number(section.dataset.yearIndex)||0,years.length-1));
-  section.dataset.yearIndex=String(index);
-  section.querySelectorAll('[data-history-year]').forEach((group)=>{{group.style.display='none';}});
-  const active=section.querySelector('[data-history-year="'+years[index]+'"]');
-  if(active){{
-    active.style.display='';
-    active.querySelectorAll('[data-history-series]').forEach((line)=>{{
-      const toggle=section.querySelector('[data-history-series-toggle="'+line.dataset.historySeries+'"]');
-      line.style.display=toggle&&toggle.checked?'':'none';
-    }});
-  }}
-  section.querySelector('[data-history-year-label]').textContent=years[index];
-  section.querySelector('[data-history-previous]').disabled=index===0;
-  section.querySelector('[data-history-next]').disabled=index===years.length-1;
-}}
-function setTankHistoryMode(sectionId,mode){{
-  const section=document.getElementById(sectionId);if(!section)return;
-  section.dataset.historyMode=mode;refreshTankHistory(sectionId);
-}}
-function changeTankHistoryYear(sectionId,delta){{
-  const section=document.getElementById(sectionId);if(!section)return;
-  section.dataset.yearIndex=String((Number(section.dataset.yearIndex)||0)+delta);
-  refreshTankHistory(sectionId);
-}}
-document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory(section.id));
-</script></body></html>"""
-
-    @staticmethod
-    def _build_multitank_report_html(report: dict[str, object]) -> str:
-        if not report.get("include_multitank_charts"):
-            return ""
-        colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f")
-        sections = []
-        for chart_index, chart in enumerate(report.get("multitank_charts", [])):
-            if chart.get("type") == "yearly_stacked":
-                sections.append(RainwaterTkApp._build_stacked_yearly_report_html(chart, chart_index + 1))
-                continue
-            if chart.get("type") == "tank_history":
-                sections.append(RainwaterTkApp._build_tank_history_report_html(chart, chart_index + 1))
-                continue
-            series_list = chart["series"]
-            all_points = [point for series in series_list for point in series["points"]]
-            if not all_points:
-                continue
-            width, height = 900.0, 420.0
-            left, right, top, bottom = 72.0, 24.0, 52.0, 62.0
-            plot_width, plot_height = width - left - right, height - top - bottom
-            x_values = [float(point[0]) for point in all_points]
-            y_values = [float(point[1]) for point in all_points]
-            x_min, x_max = min(x_values), max(x_values)
-            y_min, y_max = 0.0, max(max(y_values), 1.0)
-            if x_min == x_max:
-                x_max = x_min + 1.0
-
-            def sx(value: float) -> float:
-                return left + (value - x_min) / (x_max - x_min) * plot_width
-
-            def sy(value: float) -> float:
-                return top + (y_max - value) / y_max * plot_height
-
-            grid = "".join(
-                f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
-                f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
-                for tick in range(5)
-            )
-            polylines = []
-            legends = []
-            for series_index, series in enumerate(series_list):
-                color = colors[series_index % len(colors)]
-                points = " ".join(f"{sx(float(x)):.2f},{sy(float(y)):.2f}" for x, y in series["points"])
-                label = html.escape(str(series["label"]))
-                series_id = f"multitank-chart-{chart_index + 1}-series-{series_index + 1}"
-                polylines.append(
-                    f'<polyline id="{series_id}" points="{points}" fill="none" stroke="{color}" '
-                    f'stroke-width="3"><title>{label}</title></polyline>'
-                )
-                if chart.get("interactive_series_toggle"):
-                    legends.append(
-                        f'<label class="series-toggle" style="color:{color}"><input type="checkbox" checked '
-                        f'onchange="document.getElementById(\'{series_id}\').style.display=this.checked?\'\':\'none\'">'
-                        f'<span aria-hidden="true">&mdash;</span> {label}</label>'
-                    )
-                else:
-                    legends.append(
-                        f'<span style="color:{color};font-weight:700"><span aria-hidden="true">&mdash;</span> '
-                        f'{label}</span>'
-                    )
-            section_id = f"multitank-chart-{chart_index + 1}"
-            sections.append(
-                f'<section id="{section_id}"><h2>{html.escape(str(chart["title"]))}</h2>'
-                f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
-                f'<g class="grid">{grid}</g>{"".join(polylines)}'
-                f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" text-anchor="middle">{html.escape(str(chart["x_label"]))}</text>'
-                f'<text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">{html.escape(str(chart["y_label"]))}</text>'
-                f'</svg></div><div class="chart-legend">{"".join(legends)}</div></section>'
-            )
-        return "".join(sections)
-
-    @staticmethod
-    def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int) -> str:
-        yearly = chart["yearly_reliability"]
-        if not yearly:
-            return ""
-        escape = lambda value: html.escape(str(value), quote=True)
-        width = max(900.0, 90.0 + (len(yearly) + 1) * 24.0)
-        height = 420.0
-        left, right, top, bottom = 72.0, 24.0, 38.0, 62.0
-        plot_width, plot_height = width - left - right, height - top - bottom
-        baseline = top + plot_height
-        slot_width = plot_width / (len(yearly) + 1)
-        label_step = max((len(yearly) + 9) // 10, 1)
-        bars: list[str] = []
-        labels: list[str] = []
-        markers: list[str] = []
-        for index, row in enumerate(yearly):
-            bar_x = left + index * slot_width + max(slot_width * 0.15, 1.0)
-            bar_width = max(slot_width * 0.7, 1.0)
-            met_height = plot_height * float(row["met_percent"]) / 100.0
-            unmet_height = plot_height - met_height
-            marker_x = bar_x + bar_width / 2
-            marker_y = baseline - met_height
-            tooltip = (
-                f"{int(row['year'])}: demand met {int(row['met_days'])} days "
-                f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
-                f"({float(row['unmet_percent']):.2f}%)"
-            )
-            bars.append(
-                f'<rect class="year-met" x="{bar_x:.2f}" y="{marker_y:.2f}" width="{bar_width:.2f}" '
-                f'height="{met_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
-                f'<rect class="year-unmet" x="{bar_x:.2f}" y="{top:.2f}" width="{bar_width:.2f}" '
-                f'height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
-            )
-            markers.append(
-                f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
-                f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
-            )
-            if index % label_step == 0 or index == len(yearly) - 1:
-                labels.append(
-                    f'<text x="{marker_x:.2f}" y="{baseline + 22:.2f}" text-anchor="middle">'
-                    f'{int(row["year"])}</text>'
-                )
-        average = float(chart["selected_reliability"])
-        year_count_text = f"{len(yearly)} {'year' if len(yearly) == 1 else 'years'}"
-        average_x = left + (len(yearly) + 0.5) * slot_width
-        average_y = baseline - plot_height * average / 100.0
-        markers.append(
-            f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
-            f'data-tooltip="Average tank reliability over {year_count_text}: {average:.2f}%"></circle>'
-        )
-        labels.append(
-            f'<text x="{average_x:.2f}" y="{baseline + 18:.2f}" text-anchor="middle">'
-            f'<tspan x="{average_x:.2f}">Average</tspan><tspan x="{average_x:.2f}" dy="13">'
-            f'({year_count_text})</tspan></text>'
-        )
-        grid = "".join(
-            f'<line x1="{left}" y1="{top + plot_height * (100 - value) / 100:.2f}" '
-            f'x2="{left + plot_width}" y2="{top + plot_height * (100 - value) / 100:.2f}" />'
-            f'<text x="{left - 12}" y="{top + plot_height * (100 - value) / 100 + 4:.2f}" '
-            f'text-anchor="end">{value}%</text>'
-            for value in range(0, 101, 25)
-        )
-        return (
-            f'<section id="multitank-chart-{chart_index}"><h2>{escape(chart["title"])}</h2>'
-            f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
-            f'<g class="grid">{grid}{"".join(labels)}</g>{"".join(bars)}{"".join(markers)}'
-            f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" '
-            f'text-anchor="middle">Year</text><text class="axis-label" '
-            f'transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" '
-            f'text-anchor="middle">Days (%)</text></svg></div><div class="chart-legend">'
-            f'<span><i class="swatch year-met"></i>Demand met</span>'
-            f'<span><i class="swatch year-unmet"></i>Demand not met</span>'
-            f'<span><i class="swatch year-reliability"></i>Tank reliability</span></div></section>'
-        )
-
-    @staticmethod
-    def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) -> str:
-        series_list = chart["series"]
-        years = sorted(
-            {
-                int(year)
-                for series in series_list
-                for year in series.get("yearly_points", {})
-            }
-        )
-        if not years:
-            return ""
-        dated_values = [
-            (pd.Timestamp(date), float(level))
-            for series in series_list
-            for date, level in series.get("dated_points", [])
-        ]
-        if not dated_values:
-            return ""
-        first_month = min(date for date, _level in dated_values).to_period("M")
-        last_month = max(date for date, _level in dated_values).to_period("M")
-        first_month_index = first_month.year * 12 + first_month.month - 1
-        last_month_index = last_month.year * 12 + last_month.month - 1
-        colors = ("#0b5cab", "#2e8b57", "#c94c4c", "#7b4ab5", "#d17a00", "#00838f")
-        section_id = f"multitank-chart-{chart_index}"
-        width, height = 900.0, 420.0
-        left, right, top, bottom = 72.0, 24.0, 38.0, 62.0
-        plot_width, plot_height = width - left - right, height - top - bottom
-        all_values = [
-            float(point[1])
-            for series in series_list
-            for points in series.get("yearly_points", {}).values()
-            for point in points
-        ]
-        y_max = max(max(all_values, default=0.0), 1.0)
-
-        def sx(value: float) -> float:
-            return left + (value - 1.0) / 365.0 * plot_width
-
-        def sy(value: float) -> float:
-            return top + (y_max - value) / y_max * plot_height
-
-        grid = "".join(
-            f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" '
-            f'x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
-            f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" '
-            f'text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
-            for tick in range(5)
-        ) + "".join(
-            f'<line x1="{sx(day):.2f}" y1="{top}" x2="{sx(day):.2f}" y2="{top + plot_height}" />'
-            f'<text x="{sx(day):.2f}" y="{top + plot_height + 22:.2f}" text-anchor="middle">{day}</text>'
-            for day in (1, 92, 183, 274, 366)
-        )
-        year_groups: list[str] = []
-        for year_index, year in enumerate(years):
-            lines: list[str] = []
-            for series_index, series in enumerate(series_list):
-                points = series.get("yearly_points", {}).get(str(year), [])
-                if not points:
-                    continue
-                color = colors[series_index % len(colors)]
-                coordinates = " ".join(
-                    f"{sx(float(x_value)):.2f},{sy(float(y_value)):.2f}"
-                    for x_value, y_value in points
-                )
-                lines.append(
-                    f'<polyline data-history-series="{series_index}" points="{coordinates}" fill="none" '
-                    f'stroke="{color}" stroke-width="3"></polyline>'
-                    + "".join(
-                        f'<circle class="tank-history-point" data-history-series="{series_index}" '
-                        f'cx="{sx(float(day)):.2f}" cy="{sy(float(level)):.2f}" r="7" '
-                        f'style="color:{color}" data-tooltip="{html.escape(str(series["label"]))}; '
-                        f'{year}, day {float(day):g}: {float(level):,.2f} '
-                        f'{html.escape(str(chart["y_label"]))}"></circle>'
-                        for day, level in points
-                    )
-                )
-            display = "" if year_index == 0 else "none"
-            year_groups.append(
-                f'<g data-history-year="{year}" style="display:{display}">{"".join(lines)}</g>'
-            )
-        range_series: list[str] = []
-        range_span = max((last_month.end_time - first_month.start_time).total_seconds(), 1.0)
-        for series_index, series in enumerate(series_list):
-            color = colors[series_index % len(colors)]
-            points = [(pd.Timestamp(date), float(level)) for date, level in series.get("dated_points", [])]
-            coordinates = " ".join(
-                f'{left + (date - first_month.start_time).total_seconds() / range_span * plot_width:.2f},'
-                f'{sy(level):.2f}' for date, level in points
-            )
-            encoded_points = html.escape(json.dumps([[int(date.value // 1_000_000), level] for date, level in points]), quote=True)
-            circles = "".join(
-                f'<circle class="tank-history-point" data-history-series="{series_index}" '
-                f'data-range-date="{int(date.value // 1_000_000)}" data-range-level="{level}" '
-                f'cx="{left + (date - first_month.start_time).total_seconds() / range_span * plot_width:.2f}" '
-                f'cy="{sy(level):.2f}" r="7" style="color:{color}" '
-                f'data-tooltip="{html.escape(str(series["label"]))}; {date:%Y-%m-%d}: '
-                f'{level:,.2f} {html.escape(str(chart["y_label"]))}"></circle>'
-                for date, level in points
-            )
-            range_series.append(
-                f'<g data-history-range-series="{series_index}"><polyline data-range-points="{encoded_points}" '
-                f'points="{coordinates}" fill="none" stroke="{color}" stroke-width="3"></polyline>{circles}</g>'
-            )
-        toggles = "".join(
-            f'<label class="series-toggle" style="color:{colors[index % len(colors)]}">'
-            f'<input type="checkbox" checked data-history-series-toggle="{index}" '
-            f'onchange="refreshTankHistory(\'{section_id}\')"><span aria-hidden="true">&mdash;</span> '
-            f'{html.escape(str(series["label"]))}</label>'
-            for index, series in enumerate(series_list)
-        )
-        return (
-            f'<section id="{section_id}" class="tank-history" data-years="{",".join(map(str, years))}" '
-            f'data-year-index="0" data-history-mode="year"><h2>{html.escape(str(chart["title"]))}</h2>'
-            f'<div class="history-mode-controls"><label><input type="radio" name="{section_id}-mode" checked '
-            f'onchange="setTankHistoryMode(\'{section_id}\',\'year\')"> Single year</label>'
-            f'<label><input type="radio" name="{section_id}-mode" '
-            f'onchange="setTankHistoryMode(\'{section_id}\',\'range\')"> Custom range</label></div>'
-            f'<div class="history-controls" data-year-controls><button type="button" data-history-previous '
-            f'onclick="changeTankHistoryYear(\'{section_id}\',-1)" title="Previous year">&#9664;</button>'
-            f'<strong data-history-year-label>{years[0]}</strong><button type="button" data-history-next '
-            f'onclick="changeTankHistoryYear(\'{section_id}\',1)" title="Next year">&#9654;</button></div>'
-            f'<div class="history-range-controls" data-range-controls hidden><strong data-range-label></strong>'
-            f'<input type="range" min="{first_month_index}" max="{last_month_index}" value="{first_month_index}" '
-            f'data-range-start oninput="refreshTankHistory(\'{section_id}\')">'
-            f'<input type="range" min="{first_month_index}" max="{last_month_index}" value="{last_month_index}" '
-            f'data-range-end oninput="refreshTankHistory(\'{section_id}\')"></div>'
-            f'<div class="chart"><svg viewBox="0 0 {width:.0f} {height:.0f}" role="img">'
-            f'<g class="grid">{grid}</g><g data-year-groups>{"".join(year_groups)}</g>'
-            f'<g data-range-groups style="display:none">{"".join(range_series)}</g>'
-            f'<text class="axis-label" x="{left + plot_width / 2:.2f}" y="{height - 10:.2f}" '
-            f'text-anchor="middle">Day of year</text><text class="axis-label" '
-            f'transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" '
-            f'text-anchor="middle">{html.escape(str(chart["y_label"]))}</text></svg></div>'
-            f'<div class="chart-legend">{toggles}</div></section>'
-        )
-
-    def _compile_latex_report(self, tex_path: Path, pdf_path: Path, report: dict[str, object]) -> None:
+    def _compile_latex_report(
+        self, tex_path: Path, pdf_path: Path, report: ReportModel
+    ) -> None:
         pdflatex = shutil.which("pdflatex")
         if pdflatex is None:
             self._write_fallback_pdf_report(pdf_path, report)
@@ -11469,591 +10378,28 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
                 raise RuntimeError(f"LaTeX did not create a PDF. Source saved to {tex_path}.")
             shutil.copyfile(compiled_pdf, pdf_path)
 
-    def _write_fallback_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
-        metadata = report["metadata"]
-        report_title = "RWH Calculator Report - multi-tank" if report.get("include_multitank_charts") else "RWH Calculator Report"
-        surface_rows = [
-            (
-                surface["name"],
-                f"{surface['area']:,.2f}",
-                f"{surface['runoff_coefficient']:.2f}",
-            )
-            for surface in report["surfaces"]
-        ]
-        if not surface_rows:
-            surface_rows = [("No collection surfaces", "0.00", "0.000")]
-
-        selected_reliability = "--"
-        if report["selected_reliability"] is not None:
-            selected_reliability = f"{report['selected_reliability']:.2f}%"
-
-        pages: list[list[str]] = [[]]
-        section_pages: dict[str, int] = {}
-        toc_links: list[tuple[tuple[float, float, float, float], str]] = []
-        section_titles = (
-            "Project Information",
-            "Notes",
-            "Surface Area Summary",
-            "Tank Summary",
-            *(("System Visualization",) if report.get("include_system_visualization") else ()),
-            "Demand Summary",
-            "Reliability Curve",
-            "Yearly Demand Reliability",
-            "Tank Level Distribution",
-        )
-        y = 744.0
-
-        def page() -> list[str]:
-            return pages[-1]
-
-        def add_page() -> None:
-            nonlocal y
-            pages.append([])
-            y = 744.0
-
-        def text(x: float, y_pos: float, value: object, size: int = 10, bold: bool = False) -> None:
-            font = "F2" if bold else "F1"
-            safe = _pdf_escape(value)
-            page().append(f"BT /{font} {size} Tf 1 0 0 1 {x:.2f} {y_pos:.2f} Tm ({safe}) Tj ET")
-
-        def line(x1: float, y1: float, x2: float, y2: float, width: float = 0.5) -> None:
-            page().append(f"{width:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
-
-        def circle(center_x: float, center_y: float, radius: float, width: float = 1.2) -> None:
-            control = radius * 0.55228475
-            page().append(
-                f"{width:.2f} w {center_x + radius:.2f} {center_y:.2f} m "
-                f"{center_x + radius:.2f} {center_y + control:.2f} {center_x + control:.2f} "
-                f"{center_y + radius:.2f} {center_x:.2f} {center_y + radius:.2f} c "
-                f"{center_x - control:.2f} {center_y + radius:.2f} {center_x - radius:.2f} "
-                f"{center_y + control:.2f} {center_x - radius:.2f} {center_y:.2f} c "
-                f"{center_x - radius:.2f} {center_y - control:.2f} {center_x - control:.2f} "
-                f"{center_y - radius:.2f} {center_x:.2f} {center_y - radius:.2f} c "
-                f"{center_x + control:.2f} {center_y - radius:.2f} {center_x + radius:.2f} "
-                f"{center_y - control:.2f} {center_x + radius:.2f} {center_y:.2f} c S"
-            )
-
-        def filled_star(center_x: float, center_y: float, radius: float, color: str) -> None:
-            rgb = {
-                "blue": (0.08, 0.40, 0.75),
-                "red": (0.84, 0.10, 0.13),
-            }[color]
-            points: list[tuple[float, float]] = []
-            for index in range(10):
-                point_radius = radius if index % 2 == 0 else radius * 0.42
-                angle = -math.pi / 2.0 + index * math.pi / 5.0
-                points.append((
-                    center_x + math.cos(angle) * point_radius,
-                    center_y + math.sin(angle) * point_radius,
-                ))
-            commands = [f"{rgb[0]:.2f} {rgb[1]:.2f} {rgb[2]:.2f} rg"]
-            commands.append(f"{points[0][0]:.2f} {points[0][1]:.2f} m")
-            commands.extend(f"{px:.2f} {py:.2f} l" for px, py in points[1:])
-            commands.append("h f 0 0 0 rg")
-            page().append(" ".join(commands))
-
-        def add_wrapped(value: object, x: float = 54.0, size: int = 10, width: int = 90, indent: float = 0.0) -> None:
-            nonlocal y
-            for wrapped in _wrap_pdf_text(str(value), width):
-                if y < 72:
-                    add_page()
-                text(x + indent, y, wrapped, size=size)
-                y -= size + 4
-
-        def heading(value: str) -> None:
-            nonlocal y
-            if y < 112:
-                add_page()
-            section_pages[value] = len(pages) - 1
-            y -= 10
-            text(54, y, value, size=14, bold=True)
-            y -= 18
-            line(54, y + 8, 558, y + 8)
-
-        text(54, y, report_title, size=20, bold=True)
-        y -= 34
-        if metadata.get("author_name", "").strip():
-            text(54, y, f"Produced by: {metadata['author_name']}", size=10)
-            y -= 22
-        text(54, y, "Table of Contents", size=14, bold=True)
-        y -= 24
-        for title in section_titles:
-            text(72, y, title, size=11)
-            toc_links.append(((68.0, y - 4.0, 300.0, y + 12.0), title))
-            y -= 24
-        add_page()
-        heading("Project Information")
-        for label, value in [
-            ("Client name", metadata["client_name"]),
-            ("Date", metadata["date"]),
-            ("Location", metadata["location"]),
-            ("Project name", metadata["project_name"]),
-            ("End-uses of water", metadata["end_uses"]),
-            (
-                "Average annual precipitation",
-                f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
-            ),
-            ("Precipitation basis", report["precipitation_basis"]),
-            (
-                "Selected tank size",
-                f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
-            ),
-            ("Selected tank reliability", selected_reliability),
-        ]:
-            if y < 84:
-                add_page()
-            text(54, y, f"{label}:", size=10, bold=True)
-            add_wrapped(value or "Not specified", x=190, size=10, width=58)
-            y -= 2
-
-        location_points: list[tuple[float, float, str, str]] = []
-        if report.get("weather_station_latitude") is not None and report.get("weather_station_longitude") is not None:
-            location_points.append((
-                float(report["weather_station_latitude"]),
-                float(report["weather_station_longitude"]),
-                "red", "Weather station",
-            ))
-        if report.get("project_latitude") is not None and report.get("project_longitude") is not None:
-            location_points.append((
-                float(report["project_latitude"]),
-                float(report["project_longitude"]),
-                "blue", "Project location",
-            ))
-        if location_points:
-            if y < 240:
-                add_page()
-            map_x, map_y, map_width, map_height = 54.0, y - 154.0, 504.0, 140.0
-            text(map_x, y, "Project location map", size=11, bold=True)
-            page().append(
-                f"0.94 0.96 0.95 rg {map_x:.2f} {map_y:.2f} {map_width:.2f} {map_height:.2f} re f "
-                f"0.55 G 0.8 w {map_x:.2f} {map_y:.2f} {map_width:.2f} {map_height:.2f} re S 0 G"
-            )
-            # Light road/grid context keeps the fallback PDF useful when raster tiles are unavailable.
-            page().append("0.80 G 0.7 w")
-            for fraction in (0.25, 0.5, 0.75):
-                line(map_x + map_width * fraction, map_y, map_x + map_width * fraction, map_y + map_height)
-                line(map_x, map_y + map_height * fraction, map_x + map_width, map_y + map_height * fraction)
-            page().append("0 G")
-            latitudes = [point[0] for point in location_points]
-            longitudes = [point[1] for point in location_points]
-            latitude_span = max(max(latitudes) - min(latitudes), 0.02)
-            longitude_span = max(max(longitudes) - min(longitudes), 0.02)
-            latitude_midpoint = (max(latitudes) + min(latitudes)) / 2.0
-            longitude_midpoint = (max(longitudes) + min(longitudes)) / 2.0
-            for latitude, longitude, color, label in location_points:
-                marker_x = map_x + map_width * (
-                    0.5 + (longitude - longitude_midpoint) / (longitude_span * 1.4)
-                )
-                marker_y = map_y + map_height * (
-                    0.5 + (latitude - latitude_midpoint) / (latitude_span * 1.4)
-                )
-                filled_star(marker_x, marker_y, 8.0, color)
-                text(marker_x + 11, marker_y - 3, label, size=8, bold=True)
-            text(map_x + 5, map_y + 5, "Map data © OpenStreetMap contributors", size=7)
-            y = map_y - 8
-
-        heading("Notes")
-        notes = str(report.get("notes", "")).strip() or "No notes provided."
-        for paragraph_index, paragraph in enumerate(notes.splitlines() or [notes]):
-            if paragraph_index and not paragraph:
-                y -= 6
-                continue
-            add_wrapped(paragraph or " ", x=54, size=10, width=90)
-        y -= 2
-
-        heading("Surface Area Summary")
-        text(54, y, "Surface", size=10, bold=True)
-        text(330, y, f"Area ({report['area_unit']})", size=10, bold=True)
-        text(450, y, "Runoff coeff.", size=10, bold=True)
-        y -= 8
-        line(54, y, 558, y)
-        y -= 14
-        for name, area_text, runoff in surface_rows:
-            if y < 72:
-                add_page()
-            text(54, y, _clip_pdf_text(name, 46), size=9)
-            text(330, y, area_text, size=9)
-            text(450, y, runoff, size=9)
-            y -= 14
-
-        heading("Tank Summary")
-        text(54, y, "Tank property", size=10, bold=True)
-        text(330, y, "Value", size=10, bold=True)
-        y -= 8
-        line(54, y, 558, y)
-        y -= 14
-        text(54, y, "Size", size=9)
-        text(330, y, f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}", size=9)
-        y -= 14
-
-        if report.get("include_system_visualization"):
-            heading("System Visualization")
-            system_type = str(report.get("system_type", "Direct system"))
-            text(54, y, system_type, size=11, bold=True)
-            y -= 22
-            tank_left, tank_bottom, tank_width, tank_height = 64.0, y - 105.0, 120.0, 92.0
-            page().append(f"1.20 w {tank_left:.2f} {tank_bottom:.2f} {tank_width:.2f} {tank_height:.2f} re S")
-            text(tank_left + 25, tank_bottom + 68, "Primary tank", size=9, bold=True)
-            text(
-                tank_left + 20,
-                tank_bottom + 54,
-                f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
-                size=8,
-            )
-            wave_points = [
-                (tank_left + offset, tank_bottom + 39 + (3 if (offset // 6) % 2 else -3))
-                for offset in range(0, 121, 6)
-            ]
-            wave = [f"{wave_points[0][0]:.2f} {wave_points[0][1]:.2f} m"]
-            wave.extend(f"{x_pos:.2f} {y_pos:.2f} l" for x_pos, y_pos in wave_points[1:])
-            page().append(" ".join(wave) + " S")
-            pipe_y = tank_bottom + 42
-            if system_type == "Indirect system":
-                line(tank_left + tank_width, pipe_y, 235, pipe_y, 1.2)
-                circle(252, pipe_y, 17)
-                text(220, pipe_y - 28, "Filtration pump", size=8)
-                line(269, pipe_y, 310, pipe_y, 1.2)
-                page().append(f"1.20 w 310 {pipe_y - 18:.2f} 80 36 re S")
-                text(326, pipe_y - 3, "Filtration", size=8, bold=True)
-                line(390, pipe_y, 430, pipe_y, 1.2)
-                page().append(f"1.20 w 430 {tank_bottom + 10:.2f} 90 78 re S")
-                text(444, tank_bottom + 65, "Buffer tank", size=8, bold=True)
-                line(475, tank_bottom + 115, 475, tank_bottom + 88, 1.2)
-                page().append(
-                    f"0 0 0 rg 475 {tank_bottom + 88:.2f} m 470 {tank_bottom + 98:.2f} l "
-                    f"480 {tank_bottom + 98:.2f} l f"
-                )
-                text(380, tank_bottom + 112, "Municipal water backup", size=7, bold=True)
-                line(520, pipe_y, 526, pipe_y, 1.2)
-                circle(538, pipe_y, 12)
-                page().append(
-                    f"1.20 w 550 {pipe_y:.2f} m 532 {pipe_y + 10.39:.2f} l "
-                    f"532 {pipe_y - 10.39:.2f} l h S"
-                )
-                text(514, pipe_y - 24, "Booster pump", size=7)
-                line(550, pipe_y, 580, pipe_y, 1.2)
-            else:
-                line(tank_left + tank_width, pipe_y, 250, pipe_y, 1.2)
-                circle(267, pipe_y, 17)
-                text(238, pipe_y - 28, "Distribution pump", size=8)
-                line(284, pipe_y, 550, pipe_y, 1.2)
-            arrow_x = 580 if system_type == "Indirect system" else 550
-            page().append(
-                f"0 0 0 rg {arrow_x} {pipe_y:.2f} m {arrow_x - 12} {pipe_y + 6:.2f} l "
-                f"{arrow_x - 12} {pipe_y - 6:.2f} l f"
-            )
-            text(430, pipe_y + 14, "Flow to end-uses", size=8, bold=True)
-            y = tank_bottom - 12
-
-        heading("Demand Summary")
-        column_x = (54.0, 100.0, 190.0, 310.0, 356.0, 446.0)
-        headers = (
-            "Month",
-            f"{report['volume_unit']}/day",
-            f"{report['volume_unit']}/month",
-            "Month",
-            f"{report['volume_unit']}/day",
-            f"{report['volume_unit']}/month",
-        )
-        for x_pos, label in zip(column_x, headers):
-            text(x_pos, y, label, size=9, bold=True)
-        y -= 8
-        line(54, y, 558, y)
-        y -= 14
-        for index in range(6):
-            left_month = report["monthly_demand"][index]
-            right_month = report["monthly_demand"][index + 6]
-            text(column_x[0], y, left_month["month"], size=9)
-            text(column_x[1], y, f"{float(left_month['demand_per_day']):,.0f}", size=9)
-            text(column_x[2], y, f"{float(left_month['demand_per_month']):,.0f}", size=9)
-            text(column_x[3], y, right_month["month"], size=9)
-            text(column_x[4], y, f"{float(right_month['demand_per_day']):,.0f}", size=9)
-            text(column_x[5], y, f"{float(right_month['demand_per_month']):,.0f}", size=9)
-            y -= 14
-        line(54, y + 5, 558, y + 5, width=0.4)
-        line(54, y + 2, 558, y + 2, width=0.4)
-        y -= 12
-        text(320, y, "Total Annual Demand", size=9, bold=True)
-        text(450, y, f"{float(report['total_annual_demand']):,.0f} {report['volume_unit']}", size=9, bold=True)
-        y -= 14
-
-        heading("Reliability Curve")
-        self._draw_pdf_reliability_curve(page(), 78, max(120, y - 280), 456, 250, report)
-
-        add_page()
-        heading(
-            f"Yearly Demand Reliability - {float(report['selected_tank_size']):,.0f} "
-            f"{report['volume_unit']} tank"
-        )
-        self._draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, report)
-
-        add_page()
-        heading("Tank Level Distribution")
-        self._draw_pdf_tank_level_distribution(page(), 78, 400, 456, 250, report)
-
-        if report.get("include_multitank_charts"):
-            for chart in report.get("multitank_charts", []):
-                add_page()
-                heading(str(chart["title"]))
-                if chart.get("type") == "yearly_stacked":
-                    stacked_report = {
-                        "yearly_reliability": chart["yearly_reliability"],
-                        "selected_reliability": chart["selected_reliability"],
-                    }
-                    self._draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, stacked_report)
-                else:
-                    self._draw_pdf_multiline_chart(page(), 78, 400, 456, 250, chart)
-
-        self._write_pdf_with_pypdf(pdf_path, pages, section_pages, toc_links)
-
-    def _draw_pdf_multiline_chart(
-        self,
-        commands: list[str],
-        x: float,
-        y: float,
-        width: float,
-        height: float,
-        chart: dict[str, object],
+    def _write_fallback_pdf_report(
+        self, pdf_path: Path, report: ReportModel | dict[str, object]
     ) -> None:
-        series_list = chart["series"]
-        all_points = [point for series in series_list for point in series["points"]]
-        if not all_points:
-            return
-        x_values = [float(point[0]) for point in all_points]
-        y_values = [float(point[1]) for point in all_points]
-        x_min, x_max = min(x_values), max(x_values)
-        y_min, y_max = 0.0, max(max(y_values), 1.0)
-        if x_min == x_max:
-            x_max = x_min + 1.0
-
-        def sx(value: float) -> float:
-            return x + (value - x_min) / (x_max - x_min) * width
-
-        def sy(value: float) -> float:
-            return y + (value - y_min) / (y_max - y_min) * height
-
-        commands.append("0.50 w 0.85 0.85 0.85 RG")
-        for index in range(5):
-            grid_y = y + height * index / 4
-            commands.append(f"{x:.2f} {grid_y:.2f} m {x + width:.2f} {grid_y:.2f} l S")
-        colors = ((0.04, 0.36, 0.67), (0.18, 0.55, 0.34), (0.79, 0.30, 0.30), (0.48, 0.29, 0.71))
-        for series_index, series in enumerate(series_list):
-            points = [(sx(float(px)), sy(float(py))) for px, py in series["points"]]
-            if len(points) < 2:
-                continue
-            red, green, blue = colors[series_index % len(colors)]
-            path = [f"{points[0][0]:.2f} {points[0][1]:.2f} m"]
-            path.extend(f"{px:.2f} {py:.2f} l" for px, py in points[1:])
-            commands.append(f"{red:.2f} {green:.2f} {blue:.2f} RG 1.5 w " + " ".join(path) + " S")
-            legend_x = x + (series_index % 3) * 145
-            legend_y = y + height + 18 - (series_index // 3) * 12
-            commands.append(f"{legend_x:.2f} {legend_y:.2f} m {legend_x + 12:.2f} {legend_y:.2f} l S")
-            commands.append(
-                f"BT /F1 7 Tf 1 0 0 1 {legend_x + 16:.2f} {legend_y - 3:.2f} Tm ({_pdf_escape(series['label'])}) Tj ET"
-            )
-        commands.append("0 0 0 RG 0.75 w")
-        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
-        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
-        commands.append(
-            f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 40:.2f} {y - 30:.2f} Tm ({_pdf_escape(chart['x_label'])}) Tj ET"
-        )
-        commands.append(
-            f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 30:.2f} "
-            f"Tm ({_pdf_escape(chart['y_label'])}) Tj ET"
-        )
+        ReportRenderingService().pdf(pdf_path, report)
 
     def _draw_pdf_yearly_demand_reliability(
-        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+        self, commands: list[str], x: float, y: float, width: float, height: float,
+        report: ReportModel | dict[str, object],
     ) -> None:
-        yearly = report["yearly_reliability"]
-        if not yearly:
-            return
-
-        def yellow_circle(center_x: float, center_y: float, radius: float) -> None:
-            control = radius * 0.55228475
-            commands.append("0.95 0.79 0.30 rg 0.54 0.43 0.00 RG 0.75 w")
-            commands.append(
-                f"{center_x + radius:.2f} {center_y:.2f} m "
-                f"{center_x + radius:.2f} {center_y + control:.2f} "
-                f"{center_x + control:.2f} {center_y + radius:.2f} {center_x:.2f} {center_y + radius:.2f} c "
-                f"{center_x - control:.2f} {center_y + radius:.2f} "
-                f"{center_x - radius:.2f} {center_y + control:.2f} {center_x - radius:.2f} {center_y:.2f} c "
-                f"{center_x - radius:.2f} {center_y - control:.2f} "
-                f"{center_x - control:.2f} {center_y - radius:.2f} {center_x:.2f} {center_y - radius:.2f} c "
-                f"{center_x + control:.2f} {center_y - radius:.2f} "
-                f"{center_x + radius:.2f} {center_y - control:.2f} {center_x + radius:.2f} {center_y:.2f} c B"
-            )
-
-        commands.append("0.50 w 0.85 0.85 0.85 RG")
-        for index in range(5):
-            gy = y + height * index / 4
-            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
-            commands.append(
-                f"BT /F1 8 Tf 1 0 0 1 {x - 28:.2f} {gy - 3:.2f} Tm ({index * 25}%) Tj ET"
-            )
-        commands.append("0 0 0 RG 0.75 w")
-        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
-        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
-        slot_width = width / (len(yearly) + 1)
-        label_step = max((len(yearly) + 9) // 10, 1)
-        for index, row in enumerate(yearly):
-            left = x + index * slot_width + max(slot_width * 0.15, 0.5)
-            bar_width = max(slot_width * 0.7, 0.5)
-            met_height = height * float(row["met_percent"]) / 100.0
-            commands.append("0.18 0.55 0.34 rg")
-            commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {met_height:.2f} re f")
-            commands.append("0.79 0.30 0.30 rg")
-            commands.append(f"{left:.2f} {y + met_height:.2f} {bar_width:.2f} {height - met_height:.2f} re f")
-            yellow_circle(left + bar_width / 2, y + met_height, 3.5)
-            if index % label_step == 0 or index == len(yearly) - 1:
-                commands.append(
-                    f"BT /F1 7 Tf 1 0 0 1 {left - 2:.2f} {y - 16:.2f} Tm ({int(row['year'])}) Tj ET"
-                )
-        average_reliability = float(report["selected_reliability"] or 0.0)
-        average_x = x + (len(yearly) + 0.5) * slot_width
-        average_y = y + height * average_reliability / 100.0
-        yellow_circle(average_x, average_y, 4.5)
-        commands.append(
-            f"BT /F1 7 Tf 1 0 0 1 {average_x - 18:.2f} {y - 14:.2f} Tm (Average) Tj ET"
-        )
-        commands.append(
-            f"BT /F1 6 Tf 1 0 0 1 {average_x - 20:.2f} {y - 24:.2f} Tm ({len(yearly)} years) Tj ET"
-        )
-        commands.append(f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 12:.2f} {y - 34:.2f} Tm (Year) Tj ET")
-        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 16:.2f} Tm (Days %) Tj ET")
-        commands.append("0.18 0.55 0.34 rg 82 370 10 10 re f")
-        commands.append("BT /F1 8 Tf 1 0 0 1 98 372 Tm (Demand met) Tj ET")
-        commands.append("0.79 0.30 0.30 rg 176 370 10 10 re f")
-        commands.append("BT /F1 8 Tf 1 0 0 1 192 372 Tm (Demand not met) Tj ET")
-        yellow_circle(296, 375, 5)
-        commands.append("BT /F1 8 Tf 1 0 0 1 306 372 Tm (Tank reliability) Tj ET")
-        commands.append("0 0 0 rg 0 0 0 RG")
+        draw_pdf_yearly_demand_reliability(commands, x, y, width, height, report)
 
     def _draw_pdf_tank_level_distribution(
-        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+        self, commands: list[str], x: float, y: float, width: float, height: float,
+        report: ReportModel | dict[str, object],
     ) -> None:
-        distribution = report["tank_level_distribution"]
-        if not distribution:
-            return
-        max_count = max(int(row["count"]) for row in distribution) or 1
-        commands.append("0.50 w 0.85 0.85 0.85 RG")
-        for index in range(5):
-            gy = y + height * index / 4
-            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
-            commands.append(
-                f"BT /F1 8 Tf 1 0 0 1 {x - 28:.2f} {gy - 3:.2f} Tm ({max_count * index / 4:.0f}) Tj ET"
-            )
-        commands.append("0 0 0 RG 0.75 w")
-        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
-        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
-        slot_width = width / len(distribution)
-        for index, row in enumerate(distribution):
-            left = x + index * slot_width + slot_width * 0.12
-            bar_width = slot_width * 0.76
-            bar_height = height * int(row["count"]) / max_count
-            commands.append("0.18 0.55 0.34 rg")
-            commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {bar_height:.2f} re f")
-            label = _pdf_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
-            commands.append(
-                f"BT /F1 7 Tf 1 0 0 1 {left:.2f} {y - 16:.2f} Tm ({label}) Tj ET"
-            )
-            commands.append(
-                f"BT /F1 8 Tf 1 0 0 1 {left + bar_width / 2 - 4:.2f} {y + bar_height + 6:.2f} "
-                f"Tm ({int(row['count'])}) Tj ET"
-            )
-        commands.append(
-            f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 58:.2f} {y - 34:.2f} "
-            f"Tm (Tank level range ({_pdf_escape(report['volume_unit'])})) Tj ET"
-        )
-        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 12:.2f} Tm (Days) Tj ET")
-        commands.append("0 0 0 rg 0 0 0 RG")
+        draw_pdf_tank_level_distribution(commands, x, y, width, height, report)
 
     def _draw_pdf_reliability_curve(
-        self, commands: list[str], x: float, y: float, width: float, height: float, report: dict[str, object]
+        self, commands: list[str], x: float, y: float, width: float, height: float,
+        report: ReportModel | dict[str, object],
     ) -> None:
-        curve = report["curve"]
-        if not curve:
-            return
-        values = [(float(point["tank_size"]), float(point["reliability"])) for point in curve]
-        x_domain = [v[0] for v in values]
-        if report["selected_reliability"] is not None:
-            x_domain.append(float(report["selected_tank_size"]))
-        x_min = min(x_domain)
-        x_max = max(x_domain)
-        if x_min == x_max:
-            x_max = x_min + 1
-
-        def sx(value: float) -> float:
-            return x + ((value - x_min) / (x_max - x_min)) * width
-
-        def sy(value: float) -> float:
-            return y + (max(0.0, min(value, 100.0)) / 100.0) * height
-
-        commands.append("0.50 w 0.85 0.85 0.85 RG")
-        for i in range(6):
-            gy = y + (height * i / 5)
-            commands.append(f"{x:.2f} {gy:.2f} m {x + width:.2f} {gy:.2f} l S")
-        commands.append("0 0 0 RG 0.75 w")
-        commands.append(f"{x:.2f} {y:.2f} m {x:.2f} {y + height:.2f} l S")
-        commands.append(f"{x:.2f} {y:.2f} m {x + width:.2f} {y:.2f} l S")
-        for i in range(6):
-            tick_y = y + (height * i / 5)
-            label = _pdf_escape(f"{i * 20}")
-            commands.append(f"BT /F1 8 Tf 1 0 0 1 {x - 24:.2f} {tick_y - 3:.2f} Tm ({label}) Tj ET")
-        for i in range(5):
-            value = x_min + ((x_max - x_min) * i / 4)
-            tick_x = x + (width * i / 4)
-            label = _pdf_escape(f"{value:.0f}")
-            commands.append(f"BT /F1 8 Tf 1 0 0 1 {tick_x - 12:.2f} {y - 18:.2f} Tm ({label}) Tj ET")
-        commands.append(f"BT /F2 10 Tf 1 0 0 1 {x + width / 2 - 56:.2f} {y + height + 18:.2f} Tm (Reliability Curve) Tj ET")
-        commands.append(f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(report['volume_unit'])})) Tj ET")
-        commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 28:.2f} Tm (Reliability %) Tj ET")
-        points = [(sx(tank), sy(reliability)) for tank, reliability in values]
-        if len(points) >= 2:
-            path = [f"{points[0][0]:.2f} {points[0][1]:.2f} m"]
-            path.extend(f"{px:.2f} {py:.2f} l" for px, py in points[1:])
-            commands.append("0.04 0.36 0.67 RG 1.50 w " + " ".join(path) + " S")
-        commands.append("0.04 0.36 0.67 rg")
-        for px, py in points:
-            commands.append(f"{px - 1.5:.2f} {py - 1.5:.2f} {3:.2f} {3:.2f} re f")
-        if report["selected_reliability"] is not None:
-            px = sx(float(report["selected_tank_size"]))
-            py = sy(float(report["selected_reliability"]))
-            radius = 6.0
-            control = radius * 0.55228475
-            commands.append(
-                "0.84 0.05 0.08 RG 2.25 w "
-                f"{px + radius:.2f} {py:.2f} m "
-                f"{px + radius:.2f} {py + control:.2f} {px + control:.2f} {py + radius:.2f} {px:.2f} {py + radius:.2f} c "
-                f"{px - control:.2f} {py + radius:.2f} {px - radius:.2f} {py + control:.2f} {px - radius:.2f} {py:.2f} c "
-                f"{px - radius:.2f} {py - control:.2f} {px - control:.2f} {py - radius:.2f} {px:.2f} {py - radius:.2f} c "
-                f"{px + control:.2f} {py - radius:.2f} {px + radius:.2f} {py - control:.2f} {px + radius:.2f} {py:.2f} c S"
-            )
-            legend_x = x + width - 128
-            legend_y = y + height - 14
-            legend_radius = 4.0
-            legend_control = legend_radius * 0.55228475
-            commands.append(
-                "0.84 0.05 0.08 RG 1.50 w "
-                f"{legend_x + legend_radius:.2f} {legend_y:.2f} m "
-                f"{legend_x + legend_radius:.2f} {legend_y + legend_control:.2f} "
-                f"{legend_x + legend_control:.2f} {legend_y + legend_radius:.2f} "
-                f"{legend_x:.2f} {legend_y + legend_radius:.2f} c "
-                f"{legend_x - legend_control:.2f} {legend_y + legend_radius:.2f} "
-                f"{legend_x - legend_radius:.2f} {legend_y + legend_control:.2f} "
-                f"{legend_x - legend_radius:.2f} {legend_y:.2f} c "
-                f"{legend_x - legend_radius:.2f} {legend_y - legend_control:.2f} "
-                f"{legend_x - legend_control:.2f} {legend_y - legend_radius:.2f} "
-                f"{legend_x:.2f} {legend_y - legend_radius:.2f} c "
-                f"{legend_x + legend_control:.2f} {legend_y - legend_radius:.2f} "
-                f"{legend_x + legend_radius:.2f} {legend_y - legend_control:.2f} "
-                f"{legend_x + legend_radius:.2f} {legend_y:.2f} c S"
-            )
-            commands.append(
-                f"0 0 0 rg BT /F1 8 Tf 1 0 0 1 {legend_x + 9:.2f} {legend_y - 3:.2f} "
-                "Tm (Primary tank size) Tj ET"
-            )
-        commands.append("0 0 0 rg 0 0 0 RG")
+        draw_pdf_reliability_curve(commands, x, y, width, height, report)
 
     def _write_pdf_with_pypdf(
         self,
@@ -12062,52 +10408,7 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         section_pages: dict[str, int] | None = None,
         toc_links: list[tuple[tuple[float, float, float, float], str]] | None = None,
     ) -> None:
-        writer = PdfWriter()
-        regular_font = writer._add_object(
-            DictionaryObject(
-                {
-                    NameObject("/Type"): NameObject("/Font"),
-                    NameObject("/Subtype"): NameObject("/Type1"),
-                    NameObject("/BaseFont"): NameObject("/Helvetica"),
-                }
-            )
-        )
-        bold_font = writer._add_object(
-            DictionaryObject(
-                {
-                    NameObject("/Type"): NameObject("/Font"),
-                    NameObject("/Subtype"): NameObject("/Type1"),
-                    NameObject("/BaseFont"): NameObject("/Helvetica-Bold"),
-                }
-            )
-        )
-        resources = DictionaryObject(
-            {
-                NameObject("/Font"): DictionaryObject(
-                    {
-                        NameObject("/F1"): regular_font,
-                        NameObject("/F2"): bold_font,
-                    }
-                )
-            }
-        )
-
-        for page_commands in pages:
-            page = writer.add_blank_page(width=612, height=792)
-            page[NameObject("/Resources")] = resources
-            content = DecodedStreamObject()
-            content.set_data("\n".join(page_commands).encode("latin-1", errors="replace"))
-            page[NameObject("/Contents")] = writer._add_object(content)
-
-        for title, page_index in (section_pages or {}).items():
-            writer.add_outline_item(title, page_index)
-        for rect, title in toc_links or []:
-            target_page = (section_pages or {}).get(title)
-            if target_page is not None:
-                writer.add_annotation(0, Link(rect=rect, target_page_index=target_page))
-
-        with pdf_path.open("wb") as handle:
-            writer.write(handle)
+        write_pdf_with_pypdf(pdf_path, pages, section_pages, toc_links)
 
     def _display_results_df(self) -> pd.DataFrame:
         cfg = self.config_model
@@ -12143,57 +10444,113 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         )
 
     def _candidate_performance_data(self) -> pd.DataFrame:
-        data = self.curve_df.copy()
-        hydraulic_columns = (
-            "TankSizeGallons", "ReliabilityPercent", "TotalDemandGallons",
-            "RainwaterSuppliedGallons", "AverageAnnualRainwaterSuppliedGallons",
-            "SewerEligibleRainwaterSuppliedGallons",
-            "AverageAnnualSewerEligibleRainwaterSuppliedGallons",
-            "UnmetDemandGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
-            "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
-            "FinalStorageGallons",
+        return CandidateAnalysisService(self.config_model).build(self.curve_df)
+
+    def _financial_inputs_configured(self) -> bool:
+        return FinancialAnalysisService(self.config_model).is_configured()
+
+    def _rainfall_record_quality(self) -> tuple[int, int]:
+        quality = self._rainfall_quality_assessment()
+        return quality.missing_days, len(quality.partial_years)
+
+    def _design_recommendation_set(self) -> RecommendationSet:
+        cfg = self.config_model
+        return recommend_tank_sizes(
+            self._candidate_performance_data(),
+            reliability_target_percent=cfg.recommendation_reliability_target_percent,
+            marginal_gain_threshold=cfg.recommendation_marginal_gain_threshold,
+            selected_tank_size_gallons=cfg.selected_tank_size_gal,
         )
-        for column in hydraulic_columns:
-            if column not in data:
-                data[column] = pd.NA
-        data["NetAnnualSavings"] = pd.NA
-        data["SimplePaybackYears"] = pd.NA
-        params = self.config_model.financial_parameters
-        configured = any(
-            float(value) > 0.0
-            for value in (
-                params.water_rate, params.sewer_rate, params.installed_cost,
-                params.incentives, params.fixed_annual_maintenance,
-                params.annual_maintenance_percent,
+
+    def _design_review_warnings(self) -> list[str]:
+        quality = self._rainfall_quality_assessment()
+        longest_period = max(quality.missing_periods, key=lambda item: item.days, default=None)
+        warnings = selected_design_warnings(
+            self._candidate_performance_data(),
+            selected_tank_size_gallons=self.config_model.selected_tank_size_gal,
+            reliability_target_percent=self.config_model.recommendation_reliability_target_percent,
+            financial_configured=self._financial_inputs_configured(),
+            missing_calendar_days=quality.missing_days,
+            incomplete_calendar_years=len(quality.partial_years),
+            completeness_percent=quality.completeness_percent,
+            completeness_rating=quality.completeness_rating,
+            partial_years=quality.partial_years,
+            longest_missing_period=(
+                (longest_period.start, longest_period.end, longest_period.days)
+                if longest_period is not None
+                else None
+            ),
+            rainfall_data_type=self.config_model.rainfall_data_type,
+        )
+        if self.config_model.rainfall_temporal_resolution != "daily":
+            warnings.append(
+                "The current calculation engine expects daily rainfall totals, but the "
+                f"record is labeled {self.config_model.rainfall_temporal_resolution}."
             )
+        if self.config_model.rainfall_timezone.strip().casefold() in {
+            "",
+            "unknown",
+            "unspecified",
+        }:
+            warnings.append(
+                "Rainfall source timezone is not recorded; subdaily temporal alignment "
+                "cannot be verified."
+            )
+        return warnings
+
+    def _recommendation_report_rows(self) -> list[dict[str, object]]:
+        cfg = self.config_model
+        recommendations = self._design_recommendation_set()
+        rows: list[dict[str, object]] = []
+        for item in (*recommendations.recommendations, *recommendations.alternatives):
+            row = item.to_dict()
+            row["tank_size"] = volume_to_display(item.tank_size_gallons, cfg)
+            row["volume_unit"] = volume_unit(cfg)
+            rows.append(row)
+        return rows
+
+    def _refresh_design_recommendations(self) -> None:
+        if not hasattr(self, "design_recommendations_var"):
+            return
+        cfg = self.config_model
+        cfg.recommendation_reliability_target_percent = min(
+            max(_float(self.recommendation_reliability_target_var.get(), 90.0), 0.0),
+            100.0,
         )
-        if configured:
-            for index, supplied in data["AverageAnnualRainwaterSuppliedGallons"].items():
-                if pd.isna(supplied):
-                    continue
-                try:
-                    financial = calculate_financial_results_from_annual_supply(
-                        float(supplied),
-                        average_annual_sewer_eligible_supplied_gallons=(
-                            None
-                            if pd.isna(data.at[index, "AverageAnnualSewerEligibleRainwaterSuppliedGallons"])
-                            else float(data.at[index, "AverageAnnualSewerEligibleRainwaterSuppliedGallons"])
-                        ),
-                        water_rate=params.water_rate,
-                        sewer_rate=params.sewer_rate,
-                        billing_unit=params.tariff_billing_unit,
-                        sewer_eligible_percent=params.sewer_eligible_percent,
-                        installed_cost=params.installed_cost,
-                        incentives=params.incentives,
-                        fixed_annual_maintenance=params.fixed_annual_maintenance,
-                        maintenance_percent=params.annual_maintenance_percent,
-                        analysis_period_years=params.analysis_period_years,
-                    )
-                except ValueError:
-                    continue
-                data.at[index, "NetAnnualSavings"] = financial.net_annual_savings
-                data.at[index, "SimplePaybackYears"] = financial.simple_payback_years
-        return data
+        cfg.recommendation_marginal_gain_threshold = max(
+            _float(self.recommendation_marginal_gain_var.get(), 1.0), 0.0
+        )
+        self.recommendation_reliability_target_var.set(
+            f"{cfg.recommendation_reliability_target_percent:g}"
+        )
+        self.recommendation_marginal_gain_var.set(
+            f"{cfg.recommendation_marginal_gain_threshold:g}"
+        )
+        recommendation_set = self._design_recommendation_set()
+        items = (*recommendation_set.recommendations, *recommendation_set.alternatives)
+        if not items:
+            self.design_recommendations_var.set(
+                "Run an analysis to generate design recommendations."
+            )
+        else:
+            unit = volume_unit(cfg)
+            currency = cfg.financial_parameters.currency
+            lines: list[str] = []
+            for item in items:
+                economics = ""
+                if item.simple_payback_years is not None:
+                    economics = f"; payback {item.simple_payback_years:.1f} years"
+                elif item.net_annual_savings is not None:
+                    economics = f"; net savings {currency} {item.net_annual_savings:,.2f}/year"
+                lines.append(
+                    f"- {item.role}: {volume_to_display(item.tank_size_gallons, cfg):,.0f} "
+                    f"{unit} at {item.reliability_percent:.1f}% reliability{economics}. {item.detail}"
+                )
+            self.design_recommendations_var.set("\n".join(lines))
+        warnings = self._design_review_warnings()
+        self.design_warnings_var.set(
+            "Review: " + " ".join(warnings) if warnings else "No configured review conditions were triggered."
+        )
 
     def _sort_candidate_performance(self, column: str) -> None:
         if self.candidate_sort_column == column:
@@ -12211,23 +10568,14 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         self.candidate_tree_sizes = {}
         data = self._candidate_performance_data()
         if data.empty:
+            self._refresh_design_recommendations()
             return
-        if self.candidate_sort_column in data:
-            data = data.sort_values(
-                self.candidate_sort_column,
-                ascending=not self.candidate_sort_reverse,
-                na_position="last",
-                kind="stable",
-            )
+        candidate_service = CandidateAnalysisService(self.config_model)
+        data = candidate_service.sorted_data(
+            data, self.candidate_sort_column, self.candidate_sort_reverse
+        )
         unit = volume_unit(self.config_model)
         currency = self.config_model.financial_parameters.currency
-        volume_columns = (
-            "TankSizeGallons", "TotalDemandGallons", "RainwaterSuppliedGallons",
-            "SewerEligibleRainwaterSuppliedGallons",
-            "UnmetDemandGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
-            "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
-            "FinalStorageGallons",
-        )
         heading_labels = {
             "TankSizeGallons": f"Tank size ({unit})", "ReliabilityPercent": "Reliability (%)",
             "TotalDemandGallons": f"Total demand ({unit})",
@@ -12239,33 +10587,21 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
             "OverflowGallons": f"Overflow ({unit})", "FirstFlushLossGallons": f"First-flush loss ({unit})",
             "TreatmentLossGallons": f"Treatment loss ({unit})", "FinalStorageGallons": f"Final storage ({unit})",
             "NetAnnualSavings": f"Net savings/year ({currency})", "SimplePaybackYears": "Simple payback (years)",
+            "LifecycleNPV": f"Lifecycle NPV ({currency})",
         }
         for column, label in heading_labels.items():
             tree.heading(column, text=label)
-        for position, row in enumerate(data.itertuples(index=False), start=1):
-            values_by_column = row._asdict()
-            display_values: list[str] = []
-            for column in tree["columns"]:
-                value = values_by_column.get(column)
-                if pd.isna(value):
-                    display_values.append("--")
-                elif column in volume_columns:
-                    display_values.append(
-                        f"{volume_to_display(float(value), self.config_model):,.0f}"
-                    )
-                elif column == "ReliabilityPercent":
-                    display_values.append(f"{float(value):.1f}")
-                elif column == "NetAnnualSavings":
-                    display_values.append(f"{float(value):,.2f}")
-                elif column == "SimplePaybackYears":
-                    display_values.append(f"{float(value):.1f}")
-                else:
-                    display_values.append(str(value))
+        columns = tuple(str(column) for column in tree["columns"])
+        display_rows = candidate_service.display_rows(data, columns)
+        for position, (values_by_column, display_values) in enumerate(
+            zip(data.to_dict("records"), display_rows), start=1
+        ):
             item = f"candidate-{position}"
             tree.insert("", "end", iid=item, values=display_values)
             tank_size = values_by_column.get("TankSizeGallons")
             if not pd.isna(tank_size):
                 self.candidate_tree_sizes[item] = float(tank_size)
+        self._refresh_design_recommendations()
 
     def use_candidate_as_primary(self) -> None:
         selected = self.candidate_performance_tree.selection()
@@ -12296,16 +10632,7 @@ document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory
         )
         if not path:
             return
-        export = data.copy()
-        unit = volume_unit(self.config_model)
-        volume_columns = [column for column in export.columns if column.endswith("Gallons")]
-        for column in volume_columns:
-            export[column] = pd.to_numeric(export[column], errors="coerce").map(
-                lambda value: volume_to_display(float(value), self.config_model) if pd.notna(value) else value
-            )
-        export = export.rename(
-            columns={column: column.replace("Gallons", f" ({unit})") for column in volume_columns}
-        )
+        export = CandidateAnalysisService(self.config_model).export_data(data)
         export.to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
         self.status_var.set(f"Exported candidate tank performance: {Path(path).name}")
 
@@ -13809,7 +12136,15 @@ class DemandDialog(tk.Toplevel):
 
 if __name__ == "__main__":
     if "--smoke-test" in sys.argv:
-        store = SQLiteStore(str(_app_dir() / "rainwater_projects.db"))
+        smoke_data_dir = user_data_dir()
+        smoke_data_dir.mkdir(parents=True, exist_ok=True)
+        smoke_project_path = smoke_data_dir / "rainwater_projects.db"
+        store = SQLiteStore(
+            str(smoke_project_path),
+            backup_dir=project_backup_dir(
+                smoke_project_path, data_dir=smoke_data_dir
+            ),
+        )
         print(f"{APP_TITLE} smoke test OK; {len(store.list_projects())} saved project(s) visible.")
         raise SystemExit(0)
     app = RainwaterTkApp()

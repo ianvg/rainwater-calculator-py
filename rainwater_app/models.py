@@ -218,6 +218,15 @@ class FinancialParameters:
     fixed_annual_maintenance: float = 0.0
     annual_maintenance_percent: float = 0.0
     analysis_period_years: int = 20
+    discount_rate_percent: float = 5.0
+    utility_rate_escalation_percent: float = 0.0
+    maintenance_escalation_percent: float = 0.0
+    electricity_escalation_percent: float = 0.0
+    pump_power_kw: float = 0.0
+    pump_flow_rate_gallons_per_hour: float = 0.0
+    equipment_replacement_cost: float = 0.0
+    equipment_replacement_interval_years: int = 0
+    equipment_replacement_escalation_percent: float = 0.0
 
 
 @dataclass
@@ -258,10 +267,18 @@ class ProjectConfig:
     graph_step_gal: int = 500
     graph_auto_step_count: int = 20
     selected_tank_size_gal: float = 5000.0
+    recommendation_reliability_target_percent: float = 90.0
+    recommendation_marginal_gain_threshold: float = 1.0
     multitank_comparison_enabled: bool = False
     comparison_tank_sizes_gal: List[float] = field(default_factory=list)
     use_synthetic_hourly_rainfall: bool = False
     rainfall_source_label: str | None = None
+    rainfall_data_type: str = "unclassified"
+    rainfall_temporal_resolution: str = "daily"
+    rainfall_timezone: str = "Unspecified"
+    rainfall_timing_type: str = "Daily totals; within-day timing not observed"
+    rainfall_retrieved_at: str | None = None
+    rainfall_known_missing_dates: List[str] = field(default_factory=list)
     weather_station_latitude: float | None = None
     weather_station_longitude: float | None = None
     analysis_input_signature: str | None = None

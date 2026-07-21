@@ -77,3 +77,13 @@ def test_signature_ignores_project_metadata_and_rainfall_row_order() -> None:
     config.unit_system = "Metric"
 
     assert analysis_input_signature(config, rainfall.iloc[::-1]) == before
+
+
+def test_signature_ignores_presentation_only_recommendation_assumptions() -> None:
+    config = default_project_config()
+    before = analysis_input_signature(config, _rainfall())
+
+    config.recommendation_reliability_target_percent = 95.0
+    config.recommendation_marginal_gain_threshold = 0.5
+
+    assert analysis_input_signature(config, _rainfall()) == before

@@ -2,6 +2,53 @@
 
 This document records possible future directions for the RWH Calculator. Items are proposals rather than commitments to a particular release.
 
+## Architecture modularization and quality gates
+
+[In progress] Reduce the size and responsibility of `tkinter_app.py` through behavior-preserving extractions. Financial analysis, candidate-table preparation, hydraulic analysis coordination, and HTML, LaTeX, and direct-PDF rendering now live in tested UI-independent services. Pure report-model helpers remain in `rainwater_app/reporting.py`, and shared form conversion and validation remain in `rainwater_app/ui_logic.py`. Existing desktop call sites retain compatibility while tests target the extracted modules directly.
+
+Continue extracting cohesive boundaries instead of performing a single wholesale rewrite:
+
+- [Implemented] Keep validated HTML, LaTeX, and direct-PDF renderers behind a dedicated reporting service.
+- Separate system-builder canvas interaction from graph validation and compilation.
+- [Implemented] Isolate hydraulic analysis coordination, cancellation callbacks, and progress events from widgets.
+- Move reusable chart data preparation away from Tkinter drawing code.
+- Keep dialogs and tab construction thin, with calculation and validation logic independently testable.
+- Add characterization tests before moving UI behavior whose expected output is not already covered.
+
+[Implemented initial gate] Run tests and static checks for pushes and pull requests, build the documentation strictly, and import/smoke-test the desktop entry point on Windows. The manually triggered executable build must run the tests before packaging and smoke-test the packaged executable before uploading it. Future quality work should add coverage reporting, dependency auditing, and targeted visual tests for high-risk Tkinter screens.
+
+## Prioritized product and platform upgrades
+
+### Decision-support recommendations
+
+[Implemented initial release] The candidate-results screen identifies the smallest capacity meeting a user-defined reliability target, a diminishing-returns knee based on an editable marginal-gain threshold, the lowest-payback candidate with a finite payback, and nearby alternatives. The settings are saved without invalidating hydraulic results, and recommendations disclose their governing assumptions rather than label one tank size as universally optimal.
+
+[Partially implemented] Prominent review conditions cover incomplete and missing rainfall records, low selected-tank reliability, overflow above the documented review threshold, and unconfigured economics. Recommendations and warnings appear on screen and in HTML, LaTeX, and direct PDF reports. High municipal makeup and additional project-specific thresholds remain future work; stale-result warnings continue to use the existing Results warning.
+
+### Report architecture and accessibility
+
+[Implemented initial architecture] HTML, LaTeX, and direct PDF rendering now share a validated report model with an explicit schema version. Exports use atomic replacement, HTML is portable without online map or library dependencies, and every HTML chart has a corresponding data table. The model uses report schema version 2 and rejects unsupported versions, missing required fields, and non-finite values. Continuing renderer extraction, broader schema migration rules, and visual/accessibility automation are tracked in [Report improvements](roadmap/report-improvements.md).
+
+### Complete lifecycle economics
+
+[Implemented] Extend simple payback to year-end discounted lifecycle cash flow with utility, maintenance, electricity, and replacement-cost escalation; discount rate; pump energy derived from simulated flow; recurring equipment replacement; nominal net benefit; discounted payback; net present value; and internal rate of return. IRR is withheld for non-conventional cash flows with multiple sign changes. Selected-tank, candidate, optimization, and report calculations share the same lifecycle engine.
+
+[Not started] Add tiered and time-varying tariffs only with explicit billing periods, baseline municipal consumption, fixed-charge treatment, tier allocation rules, and tests that reconcile avoided charges to simulated end-use supply. Component-specific maintenance schedules, financing, taxes, depreciation, and terminal residual value also remain future work.
+
+### Rainfall quality and provenance
+
+[Implemented] Record-completeness scoring, explicit partial-year and missing-period warnings, temporal-resolution and timezone metadata, labels for observed, synthetic, interpolated, and gridded-reanalysis data, and rainfall-event and yearly summaries are available in the desktop workflow and all report formats. Provider-reported missing dates and import timestamps are retained with the project.
+
+[Not started] International providers should implement the common interface described below and preserve source, station, precipitation basis, quality flags, licensing attribution, and retrieval metadata with the project. The quality work above intentionally leaves the existing ACIS and ECCC integrations separate.
+
+### Windows distribution and project safety
+
+[Implemented] Writable state uses native per-user application-data and cache locations on Windows, macOS, and Linux, with environment overrides for managed or portable deployments. First startup atomically copies legacy beside-application files without deleting them. SQLite and project payloads have explicit schema versions; full-synchronous WAL transactions, validated rotating backups, integrity checks, automatic restoration, and damaged-file quarantine cover interrupted writes and corruption. A per-user Inno Setup installer and documented uninstall behavior preserve user projects and backups. Binary signing, release checksums, and any future automatic-update mechanism remain release-engineering work.
+
+### Interface strategy
+
+[Implemented] Tkinter is the complete supported product for authoring, analysis, optimization, persistence, and reporting. Streamlit is a deliberately limited, read-only saved-project viewer and does not own calculation or editing workflows. The legacy Flask entry point, templates, authentication prototype, dependencies, and launchers have been retired. New product features belong in Tkinter and shared domain modules; the viewer may expose saved outputs without creating a parallel implementation.
+
 ## Configurable system networks
 
 Develop an OpenStudio-style system editor in which users assemble arbitrary rainwater systems from tanks, pumps, filters, controls, municipal connections, end uses, and discharge components. Each component would expose typed inlet and outlet ports plus capacity, efficiency, storage, and control parameters. A general hourly solver would traverse the connected network and apply conservation of mass at every component and timestep instead of selecting a hard-coded direct or indirect template.
@@ -10,18 +57,18 @@ The current direct and indirect templates are the first constrained implementati
 
 ## Economic analysis and lifecycle cost
 
-The first economic-analysis release is implemented for the selected tank. It is driven by simulated rainwater supply rather than a user-estimated tank-efficiency factor and supports simple water and sewer tariffs, installed cost, incentives, fixed and percentage annual maintenance, gross and net annual savings, simple payback, and an undiscounted analysis-period net benefit.
+Lifecycle economics are implemented for selected tanks, reliability-curve candidates, and indirect-system optimization. The calculation is driven by simulated rainwater supply and pump flow rather than user-estimated tank efficiency.
 
-The remaining roadmap work is to add tiered and time-varying tariffs, escalation, discounting, equipment replacement, energy consumption, net present value, and internal rate of return.
+The remaining roadmap work includes tiered and time-varying tariffs, component-specific maintenance schedules, financing, taxes, depreciation, and terminal residual value.
 
 Implementation requirements include:
 
 - [Implemented] Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
 - [Implemented] Calculate avoided utility consumption from simulated rainwater delivered to end uses. Do not count overflow, filter loss, unmet demand, municipal makeup, or stored water as savings.
 - [Implemented] Define sewer eligibility on each demand object. Irrigation defaults to exempt, users can override the billing assumption, and supplied rainwater is allocated proportionally when demand is only partially met.
-- Support tiered or time-varying tariffs before presenting results as more than a simple-rate estimate.
-- [Implemented for selected and candidate tanks] Report annual supplied volume, sewer-eligible supplied volume, gross savings, maintenance cost, net savings, and simple payback. A later lifecycle model should add escalation, discount rate, equipment replacement, energy consumption, net present value, and internal rate of return.
-- [Implemented on screen] Include units and assumptions in results and distinguish user inputs from calculated outputs. Exported-report integration remains planned.
+- Support tiered or time-varying tariffs only after adding explicit billing-period and tier-allocation assumptions.
+- [Implemented] Report annual supplied volume, sewer-eligible supplied volume, gross savings, maintenance and energy cost, net savings, simple and discounted payback, replacement cost, NPV, and IRR.
+- [Implemented] Include units and assumptions in screen and exported results and distinguish user inputs from calculated outputs.
 - [Implemented] Validate negative costs, zero or inconsistent tariff units, non-positive net savings, and payback cases that display as not achieved rather than divide by zero.
 - [Implemented] Deterministic tests reconcile economic outputs to delivered hydraulic totals and tariff units, including mixed indoor/irrigation demand and municipal-backup scenarios.
 
@@ -29,7 +76,7 @@ Implementation requirements include:
 
 Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, filtration pump, and buffer tank together. These variables interact: primary storage controls available rainwater, the filtration pump controls buffer refill rate, and the buffer tank serves peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
 
-**Initial implementation:** Analysis settings now includes a deterministic exhaustive search using an editable, explicitly illustrative catalog with three initial choices for each component. Users can bulk-edit catalog names, capacities, installed costs, and pump power; choose simple payback, net annual savings, rainwater reliability, or analysis-period net benefit as the objective; and constrain minimum reliability, maximum annual municipal makeup, maximum installed cost, and positive net savings. The workflow reuses the hourly indirect-system and financial inputs, estimates filtration-pump energy, reports aggregate municipal makeup and overflow in backend results, and saves its inputs with the project. Replacing placeholder products with a maintained vendor catalog and adding the remaining constraints and performance improvements below remain roadmap work.
+**Implemented:** Analysis settings includes a deterministic exhaustive search using an editable, explicitly illustrative catalog with three initial choices for each component. Users can bulk-edit catalog names, capacities, installed costs, and pump power; choose simple payback, net annual savings, rainwater reliability, analysis-period net benefit, or lifecycle NPV as the objective; and constrain minimum reliability, maximum annual municipal makeup, maximum installed cost, and positive net savings. The workflow reuses the hourly indirect-system and lifecycle financial inputs, estimates filtration-pump energy, and saves its inputs with the project.
 
 The objective should be based on complete lifecycle drivers rather than hydraulic performance alone:
 
@@ -114,7 +161,7 @@ Implementation requirements include:
 - [Implemented] Extend the reliability-curve engine to aggregate the same mass-balance outputs used by the selected-tank simulation rather than running a separate simplified interpretation.
 - Preserve cancellation and progress reporting because additional candidate metrics increase calculation cost.
 - [Implemented] Add a sortable/exportable comparison table and allow users to promote a candidate to the primary tank without re-entering its size.
-- Add a recommendation aid that identifies diminishing reliability gains, but expose the threshold as a user-controlled assumption and avoid presenting it as a universally optimal tank size.
+- [Implemented] Add a recommendation aid that identifies diminishing reliability gains, exposes the threshold as a user-controlled assumption, and avoids presenting it as a universally optimal tank size.
 - [Implemented] Include candidate hydraulic metrics in saved analysis results and invalidate them when rainfall, demand, loss, operating-level, or system inputs change. Economic columns are recalculated from the saved annual supply when financial inputs change.
 - [Implemented] Add reconciliation tests proving that each candidate row matches an independent simulation of the same tank size.
 

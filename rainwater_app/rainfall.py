@@ -164,10 +164,16 @@ def load_rainfall_csv(file_bytes: bytes) -> pd.DataFrame:
     result.columns = ["Date", "Precipitation"]
     result["Date"] = pd.to_datetime(result["Date"], errors="coerce")
     result["Precipitation"] = pd.to_numeric(result["Precipitation"], errors="coerce")
+    missing_dates = result.loc[
+        result["Date"].notna() & result["Precipitation"].isna(), "Date"
+    ].dt.normalize()
     result = result.dropna(subset=["Date"]).fillna({"Precipitation": 0.0})
     result = result.sort_values("Date").reset_index(drop=True)
 
     if result.empty:
         raise ValueError("No valid rows found after parsing Date/Precipitation.")
 
+    result.attrs["known_missing_dates"] = [
+        value.date().isoformat() for value in missing_dates
+    ]
     return result

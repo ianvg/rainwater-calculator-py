@@ -46,6 +46,7 @@ Only one objective is used for ranking during a run:
 - **Net annual savings** maximizes avoided water and eligible sewer charges after maintenance and filtration-pump electricity.
 - **Rainwater reliability** maximizes the percentage of hourly demand intervals fully supplied by rainwater.
 - **Analysis-period net benefit** maximizes undiscounted net annual savings over the selected analysis period minus net installed cost.
+- **Lifecycle NPV** maximizes discounted lifecycle value after escalation, electricity, maintenance, and recurring replacement costs.
 
 Changing the objective changes ranking, not the hydraulic simulation or feasibility requirements.
 
@@ -69,7 +70,7 @@ The optimizer reads the following project values without changing them:
 - Water and sewer tariffs and sewer-eligible percentage.
 - Base installed cost and incentives.
 - Fixed and percentage maintenance.
-- Electricity price and financial analysis period.
+- Electricity price, financial analysis period, discount rate, escalation, and replacement assumptions.
 
 Current model assumptions that materially affect interpretation are:
 
@@ -78,7 +79,7 @@ Current model assumptions that materially affect interpretation are:
 - Each day's collected rainfall enters storage after that day's demand, a conservative timing assumption.
 - Municipal backup does not count as rainwater reliability or rainwater supplied.
 - Filtration-pump energy is estimated from simulated transferred volume divided by rated capacity, multiplied by catalog power.
-- Financial calculations use flat tariffs and undiscounted values.
+- Financial calculations use flat tariffs and the shared lifecycle cash-flow engine. NPV uses year-end cash flows and the configured discount and escalation rates.
 - Catalog component costs are added to the base installed system cost; incentives are subtracted once.
 - Percentage maintenance applies to total installed cost.
 - Historical rainfall and configured demand are treated deterministically; uncertainty and climate projections are not currently sampled.

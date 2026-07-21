@@ -1,3 +1,5 @@
+import math
+
 import pandas as pd
 import pytest
 
@@ -45,7 +47,35 @@ def test_optimizer_filters_by_reliability_and_ranks_feasible_payback() -> None:
     assert [result.rank for result in results] == [1, 2]
     assert results[0].simple_payback_years <= results[1].simple_payback_years
     assert results[0].average_annual_energy_kwh >= 0.0
+    assert all(math.isfinite(result.lifecycle_net_present_value) for result in results)
     assert progress_updates == [(1, 2), (2, 2)]
+
+
+def test_optimizer_can_rank_by_lifecycle_npv() -> None:
+    config = default_project_config("NPV optimization")
+    config.surfaces = [Surface("Roof", area=2_000.0, runoff_coefficient=0.9)]
+    config.demand.simple_daily_demand_gallons = 100.0
+    config.financial_parameters.water_rate = 50.0
+    config.financial_parameters.discount_rate_percent = 4.0
+    config.optimization_parameters.minimum_reliability_percent = 0.0
+    config.optimization_parameters.objective = "Lifecycle NPV"
+    rainfall = pd.DataFrame({
+        "Date": pd.date_range("2025-01-01", periods=3, freq="D"),
+        "Precipitation": [1.0, 0.0, 0.0],
+    })
+
+    results = optimize_indirect_system(
+        config,
+        rainfall,
+        primary_tanks=(
+            PrimaryTankProduct("Small", 500.0, 500.0),
+            PrimaryTankProduct("Large", 1_000.0, 1_500.0),
+        ),
+        filtration_pumps=(FiltrationPumpProduct("Pump", 300.0, 0.5, 250.0),),
+        booster_tanks=(BoosterTankProduct("Booster", 100.0, 100.0),),
+    )
+
+    assert results[0].lifecycle_net_present_value >= results[1].lifecycle_net_present_value
 
 
 def test_optimizer_rejects_invalid_minimum_reliability() -> None:

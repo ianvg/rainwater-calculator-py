@@ -9,9 +9,11 @@ from urllib import request
 
 import pandas as pd
 
+from .app_paths import user_cache_dir
+
 ACIS_STATION_META_URL = "https://data.rcc-acis.org/StnMeta"
 ACIS_STATION_DATA_URL = "https://data.rcc-acis.org/StnData"
-DEFAULT_CACHE_DIR = Path(".weather_cache")
+DEFAULT_CACHE_DIR = user_cache_dir() / "weather"
 
 
 def default_complete_calendar_range(years: int = 30, today: date | None = None) -> tuple[date, date]:
@@ -117,9 +119,13 @@ def fetch_daily_station_data(
 
     rows = []
     excluded_snowfall_days = 0
+    missing_dates: list[str] = []
     for row in response.get("data", []):
         if len(row) < 5:
             continue
+        observation_date = pd.to_datetime(row[0], errors="coerce")
+        if str(row[3]).strip().upper() in {"", "M", "S"} and not pd.isna(observation_date):
+            missing_dates.append(observation_date.normalize().date().isoformat())
         precipitation = _parse_acis_number(row[3])
         snowfall = _parse_acis_number(row[4])
         if precipitation_basis == "TOTAL_RAIN" and snowfall > 0:
@@ -140,6 +146,7 @@ def fetch_daily_station_data(
         raise ValueError("ACIS returned no valid daily weather rows for this station and date range.")
 
     data.attrs["rain_only_excluded_days"] = excluded_snowfall_days
+    data.attrs["known_missing_dates"] = missing_dates
 
     return data
 

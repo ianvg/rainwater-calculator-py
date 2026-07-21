@@ -28,6 +28,7 @@ def test_daily_features_select_field_complete_calendar_and_convert_mm() -> None:
 
     assert result["Precipitation"].tolist() == pytest.approx([10.0 / MM_PER_INCH, 0.0, 0.0])
     assert result.attrs["missing_days"] == 2
+    assert result.attrs["known_missing_dates"] == ["2025-01-02", "2025-01-03"]
 
 
 def test_daily_features_reject_empty_response() -> None:

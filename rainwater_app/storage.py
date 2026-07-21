@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import asdict
+from datetime import datetime, timezone
 from io import StringIO
 from pathlib import Path
-from typing import Any
+import shutil
+import tempfile
+from typing import Any, Iterator
 
 import pandas as pd
 
@@ -24,18 +29,63 @@ from .models import (
 )
 
 
+STORAGE_SCHEMA_VERSION = 1
+PROJECT_SCHEMA_VERSION = 2
+DEFAULT_BACKUP_RETENTION = 10
+
+
+class StorageRecoveryError(RuntimeError):
+    """Raised when a damaged project database has no usable automatic backup."""
+
+
 class SQLiteStore:
-    def __init__(self, db_path: str = "rainwater_projects.db") -> None:
+    def __init__(
+        self,
+        db_path: str = "rainwater_projects.db",
+        *,
+        backup_dir: str | Path | None = None,
+        backup_retention: int = DEFAULT_BACKUP_RETENTION,
+    ) -> None:
         self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.backup_dir = (
+            Path(backup_dir)
+            if backup_dir is not None
+            else self.db_path.parent / "backups" / self.db_path.stem
+        )
+        self.backup_retention = max(int(backup_retention), 1)
+        self.recovery_notice: str | None = None
+        self.last_backup_error: str | None = None
+        self._recover_if_needed()
         self._init_db()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path)
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
+        conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
-        return conn
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA synchronous = FULL")
+        try:
+            yield conn
+        finally:
+            conn.close()
 
     def _init_db(self) -> None:
         with self._connect() as conn:
+            existing_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        if existing_version > STORAGE_SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Project database schema {existing_version} is newer than the supported "
+                f"schema {STORAGE_SCHEMA_VERSION}. Upgrade the application before opening it."
+            )
+        if self.db_path.stat().st_size > 0 and existing_version < STORAGE_SCHEMA_VERSION:
+            if self._create_backup_safely("pre-schema-upgrade") is None:
+                raise StorageRecoveryError(
+                    "Cannot upgrade the project database schema because its pre-upgrade "
+                    f"backup failed: {self.last_backup_error or 'unknown backup error'}"
+                )
+        with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS projects (
@@ -82,12 +132,157 @@ class SQLiteStore:
             }
             if "hourly_precipitation_json" not in rainfall_columns:
                 conn.execute("ALTER TABLE rainfall_data ADD COLUMN hourly_precipitation_json TEXT")
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS storage_metadata "
+                "(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO storage_metadata (key, value) VALUES (?, ?)",
+                ("storage_schema_version", str(STORAGE_SCHEMA_VERSION)),
+            )
+            conn.execute(f"PRAGMA user_version = {STORAGE_SCHEMA_VERSION}")
             conn.commit()
+
+    @staticmethod
+    def _database_is_valid(path: Path) -> bool:
+        if not path.is_file() or path.stat().st_size == 0:
+            return False
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(path, timeout=5.0)
+            result = connection.execute("PRAGMA quick_check").fetchone()
+            return bool(result and str(result[0]).casefold() == "ok")
+        except (OSError, sqlite3.DatabaseError):
+            return False
+        finally:
+            if connection is not None:
+                connection.close()
+
+    def list_backups(self) -> list[Path]:
+        if not self.backup_dir.is_dir():
+            return []
+        return sorted(
+            (
+                candidate
+                for candidate in self.backup_dir.glob(f"{self.db_path.stem}-*.db")
+                if not candidate.name.endswith("-corrupt.db")
+            ),
+            reverse=True,
+        )
+
+    def create_backup(self, reason: str = "manual") -> Path:
+        if not self._database_is_valid(self.db_path):
+            raise StorageRecoveryError("Cannot back up a missing or invalid project database.")
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        clean_reason = "".join(
+            character if character.isalnum() else "-" for character in reason.casefold()
+        ).strip("-") or "backup"
+        destination = self.backup_dir / f"{self.db_path.stem}-{timestamp}-{clean_reason}.db"
+        temporary: Path | None = None
+        source_connection: sqlite3.Connection | None = None
+        destination_connection: sqlite3.Connection | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{destination.name}.",
+                suffix=".tmp",
+                dir=self.backup_dir,
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+            source_connection = sqlite3.connect(self.db_path, timeout=30.0)
+            destination_connection = sqlite3.connect(temporary)
+            source_connection.backup(destination_connection)
+            destination_connection.commit()
+            destination_connection.close()
+            destination_connection = None
+            source_connection.close()
+            source_connection = None
+            if not self._database_is_valid(temporary):
+                raise StorageRecoveryError("The generated project backup did not pass validation.")
+            Path(f"{temporary}-wal").unlink(missing_ok=True)
+            Path(f"{temporary}-shm").unlink(missing_ok=True)
+            os.replace(temporary, destination)
+            temporary = None
+            for stale in self.list_backups()[self.backup_retention :]:
+                stale.unlink(missing_ok=True)
+            self.last_backup_error = None
+            return destination
+        finally:
+            if destination_connection is not None:
+                destination_connection.close()
+            if source_connection is not None:
+                source_connection.close()
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+
+    def _create_backup_safely(self, reason: str) -> Path | None:
+        try:
+            return self.create_backup(reason)
+        except (OSError, sqlite3.DatabaseError, StorageRecoveryError) as exc:
+            self.last_backup_error = str(exc)
+            return None
+
+    def restore_latest_backup(self) -> Path:
+        self.backup_dir.mkdir(parents=True, exist_ok=True)
+        valid_backup = next(
+            (candidate for candidate in self.list_backups() if self._database_is_valid(candidate)),
+            None,
+        )
+        if valid_backup is None:
+            raise StorageRecoveryError(
+                f"No valid backup is available for {self.db_path.name}."
+            )
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        quarantined = self.backup_dir / f"{self.db_path.stem}-{timestamp}-corrupt.db"
+        if self.db_path.exists():
+            shutil.copy2(self.db_path, quarantined)
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                prefix=f".{self.db_path.name}.",
+                suffix=".restore",
+                dir=self.db_path.parent,
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+            shutil.copy2(valid_backup, temporary)
+            if not self._database_is_valid(temporary):
+                raise StorageRecoveryError("The selected backup failed validation during restore.")
+            Path(f"{temporary}-wal").unlink(missing_ok=True)
+            Path(f"{temporary}-shm").unlink(missing_ok=True)
+            Path(f"{self.db_path}-wal").unlink(missing_ok=True)
+            Path(f"{self.db_path}-shm").unlink(missing_ok=True)
+            os.replace(temporary, self.db_path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+        self.recovery_notice = (
+            f"Recovered {self.db_path.name} from backup {valid_backup.name}. "
+            f"The damaged file was preserved as {quarantined.name}."
+        )
+        return valid_backup
+
+    def _recover_if_needed(self) -> None:
+        if not self.db_path.exists() or self.db_path.stat().st_size == 0:
+            return
+        if self._database_is_valid(self.db_path):
+            return
+        self.restore_latest_backup()
 
     def list_projects(self) -> list[str]:
         with self._connect() as conn:
             rows = conn.execute("SELECT name FROM projects ORDER BY updated_at DESC, name ASC").fetchall()
         return [r["name"] for r in rows]
+
+    def schema_versions(self) -> dict[str, int]:
+        with self._connect() as conn:
+            storage_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+        return {
+            "storage": storage_version,
+            "project": PROJECT_SCHEMA_VERSION,
+        }
 
     def list_system_templates(self) -> list[str]:
         with self._connect() as conn:
@@ -120,6 +315,7 @@ class SQLiteStore:
                     (clean_name, json.dumps(template), str(existing["name"])),
                 )
             conn.commit()
+        self._create_backup_safely("template-save")
 
     def load_system_template(self, name: str) -> dict[str, Any]:
         with self._connect() as conn:
@@ -151,6 +347,7 @@ class SQLiteStore:
             if cursor.rowcount == 0:
                 raise ValueError(f"System template '{old_name}' not found.")
             conn.commit()
+        self._create_backup_safely("template-rename")
 
     def delete_system_template(self, name: str) -> None:
         with self._connect() as conn:
@@ -158,6 +355,7 @@ class SQLiteStore:
                 "DELETE FROM system_templates WHERE name = ? COLLATE NOCASE", (name,)
             )
             conn.commit()
+        self._create_backup_safely("template-delete")
 
     def save_project(
         self,
@@ -168,7 +366,9 @@ class SQLiteStore:
         comparison_results_df: pd.DataFrame | None = None,
         hourly_results_df: pd.DataFrame | None = None,
     ) -> None:
-        config_json = json.dumps(asdict(config))
+        config_json = json.dumps(
+            {"project_schema_version": PROJECT_SCHEMA_VERSION, **asdict(config)}
+        )
         curve_json = self._df_to_json(curve_df)
         results_json = self._df_to_json(results_df)
         comparison_results_json = self._df_to_json(comparison_results_df)
@@ -213,6 +413,7 @@ class SQLiteStore:
                     records,
                 )
             conn.commit()
+        self._create_backup_safely("project-save")
 
     def load_project(self, name: str) -> tuple[ProjectConfig, pd.DataFrame]:
         config, rainfall_df, _curve_df, _results_df = self.load_project_with_analysis(name)
@@ -228,6 +429,12 @@ class SQLiteStore:
                 raise ValueError(f"Project '{name}' not found.")
 
             config_dict: dict[str, Any] = json.loads(row["config_json"])
+            project_schema_version = int(config_dict.pop("project_schema_version", 0))
+            if project_schema_version > PROJECT_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Project schema {project_schema_version} is newer than the supported "
+                    f"schema {PROJECT_SCHEMA_VERSION}. Upgrade the application before loading it."
+                )
             rainfall_rows = conn.execute(
                 "SELECT date, precipitation, hourly_precipitation_json FROM rainfall_data "
                 "WHERE project_id = ? ORDER BY date ASC",
@@ -392,6 +599,13 @@ class SQLiteStore:
             graph_step_gal=int(payload.get("graph_step_gal", 500)),
             graph_auto_step_count=max(1, int(payload.get("graph_auto_step_count", 20))),
             selected_tank_size_gal=float(payload.get("selected_tank_size_gal", 5000.0)),
+            recommendation_reliability_target_percent=min(
+                max(float(payload.get("recommendation_reliability_target_percent", 90.0)), 0.0),
+                100.0,
+            ),
+            recommendation_marginal_gain_threshold=max(
+                float(payload.get("recommendation_marginal_gain_threshold", 1.0)), 0.0
+            ),
             multitank_comparison_enabled=bool(payload.get("multitank_comparison_enabled", False)),
             comparison_tank_sizes_gal=[
                 float(value) for value in payload.get("comparison_tank_sizes_gal", []) if float(value) > 0
@@ -400,6 +614,29 @@ class SQLiteStore:
                 payload.get("use_synthetic_hourly_rainfall", False)
             ),
             rainfall_source_label=payload.get("rainfall_source_label"),
+            rainfall_data_type=(
+                str(payload.get("rainfall_data_type", "unclassified")).casefold()
+                if str(payload.get("rainfall_data_type", "unclassified")).casefold()
+                in {"unclassified", "observed", "synthetic", "interpolated", "reanalysis"}
+                else "unclassified"
+            ),
+            rainfall_temporal_resolution=(
+                str(payload.get("rainfall_temporal_resolution", "daily")).casefold()
+                if str(payload.get("rainfall_temporal_resolution", "daily")).casefold()
+                in {"daily", "hourly", "subhourly", "monthly", "unknown"}
+                else "unknown"
+            ),
+            rainfall_timezone=str(payload.get("rainfall_timezone", "Unspecified")),
+            rainfall_timing_type=str(
+                payload.get(
+                    "rainfall_timing_type",
+                    "Daily totals; within-day timing not observed",
+                )
+            ),
+            rainfall_retrieved_at=payload.get("rainfall_retrieved_at"),
+            rainfall_known_missing_dates=[
+                str(value) for value in payload.get("rainfall_known_missing_dates", [])
+            ],
             weather_station_latitude=_optional_float(payload.get("weather_station_latitude")),
             weather_station_longitude=_optional_float(payload.get("weather_station_longitude")),
             analysis_input_signature=payload.get("analysis_input_signature"),

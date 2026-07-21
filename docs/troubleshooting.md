@@ -1,5 +1,11 @@
 # Troubleshooting
 
+## Project database recovery
+
+The application checks SQLite integrity when it starts and whenever another project database is opened. If the active database is damaged, the newest valid automatic backup is restored and the damaged file is preserved in the per-user backup directory. Follow the recovery notice, then verify the restored project's latest inputs and results.
+
+If no valid backup exists, the application refuses to replace the damaged database. Preserve the file, review the backup directory described in [Project storage and recovery](project-storage.md), and open an earlier project copy with **File > Open project...**. Do not edit or truncate SQLite files manually.
+
 ## A project does not open
 
 Confirm that the selected file exists and is a valid RWH Calculator database. If it was moved, open it from its new location instead of using the recent-project list.

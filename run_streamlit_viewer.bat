@@ -10,15 +10,15 @@ if not exist ".venv" (
 
 call .venv\Scripts\activate.bat
 
-echo Installing dependencies...
-pip install --disable-pip-version-check -e .
+echo Installing the optional Streamlit viewer...
+pip install --disable-pip-version-check -e ".[viewer]"
 if errorlevel 1 (
-    echo Failed to install dependencies.
+    echo Failed to install viewer dependencies.
     pause
     exit /b 1
 )
 
-echo Starting standalone app...
+echo Starting the read-only project viewer...
 streamlit run streamlit_app.py
 
 endlocal

@@ -11,7 +11,7 @@ import pandas as pd
 
 from .analysis_state import analysis_input_signature
 from .engine import PreparedHourlyInputs, prepare_hourly_inputs, simulate_hourly_indirect_aggregates
-from .financial import tariff_rate_per_gallon
+from .financial import calculate_financial_results_from_annual_supply
 from .models import ProjectConfig
 
 
@@ -53,6 +53,9 @@ class OptimizationResult:
     average_annual_municipal_makeup_gallons: float
     average_annual_overflow_gallons: float
     analysis_period_net_benefit: float
+    lifecycle_net_present_value: float
+    internal_rate_of_return_percent: float | None
+    discounted_payback_years: float | None
 
 
 # Illustrative planning data only. These are not vendor products or market quotations.
@@ -130,7 +133,8 @@ def optimize_indirect_system(
     if settings.maximum_installed_cost is not None and settings.maximum_installed_cost < 0.0:
         raise ValueError("Maximum installed cost cannot be negative.")
     supported_objectives = {
-        "Simple payback", "Net annual savings", "Rainwater reliability", "Analysis-period net benefit"
+        "Simple payback", "Net annual savings", "Rainwater reliability",
+        "Analysis-period net benefit", "Lifecycle NPV"
     }
     if settings.objective not in supported_objectives:
         raise ValueError("Select a supported optimization objective.")
@@ -154,10 +158,6 @@ def optimize_indirect_system(
         raise ValueError("Maintenance percentage must be between 0% and 100%.")
     if not 0.0 <= financial.sewer_eligible_percent <= 100.0:
         raise ValueError("Sewer-eligible supply must be between 0% and 100%.")
-    water_value = tariff_rate_per_gallon(financial.water_rate, financial.tariff_billing_unit)
-    sewer_value = tariff_rate_per_gallon(
-        financial.sewer_rate, financial.tariff_billing_unit
-    )
     raw: list[OptimizationResult] = []
     prepared = _cached_prepared_inputs(config, rainfall_df)
     for index, (tank, pump, booster) in enumerate(products, start=1):
@@ -173,18 +173,35 @@ def optimize_indirect_system(
         overflow = aggregates.average_annual_overflow_gallons
         annual_energy = aggregates.average_annual_pump_flow_gallons / pump.capacity_gallons_per_hour * pump.power_kw
         installed = financial.installed_cost + tank.installed_cost + pump.installed_cost + booster.installed_cost
-        maintenance = financial.fixed_annual_maintenance + installed * financial.annual_maintenance_percent / 100.0
-        net_savings = (
-            supplied * water_value
-            + sewer_eligible_supplied * sewer_value
-            - maintenance
-            - annual_energy * settings.electricity_rate_per_kwh
+        lifecycle = calculate_financial_results_from_annual_supply(
+            supplied,
+            average_annual_sewer_eligible_supplied_gallons=sewer_eligible_supplied,
+            water_rate=financial.water_rate,
+            sewer_rate=financial.sewer_rate,
+            billing_unit=financial.tariff_billing_unit,
+            sewer_eligible_percent=financial.sewer_eligible_percent,
+            installed_cost=installed,
+            incentives=financial.incentives,
+            fixed_annual_maintenance=financial.fixed_annual_maintenance,
+            maintenance_percent=financial.annual_maintenance_percent,
+            analysis_period_years=financial.analysis_period_years,
+            discount_rate_percent=financial.discount_rate_percent,
+            utility_rate_escalation_percent=financial.utility_rate_escalation_percent,
+            maintenance_escalation_percent=financial.maintenance_escalation_percent,
+            average_annual_pump_energy_kwh=annual_energy,
+            electricity_rate_per_kwh=settings.electricity_rate_per_kwh,
+            electricity_escalation_percent=financial.electricity_escalation_percent,
+            equipment_replacement_cost=financial.equipment_replacement_cost,
+            equipment_replacement_interval_years=(
+                financial.equipment_replacement_interval_years
+            ),
+            equipment_replacement_escalation_percent=(
+                financial.equipment_replacement_escalation_percent
+            ),
         )
-        net_cost = max(installed - financial.incentives, 0.0)
-        payback = net_cost / net_savings if net_savings > 0.0 else None
-        if payback is not None and not math.isfinite(payback):
-            payback = None
-        period_benefit = net_savings * financial.analysis_period_years - net_cost
+        net_savings = lifecycle.net_annual_savings
+        payback = lifecycle.simple_payback_years
+        period_benefit = lifecycle.analysis_period_net_benefit
         feasible = reliability >= settings.minimum_reliability_percent
         if settings.maximum_annual_municipal_makeup_gallons is not None:
             feasible = feasible and municipal_makeup <= settings.maximum_annual_municipal_makeup_gallons
@@ -192,7 +209,15 @@ def optimize_indirect_system(
             feasible = feasible and installed <= settings.maximum_installed_cost
         if settings.require_positive_net_savings:
             feasible = feasible and net_savings > 0.0
-        raw.append(OptimizationResult(None, feasible, tank, pump, booster, reliability, supplied, annual_energy, installed, net_savings, payback, municipal_makeup, overflow, period_benefit))
+        raw.append(
+            OptimizationResult(
+                None, feasible, tank, pump, booster, reliability, supplied,
+                annual_energy, installed, net_savings, payback, municipal_makeup,
+                overflow, period_benefit, lifecycle.lifecycle_net_present_value,
+                lifecycle.internal_rate_of_return_percent,
+                lifecycle.discounted_payback_years,
+            )
+        )
         if progress_callback:
             progress_callback(index, len(products))
     objective = settings.objective
@@ -202,6 +227,8 @@ def optimize_indirect_system(
         objective_key = lambda item: (-item.reliability_percent, item.total_installed_cost)
     elif objective == "Analysis-period net benefit":
         objective_key = lambda item: (-item.analysis_period_net_benefit,)
+    elif objective == "Lifecycle NPV":
+        objective_key = lambda item: (-item.lifecycle_net_present_value,)
     else:
         objective_key = lambda item: (item.simple_payback_years is None, item.simple_payback_years or math.inf)
     raw.sort(key=lambda item: (not item.feasible, *objective_key(item), -item.net_annual_savings))
@@ -210,5 +237,19 @@ def optimize_indirect_system(
     for item in raw:
         if item.feasible:
             rank += 1
-        ranked.append(OptimizationResult(rank if item.feasible else None, item.feasible, item.primary_tank, item.filtration_pump, item.booster_tank, item.reliability_percent, item.average_annual_supplied_gallons, item.average_annual_energy_kwh, item.total_installed_cost, item.net_annual_savings, item.simple_payback_years, item.average_annual_municipal_makeup_gallons, item.average_annual_overflow_gallons, item.analysis_period_net_benefit))
+        ranked.append(
+            OptimizationResult(
+                rank if item.feasible else None, item.feasible, item.primary_tank,
+                item.filtration_pump, item.booster_tank, item.reliability_percent,
+                item.average_annual_supplied_gallons, item.average_annual_energy_kwh,
+                item.total_installed_cost, item.net_annual_savings,
+                item.simple_payback_years,
+                item.average_annual_municipal_makeup_gallons,
+                item.average_annual_overflow_gallons,
+                item.analysis_period_net_benefit,
+                item.lifecycle_net_present_value,
+                item.internal_rate_of_return_percent,
+                item.discounted_payback_years,
+            )
+        )
     return ranked

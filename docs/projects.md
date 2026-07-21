@@ -76,7 +76,8 @@ Select **File > Close project** or press `Ctrl+W`. Save changes first when they 
 
 ## Project-file care
 
-- Keep backup copies of important project database files.
+- Successful saves automatically create validated backups in the platform-specific per-user application-data directory. The ten newest snapshots are retained.
 - Do not edit a project database with a text editor.
 - Avoid moving or deleting a project file while it is open.
 - Use **Save project as...** when creating a separate design alternative.
+- See [Project storage and recovery](project-storage.md) for native Windows, macOS, and Linux paths, legacy migration, schema compatibility, and corruption recovery.

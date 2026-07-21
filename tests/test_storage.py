@@ -1,3 +1,7 @@
+import json
+from pathlib import Path
+import sqlite3
+
 import pytest
 import pandas as pd
 
@@ -7,7 +11,11 @@ from rainwater_app.rainfall import (
     disaggregate_daily_rainfall_hyetos,
     has_hourly_rainfall,
 )
-from rainwater_app.storage import SQLiteStore
+from rainwater_app.storage import (
+    PROJECT_SCHEMA_VERSION,
+    STORAGE_SCHEMA_VERSION,
+    SQLiteStore,
+)
 
 
 def test_legacy_project_defaults_to_united_states() -> None:
@@ -31,12 +39,107 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.financial_parameters.currency == "USD"
     assert config.financial_parameters.tariff_billing_unit == "per 1,000 gal"
     assert config.financial_parameters.analysis_period_years == 20
+    assert config.financial_parameters.discount_rate_percent == 5.0
+    assert config.financial_parameters.equipment_replacement_interval_years == 0
     assert config.optimization_parameters.minimum_reliability_percent == 80.0
     assert config.optimization_parameters.electricity_rate_per_kwh == 0.15
     assert config.tank_parameters.minimum_operating_volume_percent == 0.0
     assert config.first_flush_antecedent_dry_days == 1.0
     assert config.first_flush_antecedent_dry_unit == "days"
     assert config.use_synthetic_hourly_rainfall is False
+
+
+def test_storage_and_project_schema_versions_are_explicit(tmp_path) -> None:
+    database = tmp_path / "versioned.db"
+    store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+    config = default_project_config()
+    config.name = "Versioned"
+    store.save_project(config)
+
+    assert store.schema_versions() == {
+        "storage": STORAGE_SCHEMA_VERSION,
+        "project": PROJECT_SCHEMA_VERSION,
+    }
+    with sqlite3.connect(database) as connection:
+        stored = connection.execute(
+            "SELECT config_json FROM projects WHERE name = 'Versioned'"
+        ).fetchone()[0]
+    assert json.loads(stored)["project_schema_version"] == PROJECT_SCHEMA_VERSION
+
+
+def test_newer_storage_schema_is_rejected(tmp_path) -> None:
+    database = tmp_path / "future.db"
+    store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+    assert store.schema_versions()["storage"] == STORAGE_SCHEMA_VERSION
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version = 999")
+
+    with pytest.raises(RuntimeError, match="newer than the supported schema"):
+        SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+
+
+def test_newer_project_schema_is_rejected(tmp_path) -> None:
+    database = tmp_path / "future-project.db"
+    store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+    config = default_project_config()
+    config.name = "Future"
+    store.save_project(config)
+    with sqlite3.connect(database) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT config_json FROM projects WHERE name = 'Future'"
+            ).fetchone()[0]
+        )
+        payload["project_schema_version"] = 999
+        connection.execute(
+            "UPDATE projects SET config_json = ? WHERE name = 'Future'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(RuntimeError, match="Project schema 999"):
+        store.load_project("Future")
+
+
+def test_successful_saves_create_valid_rotating_backups(tmp_path) -> None:
+    database = tmp_path / "projects.db"
+    backup_dir = tmp_path / "backups"
+    store = SQLiteStore(
+        str(database), backup_dir=backup_dir, backup_retention=2
+    )
+    config = default_project_config()
+    config.name = "Backed up"
+
+    for index in range(4):
+        config.notes = f"revision {index}"
+        store.save_project(config)
+
+    backups = store.list_backups()
+    assert len(backups) == 2
+    assert all(SQLiteStore._database_is_valid(path) for path in backups)
+    assert store.last_backup_error is None
+
+
+def test_corrupt_database_is_automatically_recovered_from_latest_backup(tmp_path) -> None:
+    database = tmp_path / "projects.db"
+    backup_dir = tmp_path / "backups"
+    store = SQLiteStore(str(database), backup_dir=backup_dir)
+    config = default_project_config()
+    config.name = "Recoverable"
+    config.notes = "saved before corruption"
+    store.save_project(config)
+    assert store.list_backups()
+
+    Path(f"{database}-wal").unlink(missing_ok=True)
+    Path(f"{database}-shm").unlink(missing_ok=True)
+    database.write_bytes(b"not a sqlite database")
+    recovered = SQLiteStore(str(database), backup_dir=backup_dir)
+    loaded, _rainfall = recovered.load_project("Recoverable")
+
+    assert loaded.notes == "saved before corruption"
+    assert recovered.recovery_notice is not None
+    assert "Recovered projects.db" in recovered.recovery_notice
+    assert any(backup_dir.glob("projects-*-corrupt.db"))
+    assert all(not path.name.endswith("-corrupt.db") for path in recovered.list_backups())
 
 
 def test_legacy_reserve_target_migrates_to_zero_minimum_operating_level() -> None:
@@ -112,6 +215,15 @@ def test_financial_parameters_are_loaded() -> None:
                 "fixed_annual_maintenance": 125.0,
                 "annual_maintenance_percent": 1.5,
                 "analysis_period_years": 25,
+                "discount_rate_percent": 4.25,
+                "utility_rate_escalation_percent": 3.0,
+                "maintenance_escalation_percent": 2.0,
+                "electricity_escalation_percent": 1.5,
+                "pump_power_kw": 0.75,
+                "pump_flow_rate_gallons_per_hour": 600.0,
+                "equipment_replacement_cost": 2400.0,
+                "equipment_replacement_interval_years": 10,
+                "equipment_replacement_escalation_percent": 2.5,
             },
         }
     )
@@ -120,6 +232,10 @@ def test_financial_parameters_are_loaded() -> None:
     assert config.financial_parameters.tariff_billing_unit == "per m³"
     assert config.financial_parameters.installed_cost == 12000.0
     assert config.financial_parameters.analysis_period_years == 25
+    assert config.financial_parameters.discount_rate_percent == 4.25
+    assert config.financial_parameters.pump_power_kw == 0.75
+    assert config.financial_parameters.equipment_replacement_cost == 2400.0
+    assert config.financial_parameters.equipment_replacement_interval_years == 10
 
 
 def test_optimization_parameters_are_loaded() -> None:
@@ -316,6 +432,44 @@ def test_project_round_trip_preserves_synthetic_hourly_rainfall(tmp_path) -> Non
         generated.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy()
     )
 
+
+def test_project_round_trip_preserves_rainfall_provenance(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "rainfall-provenance.db"))
+    config = default_project_config()
+    config.name = "Rainfall provenance"
+    config.rainfall_data_type = "observed"
+    config.rainfall_temporal_resolution = "daily"
+    config.rainfall_timezone = "America/Toronto"
+    config.rainfall_timing_type = "Observed daily totals"
+    config.rainfall_retrieved_at = "2026-07-21T12:00:00+02:00"
+    config.rainfall_known_missing_dates = ["2024-03-04", "2024-03-05"]
+
+    store.save_project(
+        config,
+        pd.DataFrame({"Date": [pd.Timestamp("2024-01-01")], "Precipitation": [0.0]}),
+    )
+    loaded_config, _rainfall = store.load_project(config.name)
+
+    assert loaded_config.rainfall_data_type == "observed"
+    assert loaded_config.rainfall_temporal_resolution == "daily"
+    assert loaded_config.rainfall_timezone == "America/Toronto"
+    assert loaded_config.rainfall_timing_type == "Observed daily totals"
+    assert loaded_config.rainfall_retrieved_at == "2026-07-21T12:00:00+02:00"
+    assert loaded_config.rainfall_known_missing_dates == ["2024-03-04", "2024-03-05"]
+
+
+def test_invalid_rainfall_provenance_values_are_safely_normalized() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Legacy provenance",
+            "rainfall_data_type": "forecast",
+            "rainfall_temporal_resolution": "fortnightly",
+        }
+    )
+
+    assert config.rainfall_data_type == "unclassified"
+    assert config.rainfall_temporal_resolution == "unknown"
+
 def test_custom_system_template_names_are_unique_case_insensitively(tmp_path) -> None:
     store = SQLiteStore(str(tmp_path / "templates.db"))
     store.save_system_template("Campus", {"system_layout": []})
@@ -328,6 +482,19 @@ def test_graph_auto_step_count_is_loaded() -> None:
     config = SQLiteStore._config_from_dict({"name": "Custom steps", "graph_auto_step_count": 32})
 
     assert config.graph_auto_step_count == 32
+
+
+def test_design_recommendation_settings_are_loaded_and_clamped() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Recommendations",
+            "recommendation_reliability_target_percent": 120.0,
+            "recommendation_marginal_gain_threshold": -2.0,
+        }
+    )
+
+    assert config.recommendation_reliability_target_percent == 100.0
+    assert config.recommendation_marginal_gain_threshold == 0.0
 
 
 def test_legacy_hourly_schedule_is_migrated_to_schedule_library() -> None:

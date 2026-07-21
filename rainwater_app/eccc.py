@@ -9,12 +9,13 @@ from urllib import parse, request
 
 import pandas as pd
 
+from .app_paths import user_cache_dir
 from .units import MM_PER_INCH
 
 ECCC_API_ROOT = "https://api.weather.gc.ca/collections"
 ECCC_STATIONS_URL = f"{ECCC_API_ROOT}/climate-stations/items"
 ECCC_DAILY_URL = f"{ECCC_API_ROOT}/climate-daily/items"
-DEFAULT_CACHE_DIR = Path(".weather_cache")
+DEFAULT_CACHE_DIR = user_cache_dir() / "weather"
 PRECIPITATION_FIELDS = {"TOTAL_PRECIPITATION", "TOTAL_RAIN"}
 
 
@@ -146,6 +147,7 @@ def _daily_features_to_dataframe(
     calendar = pd.date_range(start_date, end_date, freq="D")
     data = data.reindex(calendar)
     missing_days = int(data["PrecipitationMM"].isna().sum())
+    missing_dates = data.index[data["PrecipitationMM"].isna()]
     data["PrecipitationMM"] = data["PrecipitationMM"].fillna(0.0).clip(lower=0.0)
     result = pd.DataFrame(
         {
@@ -154,6 +156,9 @@ def _daily_features_to_dataframe(
         }
     )
     result.attrs["missing_days"] = missing_days
+    result.attrs["known_missing_dates"] = [
+        value.date().isoformat() for value in missing_dates
+    ]
     return result
 
 

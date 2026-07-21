@@ -1,6 +1,6 @@
 # Rainwater Calculator
 
-This repository now includes standalone local Python applications for rainwater tank sizing.
+The Tkinter desktop application is the complete supported product for project authoring, rainfall import, analysis, optimization, reporting, and persistence.
 
 ## Windows desktop app
 
@@ -18,33 +18,30 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 The build output is:
 - `dist\RainwaterCalculator.exe`
 
-Copy `dist\RainwaterCalculator.exe` to another Windows machine and run it. The desktop app stores saved projects beside the executable in `rainwater_projects.db`.
+Build the per-user Windows installer with Inno Setup 6:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build_installer.ps1
+```
+
+The installer output is `dist\RainwaterCalculator-Setup-<version>.exe`.
 
 ### Sharing the Windows app
 For a simple handoff, you can share `dist\RainwaterCalculator.exe` directly. The recipient does not need Python installed because the executable bundles the Python runtime and required app dependencies.
 
 Notes:
 - Share the `.exe` from a trusted source. Windows SmartScreen may warn about unsigned executables.
-- Saved projects are not inside the `.exe`; they are stored in `rainwater_projects.db` beside the executable after the user saves projects.
-- If you want to send existing saved projects, include `rainwater_projects.db` with the `.exe`.
+- Saved projects are not inside the `.exe`. The default database and automatic backups use the operating system's per-user application-data directory.
+- Windows uses `%LOCALAPPDATA%\RWH Calculator`; macOS uses `~/Library/Application Support/RWH Calculator`; Linux follows `XDG_DATA_HOME` or `~/.local/share/rwh-calculator`.
+- Existing beside-executable data is copied into the new location on first run without deleting the original files.
+- The installer and uninstaller do not remove user projects or backups.
 - ACIS weather import requires internet access.
 
-## New standalone app (recommended)
+## Product interface policy
 
-### 1. Run with one click on Windows
-- Double click `run_standalone_app.bat`
-
-### 2. Run manually
-```powershell
-cd C:\Projects\rainwater-calculator-py
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e .
-streamlit run streamlit_app.py
-```
-
-The app opens in your browser and stores projects in a local SQLite file:
-- `rainwater_projects.db`
+- **Tkinter desktop application:** the full supported product and authoritative workflow.
+- **Streamlit project viewer:** an optional, read-only companion for inspecting saved inputs and results in a browser. It does not create or modify projects, import rainfall, run calculations, optimize systems, or export reports.
+- **Flask:** retired. The legacy Flask entry point, templates, authentication prototype, and launchers have been removed.
 
 ## Development environment setup
 
@@ -105,12 +102,33 @@ Use `python -m mkdocs build --strict` to generate the offline guide in `site/`. 
 python -m pytest
 ```
 
-### 5. Run the Streamlit app
+Run the same static quality check used by continuous integration:
+
 ```powershell
-streamlit run streamlit_app.py
+python -m ruff check .
 ```
 
-The app should open in a browser at `http://localhost:8501`.
+Pull requests and pushes to `main` run the test suite on Python 3.10 and 3.13,
+build the documentation strictly, run Ruff, and smoke-test the desktop entry
+point on Windows plus the optional read-only viewer on Linux. The executable
+workflow also tests before packaging and smoke-tests the packaged program before
+uploading it.
+
+### 5. Run the optional Streamlit viewer
+
+Install its optional dependency group:
+
+```powershell
+python -m pip install -e ".[viewer]"
+```
+
+Then launch the read-only viewer:
+
+```powershell
+python -m streamlit run streamlit_app.py
+```
+
+The viewer opens in a browser at `http://localhost:8501` and reads projects already saved by Tkinter. On Windows, `run_streamlit_viewer.bat` performs these steps.
 
 ### 6. Clean generated build artifacts
 PyInstaller creates generated folders that can be removed to free disk space:
@@ -132,7 +150,4 @@ The uploaded CSV must include these columns:
 
 ## License
 RWH Calculator is open-source software released under the Zero-Clause BSD (0BSD) license. See `LICENSE`.
-
-## Legacy Flask app
-The original Flask app is still present in `main.py` and `templates/`, but the new Streamlit app is the preferred path moving forward.
 
