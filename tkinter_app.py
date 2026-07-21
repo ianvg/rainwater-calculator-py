@@ -18,6 +18,7 @@ import tkinter as tk
 import tkinter.font as tkfont
 import tempfile
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from functools import partial
@@ -54,6 +55,12 @@ from rainwater_app.engine import (
     reliability_curve,
     simulate_hourly_tank,
     simulate_tank,
+)
+from rainwater_app.execution_log import (
+    DETAIL_LEVELS,
+    ExecutionLogEntry,
+    ExecutionLogger,
+    normalize_log_detail,
 )
 from rainwater_app.financial import (
     calculate_financial_results,
@@ -937,6 +944,27 @@ class RainwaterTkApp(tk.Tk):
         self.store = SQLiteStore(str(self.project_file_path))
         self.recent_projects_path = _app_dir() / "recent_projects.json"
         self.recent_project_paths = self._load_recent_project_paths()
+        application_state_dir = _app_dir()
+        if not os.access(application_state_dir, os.W_OK):
+            fallback_root = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
+            application_state_dir = fallback_root / "RWH Calculator"
+        self.app_preferences_path = application_state_dir / "app_preferences.json"
+        self.app_preferences = self._load_app_preferences()
+        try:
+            self.execution_log = ExecutionLogger(application_state_dir / "logs")
+        except OSError:
+            self.execution_log = ExecutionLogger(Path(tempfile.gettempdir()) / "RWH Calculator" / "logs")
+        self.execution_log_window: tk.Toplevel | None = None
+        self.execution_log_text: tk.Text | None = None
+        self.execution_log_poll_after_id: str | None = None
+        self.execution_log_auto_scroll_var = tk.BooleanVar(value=True)
+        self.execution_log_pause_var = tk.BooleanVar(value=False)
+        self.execution_log_visible_var = tk.BooleanVar(
+            value=bool(self.app_preferences.get("show_execution_log", False))
+        )
+        self.execution_log_detail_var = tk.StringVar(
+            value=normalize_log_detail(self.app_preferences.get("execution_log_detail", "Normal"))
+        )
         self.custom_schedule_library_path = _app_dir() / "schedule_library.json"
         self.custom_schedule_templates = self._load_custom_schedule_templates()
         self.custom_demand_object_library_path = _app_dir() / "demand_object_library.json"
@@ -1107,6 +1135,10 @@ class RainwaterTkApp(tk.Tk):
         self.optimization_poll_after_id: str | None = None
 
         self._build_ui()
+        self.execution_log.info("Application", "Application started")
+        self.execution_log_poll_after_id = self.after(75, self._poll_execution_log)
+        if self.execution_log_visible_var.get():
+            self.after_idle(self.show_execution_log)
         self.selected_tank_var.trace_add("write", self._update_selected_tank_warning)
         self._update_selected_tank_warning()
         self._load_project_list()
@@ -1261,7 +1293,26 @@ class RainwaterTkApp(tk.Tk):
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label="View PDF report", command=self.view_pdf_report)
         view_menu.add_command(label="View HTML report", command=self.view_html_report)
+        view_menu.add_separator()
+        view_menu.add_command(label="Execution log", command=self.show_execution_log)
         menubar.add_cascade(label="View", menu=view_menu)
+
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_checkbutton(
+            label="Show execution log",
+            variable=self.execution_log_visible_var,
+            command=self._execution_log_visibility_changed,
+        )
+        detail_menu = tk.Menu(settings_menu, tearoff=False)
+        for detail in DETAIL_LEVELS:
+            detail_menu.add_radiobutton(
+                label=detail,
+                value=detail,
+                variable=self.execution_log_detail_var,
+                command=self._execution_log_detail_changed,
+            )
+        settings_menu.add_cascade(label="Log detail", menu=detail_menu)
+        menubar.add_cascade(label="Settings", menu=settings_menu)
 
         help_menu = tk.Menu(menubar, tearoff=False)
         help_menu.add_command(label="User guide", command=self.open_user_guide)
@@ -1398,6 +1449,28 @@ class RainwaterTkApp(tk.Tk):
                 paths.append(item)
         return paths[:MAX_RECENT_PROJECTS]
 
+    def _load_app_preferences(self) -> dict[str, object]:
+        try:
+            payload = json.loads(self.app_preferences_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def _save_app_preferences(self) -> None:
+        self.app_preferences.update({
+            "show_execution_log": bool(self.execution_log_visible_var.get()),
+            "execution_log_detail": normalize_log_detail(self.execution_log_detail_var.get()),
+        })
+        try:
+            self.app_preferences_path.parent.mkdir(parents=True, exist_ok=True)
+            self.app_preferences_path.write_text(
+                json.dumps(self.app_preferences, indent=2), encoding="utf-8"
+            )
+        except OSError as exc:
+            self.execution_log.warning(
+                "Settings", "Could not save application preferences", details=str(exc)
+            )
+
     def _save_recent_project_paths(self) -> None:
         try:
             self.recent_projects_path.write_text(json.dumps(self.recent_project_paths, indent=2), encoding="utf-8")
@@ -1467,7 +1540,209 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_progress.configure(style=style)
         self.analysis_progress_var.set(value)
         self.status_var.set(status)
+        self.execution_log.debug("Progress", status)
+        self._drain_execution_log_to_window()
         self.update_idletasks()
+
+    def _execution_log_visibility_changed(self) -> None:
+        if self.execution_log_visible_var.get():
+            self.show_execution_log()
+        else:
+            self.hide_execution_log()
+
+    def _execution_log_detail_changed(self, _event: tk.Event | None = None) -> None:
+        detail = normalize_log_detail(self.execution_log_detail_var.get())
+        self.execution_log_detail_var.set(detail)
+        self._save_app_preferences()
+        self._refresh_execution_log_text()
+        self.execution_log.info("Settings", f"Execution log detail set to {detail}")
+
+    def show_execution_log(self) -> None:
+        if self.execution_log_window is None or not self.execution_log_window.winfo_exists():
+            self._build_execution_log_window()
+        assert self.execution_log_window is not None
+        self.execution_log_visible_var.set(True)
+        self.execution_log_window.deiconify()
+        self.execution_log_window.lift()
+        self._refresh_execution_log_text()
+        self._save_app_preferences()
+
+    def hide_execution_log(self) -> None:
+        if self.execution_log_window is not None and self.execution_log_window.winfo_exists():
+            self.execution_log_window.withdraw()
+        self.execution_log_visible_var.set(False)
+        self._save_app_preferences()
+
+    def _build_execution_log_window(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("Execution log")
+        window.geometry("900x440")
+        window.minsize(620, 280)
+        window.protocol("WM_DELETE_WINDOW", self.hide_execution_log)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        self.execution_log_window = window
+
+        controls = ttk.Frame(window, padding=(10, 8))
+        controls.grid(row=0, column=0, sticky="ew")
+        controls.columnconfigure(7, weight=1)
+        ttk.Label(controls, text="Detail").grid(row=0, column=0, sticky="w")
+        detail_combo = ttk.Combobox(
+            controls,
+            textvariable=self.execution_log_detail_var,
+            values=tuple(DETAIL_LEVELS),
+            state="readonly",
+            width=11,
+        )
+        detail_combo.grid(row=0, column=1, sticky="w", padx=(6, 14))
+        detail_combo.bind("<<ComboboxSelected>>", self._execution_log_detail_changed)
+        ttk.Checkbutton(
+            controls,
+            text="Auto-scroll",
+            variable=self.execution_log_auto_scroll_var,
+        ).grid(row=0, column=2, sticky="w", padx=(0, 12))
+        ttk.Checkbutton(
+            controls,
+            text="Pause display",
+            variable=self.execution_log_pause_var,
+            command=self._execution_log_pause_changed,
+        ).grid(row=0, column=3, sticky="w", padx=(0, 12))
+        ttk.Button(controls, text="Clear", command=self._clear_execution_log).grid(
+            row=0, column=4, padx=(0, 6)
+        )
+        ttk.Button(controls, text="Copy", command=self._copy_execution_log).grid(
+            row=0, column=5, padx=(0, 6)
+        )
+        ttk.Button(controls, text="Save log...", command=self._save_execution_log).grid(
+            row=0, column=6, padx=(0, 6)
+        )
+        ttk.Button(controls, text="Open log folder", command=self._open_execution_log_folder).grid(
+            row=0, column=8, sticky="e"
+        )
+
+        text_frame = ttk.Frame(window, padding=(10, 0, 10, 10))
+        text_frame.grid(row=1, column=0, sticky="nsew")
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        text_widget = tk.Text(
+            text_frame,
+            wrap="none",
+            font=("TkFixedFont", 9),
+            state="disabled",
+            background="#101417",
+            foreground="#e6edf3",
+            insertbackground="#e6edf3",
+        )
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scroll_y = ttk.Scrollbar(text_frame, orient="vertical", command=text_widget.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(text_frame, orient="horizontal", command=text_widget.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        text_widget.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        for tag, color in {
+            "DIAGNOSTIC": "#8b949e",
+            "DEBUG": "#79c0ff",
+            "INFO": "#7ee787",
+            "WARNING": "#e3b341",
+            "ERROR": "#ff7b72",
+        }.items():
+            text_widget.tag_configure(tag, foreground=color)
+        self.execution_log_text = text_widget
+
+    def _execution_log_pause_changed(self) -> None:
+        if not self.execution_log_pause_var.get():
+            self._refresh_execution_log_text()
+
+    def _execution_log_entry_visible(self, entry: ExecutionLogEntry) -> bool:
+        threshold = DETAIL_LEVELS[normalize_log_detail(self.execution_log_detail_var.get())]
+        return entry.level >= threshold
+
+    def _append_execution_log_entries(self, entries: list[ExecutionLogEntry]) -> None:
+        text_widget = self.execution_log_text
+        if text_widget is None or not text_widget.winfo_exists():
+            return
+        visible = [entry for entry in entries if self._execution_log_entry_visible(entry)]
+        if not visible:
+            return
+        include_details = normalize_log_detail(self.execution_log_detail_var.get()) == "Diagnostic"
+        text_widget.configure(state="normal")
+        for entry in visible:
+            text_widget.insert(
+                tk.END,
+                entry.display_text(include_details=include_details),
+                (entry.level_name,),
+            )
+        text_widget.configure(state="disabled")
+        if self.execution_log_auto_scroll_var.get():
+            text_widget.see(tk.END)
+
+    def _refresh_execution_log_text(self) -> None:
+        text_widget = self.execution_log_text
+        if text_widget is None or not text_widget.winfo_exists():
+            return
+        self.execution_log.drain(maximum=100_000)
+        text_widget.configure(state="normal")
+        text_widget.delete("1.0", tk.END)
+        text_widget.configure(state="disabled")
+        self._append_execution_log_entries(self.execution_log.history())
+
+    def _drain_execution_log_to_window(self) -> None:
+        entries = self.execution_log.drain(maximum=500)
+        if (
+            entries
+            and not self.execution_log_pause_var.get()
+            and self.execution_log_window is not None
+            and self.execution_log_window.winfo_exists()
+            and self.execution_log_window.state() != "withdrawn"
+        ):
+            self._append_execution_log_entries(entries)
+
+    def _poll_execution_log(self) -> None:
+        self.execution_log_poll_after_id = None
+        self._drain_execution_log_to_window()
+        self.execution_log_poll_after_id = self.after(75, self._poll_execution_log)
+
+    def _clear_execution_log(self) -> None:
+        self.execution_log.clear()
+        self._refresh_execution_log_text()
+
+    def _execution_log_export_text(self) -> str:
+        self.execution_log.drain(maximum=100_000)
+        detail = normalize_log_detail(self.execution_log_detail_var.get())
+        include_details = detail == "Diagnostic"
+        return "".join(
+            entry.display_text(include_details=include_details)
+            for entry in self.execution_log.history()
+            if self._execution_log_entry_visible(entry)
+        )
+
+    def _copy_execution_log(self) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(self._execution_log_export_text())
+
+    def _save_execution_log(self) -> None:
+        path = filedialog.asksaveasfilename(
+            title="Save execution log",
+            initialfile="rainwater_execution_log.txt",
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("Log files", "*.log"), ("All files", "*.*")],
+            parent=self.execution_log_window or self,
+        )
+        if not path:
+            return
+        try:
+            Path(path).write_text(self._execution_log_export_text(), encoding="utf-8")
+            self.execution_log.info("Log", f"Saved displayed log to {Path(path).name}")
+        except OSError as exc:
+            self.execution_log.error("Log", "Could not save displayed log", exception=exc)
+            messagebox.showerror(APP_TITLE, f"Could not save execution log:\n{exc}", parent=self)
+
+    def _open_execution_log_folder(self) -> None:
+        try:
+            self._open_local_file(self.execution_log.log_directory)
+        except OSError as exc:
+            self.execution_log.error("Log", "Could not open log folder", exception=exc)
+            messagebox.showerror(APP_TITLE, f"Could not open log folder:\n{exc}", parent=self)
 
     def _show_about_dialog(self) -> None:
         dialog = tk.Toplevel(self)
@@ -5888,6 +6163,12 @@ class RainwaterTkApp(tk.Tk):
             for category in ("Primary tank", "Filtration pump", "Buffer tank")
         ]
         combination_count = math.prod(category_counts)
+        self.execution_log.info(
+            "Optimization", f"System optimization started for {combination_count} combinations"
+        )
+        self.execution_log.diagnostic(
+            "Optimization", "Optimization catalog prepared", details=f"category_counts={category_counts}"
+        )
         self.optimization_status_var.set(f"Evaluating {combination_count} product combinations...")
         self.analysis_progress_var.set(0.0)
         self.status_var.set("Optimization running: evaluating product combinations")
@@ -5898,6 +6179,7 @@ class RainwaterTkApp(tk.Tk):
 
         def worker() -> None:
             try:
+                self.execution_log.debug("Optimization", "Optimization worker started")
                 results = optimize_indirect_system(
                     config_snapshot,
                     rainfall_snapshot,
@@ -5907,6 +6189,7 @@ class RainwaterTkApp(tk.Tk):
                 )
                 self.optimization_result_queue.put(("result", results, config_snapshot))
             except Exception as exc:
+                self.execution_log.error("Optimization", "Optimization worker failed", exception=exc)
                 self.optimization_result_queue.put(("error", str(exc)))
 
         threading.Thread(target=worker, daemon=True, name="optimization-worker").start()
@@ -5925,6 +6208,9 @@ class RainwaterTkApp(tk.Tk):
                 self.optimization_status_var.set(f"Evaluating combination {current} of {total}...")
                 self.analysis_progress_var.set(current / max(total, 1) * 100.0)
                 self.status_var.set(f"Optimization running: combination {current} of {total}")
+                self.execution_log.debug(
+                    "Optimization", f"Evaluating combination {current} of {total}"
+                )
             elif kind == "result":
                 _kind, results, config_snapshot = message
                 self._display_optimization_results(results, config_snapshot)
@@ -5934,6 +6220,7 @@ class RainwaterTkApp(tk.Tk):
                 self.analysis_progress_var.set(0.0)
                 self.status_var.set("Optimization failed")
                 self.optimization_status_var.set(error_message)
+                self.execution_log.error("Optimization", f"Optimization failed: {error_message}")
                 messagebox.showwarning(APP_TITLE, error_message, parent=self)
                 terminal_message = True
         if terminal_message:
@@ -5988,6 +6275,10 @@ class RainwaterTkApp(tk.Tk):
             )
         self.analysis_progress_var.set(100.0)
         self.status_var.set("Optimization complete")
+        self.execution_log.info(
+            "Optimization",
+            f"Optimization completed with {len(results)} evaluated combinations and {feasible_count} feasible results",
+        )
 
     def _build_financial_tab(self) -> None:
         self.financial_tab.columnconfigure(0, weight=1)
@@ -7641,6 +7932,7 @@ class RainwaterTkApp(tk.Tk):
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before replacing the project.")
             return
+        self.execution_log.info("Project", "Creating a new project")
         self._set_active_project(None)
         self._reset_weather_selection()
         self.config_model = default_project_config()
@@ -7653,11 +7945,13 @@ class RainwaterTkApp(tk.Tk):
         self._clear_results()
         self._populate_from_model()
         self.status_var.set("Started a new project")
+        self.execution_log.info("Project", "New project ready")
 
     def close_project(self) -> None:
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before closing the project.")
             return
+        self.execution_log.info("Project", "Closing the current project")
         self._set_active_project(None)
         self._reset_weather_selection()
         self.config_model = default_project_config()
@@ -7676,6 +7970,7 @@ class RainwaterTkApp(tk.Tk):
         self.project_name_var.set("")
         self.saved_project_var.set("")
         self.status_var.set("Closed project")
+        self.execution_log.info("Project", "Project closed")
 
     def load_selected_project(self) -> None:
         if self.analysis_running:
@@ -7686,6 +7981,7 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Select a saved project first.")
             return
         try:
+            self.execution_log.info("Project", "Loading selected project")
             self.config_model, self.rainfall_df, self.curve_df, self.results_df = self.store.load_project_with_analysis(name)
             if (
                 not self.results_df.empty
@@ -7715,7 +8011,11 @@ class RainwaterTkApp(tk.Tk):
             else:
                 self.reliability_var.set("Reliability: --")
                 self.status_var.set(f"Loaded project '{name}'")
+            self.execution_log.info(
+                "Project", f"Project loaded with {len(self.rainfall_df):,} rainfall rows"
+            )
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Project", "Could not load selected project", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not load project:\n{exc}")
 
     def open_project_from(self) -> None:
@@ -7763,6 +8063,7 @@ class RainwaterTkApp(tk.Tk):
         previous_path = self.project_file_path
         previous_store = self.store
         try:
+            self.execution_log.info("Project", f"Opening project file {selected_path.name}")
             self._set_progress(5, "Opening project: checking file", "OpenProject.Horizontal.TProgressbar")
             if not selected_path.exists():
                 self.analysis_progress_var.set(0)
@@ -7791,12 +8092,14 @@ class RainwaterTkApp(tk.Tk):
             self._set_progress(85, "Opening project: refreshing views", "OpenProject.Horizontal.TProgressbar")
             self._add_recent_project_path(self.project_file_path)
             self._set_progress(100, f"Opened project '{self.config_model.name}' from {self.project_file_path}", "OpenProject.Horizontal.TProgressbar")
+            self.execution_log.info("Project", f"Opened project file {selected_path.name}")
         except Exception as exc:  # noqa: BLE001
             self.project_file_path = previous_path
             self.store = previous_store
             self._load_project_list()
             self._refresh_system_template_library()
             self.analysis_progress_var.set(0)
+            self.execution_log.error("Project", "Could not open project file", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
 
     def save_project(self) -> None:
@@ -7836,6 +8139,7 @@ class RainwaterTkApp(tk.Tk):
     def _save_current_project(self) -> None:
         self.config_model.rainfall_source_label = self.rainfall_source_label
         try:
+            self.execution_log.info("Project", "Saving current project")
             self._set_progress(15, "Saving project: preparing data", "SaveProject.Horizontal.TProgressbar")
             comparison_results = self._comparison_results_to_frame()
             self._set_progress(45, "Saving project: writing project file", "SaveProject.Horizontal.TProgressbar")
@@ -7857,9 +8161,11 @@ class RainwaterTkApp(tk.Tk):
                 f"Saved project '{self.config_model.name}' to {self.project_file_path}",
                 "SaveProject.Horizontal.TProgressbar",
             )
+            self.execution_log.info("Project", f"Saved project file {self.project_file_path.name}")
         except Exception as exc:  # noqa: BLE001
             self.analysis_progress_var.set(0)
             self.status_var.set("Project save failed")
+            self.execution_log.error("Project", "Project save failed", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not save project:\n{exc}")
 
     def _comparison_results_to_frame(self) -> pd.DataFrame:
@@ -7890,6 +8196,7 @@ class RainwaterTkApp(tk.Tk):
         if not path:
             return
         try:
+            self.execution_log.info("Rainfall", f"Loading rainfall CSV {Path(path).name}")
             raw = Path(path).read_bytes()
             rainfall = load_rainfall_csv(raw)
             rainfall["Precipitation"] = rainfall["Precipitation"].map(lambda v: precip_to_internal(float(v), self.config_model))
@@ -7907,7 +8214,11 @@ class RainwaterTkApp(tk.Tk):
             self._reset_weather_selection()
             self._update_rainfall_summary()
             self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
+            self.execution_log.info(
+                "Rainfall", f"Loaded {len(self.rainfall_df):,} rainfall rows from CSV"
+            )
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Rainfall", "Could not load rainfall CSV", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not load rainfall CSV:\n{exc}")
 
     def generate_hourly_rainfall(self) -> None:
@@ -8007,6 +8318,12 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_progress.configure(mode="indeterminate", style="Analysis.Horizontal.TProgressbar")
         self.analysis_progress.start(12)
         self.status_var.set(f"Finding {provider} stations...")
+        self.execution_log.info("Weather", f"Searching {provider} stations in the selected region")
+        self.execution_log.diagnostic(
+            "Weather",
+            "Station search parameters prepared",
+            details=f"years={years}; query_set={bool(query)}",
+        )
         worker = threading.Thread(
             target=self._station_lookup_worker,
             args=(provider, region, start_date, end_date, query),
@@ -8034,6 +8351,7 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_progress.configure(mode="indeterminate", style="Analysis.Horizontal.TProgressbar")
         self.analysis_progress.start(12)
         self.status_var.set(f"Finding nearest {provider} stations...")
+        self.execution_log.info("Weather", f"Searching for nearest {provider} stations")
         threading.Thread(
             target=self._nearest_station_lookup_worker,
             args=(provider, latitude, longitude, start_date, end_date),
@@ -8053,6 +8371,9 @@ class RainwaterTkApp(tk.Tk):
         try:
             stations: list[dict] = []
             for radius_km in (50.0, 150.0, 400.0, 1000.0):
+                self.execution_log.diagnostic(
+                    "Weather", f"Searching within a {radius_km:g} km radius"
+                )
                 west, south, east, north = bounding_box(latitude, longitude, radius_km)
                 if provider == "ACIS":
                     stations = fetch_station_options_bbox(west, south, east, north, start_date, end_date)
@@ -8063,6 +8384,7 @@ class RainwaterTkApp(tk.Tk):
                     break
             self.station_lookup_queue.put(("success", provider, stations))
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Weather", "Nearest-station search failed", exception=exc)
             self.station_lookup_queue.put(("error", provider, str(exc)))
 
     def _station_lookup_worker(
@@ -8074,6 +8396,7 @@ class RainwaterTkApp(tk.Tk):
         query: str,
     ) -> None:
         try:
+            self.execution_log.debug("Weather", f"{provider} station-search worker started")
             if provider == "ACIS":
                 stations = fetch_station_options(region, start_date, end_date)
             else:
@@ -8086,6 +8409,7 @@ class RainwaterTkApp(tk.Tk):
                 ]
             self.station_lookup_queue.put(("success", provider, stations))
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Weather", f"{provider} station search failed", exception=exc)
             self.station_lookup_queue.put(("error", provider, str(exc)))
 
     def _poll_station_lookup_results(self) -> None:
@@ -8108,6 +8432,7 @@ class RainwaterTkApp(tk.Tk):
         self.import_station_button.configure(state="normal")
         if result == "error":
             self.status_var.set(f"Could not fetch {provider} stations")
+            self.execution_log.error("Weather", f"Could not fetch {provider} stations: {payload}")
             messagebox.showerror(APP_TITLE, f"Could not fetch {provider} stations:\n{payload}")
             return
 
@@ -8121,6 +8446,9 @@ class RainwaterTkApp(tk.Tk):
         nearest = bool(self.station_options and "distance_km" in self.station_options[0])
         qualifier = "nearest " if nearest else ""
         self.status_var.set(f"Found {len(self.station_options)} {qualifier}{descriptor}")
+        self.execution_log.info(
+            "Weather", f"Found {len(self.station_options)} {provider} station options"
+        )
 
     def _reset_weather_selection(self) -> None:
         if self.state_typeahead_after_id is not None:
@@ -8153,6 +8481,12 @@ class RainwaterTkApp(tk.Tk):
         basis_label = self.canadian_precip_var.get()
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
         try:
+            self.execution_log.info("Weather", "Importing ACIS rainfall data")
+            self.execution_log.diagnostic(
+                "Weather", "ACIS import configured", details=f"years={years}; basis={basis_label}"
+            )
+            self._drain_execution_log_to_window()
+            self.update_idletasks()
             start_date, end_date = default_complete_calendar_range(years)
             weather_df = fetch_daily_station_data(station["sid"], start_date, end_date, precipitation_field)
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
@@ -8179,6 +8513,9 @@ class RainwaterTkApp(tk.Tk):
             self._clear_results()
             self._update_rainfall_summary()
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
+            self.execution_log.info(
+                "Weather", f"Imported {len(self.rainfall_df):,} daily ACIS rainfall rows"
+            )
             if precipitation_field == "TOTAL_RAIN":
                 excluded_days = int(weather_df.attrs.get("rain_only_excluded_days", 0))
                 messagebox.showwarning(
@@ -8188,6 +8525,7 @@ class RainwaterTkApp(tk.Tk):
                     "Mixed rain and snow days may therefore undercount rain.",
                 )
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Weather", "ACIS rainfall import failed", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not import ACIS weather:\n{exc}")
 
     def import_selected_weather(self) -> None:
@@ -8212,6 +8550,11 @@ class RainwaterTkApp(tk.Tk):
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
         try:
             self.status_var.set(f"Importing ECCC data for {station['name']}...")
+            self.execution_log.info("Weather", "Importing ECCC rainfall data")
+            self.execution_log.diagnostic(
+                "Weather", "ECCC import configured", details=f"years={years}; basis={basis_label}"
+            )
+            self._drain_execution_log_to_window()
             self.update_idletasks()
             start_date, end_date = default_complete_calendar_range(years)
             weather_df = fetch_canadian_daily_station_data(
@@ -8245,6 +8588,9 @@ class RainwaterTkApp(tk.Tk):
             self._clear_results()
             self._update_rainfall_summary()
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
+            self.execution_log.info(
+                "Weather", f"Imported {len(self.rainfall_df):,} daily ECCC rainfall rows"
+            )
             if missing_days:
                 messagebox.showwarning(
                     APP_TITLE,
@@ -8252,6 +8598,7 @@ class RainwaterTkApp(tk.Tk):
                     "They were treated as zero precipitation so daily demand remains continuous.",
                 )
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Weather", "ECCC rainfall import failed", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not import ECCC climate data:\n{exc}")
 
     def edit_surface(self) -> None:
@@ -9022,6 +9369,17 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showwarning(APP_TITLE, "Comparison tank sizes cannot be greater than the graph end tank size.")
             return
         analysis_label = "Multi-tank analysis" if include_comparisons else "Single-tank analysis"
+        analysis_started = time.perf_counter()
+        self.execution_log.info("Analysis", f"{analysis_label} started")
+        self.execution_log.diagnostic(
+            "Analysis",
+            "Prepared analysis inputs",
+            details=(
+                f"rainfall_rows={len(self.rainfall_df):,}; surfaces={len(cfg.surfaces)}; "
+                f"selected_tank={cfg.selected_tank_size_gal:g}; "
+                f"hourly={cfg.demand.hourly_schedule_enabled}"
+            ),
+        )
         self.analysis_running = True
         self.analysis_cancel_requested = False
         self.cancel_analysis_button.state(["!disabled"])
@@ -9037,12 +9395,18 @@ class RainwaterTkApp(tk.Tk):
             self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
             self.analysis_progress_var.set(0)
             self.status_var.set(f"{analysis_label} running: Part A - reliability curve")
+            self.execution_log.info(
+                "Analysis", f"Calculating reliability curve for {len(tank_sizes)} tank sizes"
+            )
             self.update_idletasks()
 
             def update_curve_progress(index: int, total: int, _tank_size: float) -> None:
                 part_progress = index / total if total else 1.0
                 self.analysis_progress_var.set((part_progress / total_parts) * 100)
                 self.status_var.set(f"{analysis_label} running: Part A - reliability curve ({index}/{total})")
+                self.execution_log.debug(
+                    "Analysis", f"Reliability curve tank {index} of {total}: {_tank_size:g} gal"
+                )
                 self.update()
 
             def cancellation_requested() -> bool:
@@ -9058,6 +9422,7 @@ class RainwaterTkApp(tk.Tk):
             )
             self.analysis_progress_var.set(50)
             self.status_var.set(f"{analysis_label} running: Part B - selected tank simulation")
+            self.execution_log.info("Analysis", "Simulating the selected tank")
             self.update_idletasks()
             results_df = simulate_tank(
                 cfg,
@@ -9075,6 +9440,8 @@ class RainwaterTkApp(tk.Tk):
                 if cfg.demand.hourly_schedule_enabled
                 else pd.DataFrame()
             )
+            if cfg.demand.hourly_schedule_enabled:
+                self.execution_log.info("Analysis", "Completed hourly tank simulation")
             comparison_results: dict[float, pd.DataFrame] = {}
             comparison_sizes = (
                 sorted(set(float(size) for size in cfg.comparison_tank_sizes_gal))
@@ -9085,6 +9452,10 @@ class RainwaterTkApp(tk.Tk):
                 self.status_var.set(
                     f"{analysis_label} running: Part B - comparison tank simulation "
                     f"({index}/{len(comparison_sizes)})"
+                )
+                self.execution_log.debug(
+                    "Analysis",
+                    f"Comparison tank {index} of {len(comparison_sizes)}: {tank_size:g} gal",
                 )
                 self.update()
                 if self.analysis_cancel_requested:
@@ -9107,6 +9478,7 @@ class RainwaterTkApp(tk.Tk):
             self._populate_comparison_tanks()
             self.analysis_progress_var.set(75)
             self.status_var.set(f"{analysis_label} running: Part B - drawing results")
+            self.execution_log.info("Analysis", "Rendering analysis results")
             self.update_idletasks()
             reliability = float(self.results_df["ReliabilityPercent"].iloc[0]) if not self.results_df.empty else 0.0
             self._set_selected_tank_reliability(reliability)
@@ -9118,12 +9490,18 @@ class RainwaterTkApp(tk.Tk):
             self.last_analysis_warning_key = None
             self.analysis_progress_var.set(100)
             self.status_var.set(f"{analysis_label} complete")
+            self.execution_log.info(
+                "Analysis",
+                f"{analysis_label} completed in {time.perf_counter() - analysis_started:.2f} seconds",
+            )
         except AnalysisCancelledError:
             self.analysis_progress_var.set(0)
             self.status_var.set(f"{analysis_label} cancelled; previous completed results retained")
+            self.execution_log.warning("Analysis", f"{analysis_label} cancelled")
         except Exception as exc:  # noqa: BLE001
             self.analysis_progress_var.set(0)
             self.status_var.set(f"{analysis_label} failed")
+            self.execution_log.error("Analysis", f"{analysis_label} failed", exception=exc)
             messagebox.showerror(APP_TITLE, f"{analysis_label} failed:\n{exc}")
         finally:
             self.analysis_running = False
@@ -9149,9 +9527,12 @@ class RainwaterTkApp(tk.Tk):
         if not path:
             return
         try:
+            self.execution_log.info("Export", "Exporting analysis results")
             self._display_results_df().to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
             self.status_var.set(f"Exported results to {Path(path).name}")
+            self.execution_log.info("Export", f"Exported results to {Path(path).name}")
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Export", "Could not export results", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not export results:\n{exc}")
 
     def view_pdf_report(self) -> None:
@@ -9161,10 +9542,15 @@ class RainwaterTkApp(tk.Tk):
         preview_dir = self._new_report_preview_directory()
         pdf_path = preview_dir / self._default_report_filename(".pdf")
         try:
+            self.execution_log.info("Report", "Generating PDF report preview")
+            self._drain_execution_log_to_window()
+            self.update_idletasks()
             self._write_pdf_report(pdf_path, report)
             self._open_local_file(pdf_path)
             self.status_var.set(f"Opened PDF report preview: {pdf_path.name}")
+            self.execution_log.info("Report", "PDF report preview opened")
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Report", "Could not view PDF report", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not view PDF report:\n{exc}")
 
     def view_html_report(self) -> None:
@@ -9174,10 +9560,15 @@ class RainwaterTkApp(tk.Tk):
         preview_dir = self._new_report_preview_directory()
         html_path = preview_dir / self._default_report_filename(".html")
         try:
+            self.execution_log.info("Report", "Generating HTML report preview")
+            self._drain_execution_log_to_window()
+            self.update_idletasks()
             self._write_html_report(html_path, report)
             self._open_html_preview(html_path)
             self.status_var.set(f"Opened HTML report preview: {html_path.name}")
+            self.execution_log.info("Report", "HTML report preview opened")
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Report", "Could not view HTML report", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not view HTML report:\n{exc}")
 
     def export_pdf_report(self) -> None:
@@ -9194,9 +9585,14 @@ class RainwaterTkApp(tk.Tk):
             return
         pdf_path = Path(path)
         try:
+            self.execution_log.info("Report", "Exporting PDF report")
+            self._drain_execution_log_to_window()
+            self.update_idletasks()
             self._write_pdf_report(pdf_path, report)
             self.status_var.set(f"Exported PDF report: {pdf_path.name}")
+            self.execution_log.info("Report", f"Exported PDF report {pdf_path.name}")
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Report", "Could not export PDF report", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not export PDF report:\n{exc}")
 
     def export_html_report(self) -> None:
@@ -9213,13 +9609,19 @@ class RainwaterTkApp(tk.Tk):
             return
         html_path = Path(path)
         try:
+            self.execution_log.info("Report", "Exporting HTML report")
+            self._drain_execution_log_to_window()
+            self.update_idletasks()
             self._write_html_report(html_path, report)
             self.status_var.set(f"Exported HTML report: {html_path.name}")
+            self.execution_log.info("Report", f"Exported HTML report {html_path.name}")
         except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Report", "Could not export HTML report", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not export HTML report:\n{exc}")
 
     def _request_report_content(self, report_format: str) -> dict[str, object] | None:
         self._apply_form_to_model()
+        self.execution_log.debug("Report", f"Preparing {report_format} report content")
         if self.curve_df.empty:
             article = "an" if report_format == "HTML" else "a"
             messagebox.showinfo(APP_TITLE, f"Run the analysis before generating {article} {report_format} report.")
@@ -9228,19 +9630,24 @@ class RainwaterTkApp(tk.Tk):
         dialog = ReportDialog(self, self._default_report_metadata())
         self.wait_window(dialog)
         if dialog.result is None:
+            self.execution_log.info("Report", f"{report_format} report generation cancelled")
             return None
-        return self._build_report_content(dialog.result)
+        content = self._build_report_content(dialog.result)
+        self.execution_log.debug("Report", f"Prepared {report_format} report content")
+        return content
 
     def _default_report_filename(self, suffix: str) -> str:
         return _safe_project_file_name(self.config_model.name).replace(".db", f"_report{suffix}")
 
     def _write_pdf_report(self, pdf_path: Path, report: dict[str, object]) -> None:
+        self.execution_log.debug("Report", "Building LaTeX report source")
         tex_path = pdf_path.with_suffix(".tex")
         latex = self._build_report_latex(report)
         tex_path.write_text(latex, encoding="utf-8")
         self._compile_latex_report(tex_path, pdf_path, report)
 
     def _write_html_report(self, html_path: Path, report: dict[str, object]) -> None:
+        self.execution_log.debug("Report", "Building HTML report document")
         html_path.write_text(self._build_report_html(report), encoding="utf-8")
 
     def _new_report_preview_directory(self) -> Path:
@@ -9268,6 +9675,15 @@ class RainwaterTkApp(tk.Tk):
         webbrowser.open(f"http://127.0.0.1:{port}/{quote(html_path.name)}")
 
     def destroy(self) -> None:
+        if getattr(self, "execution_log_poll_after_id", None) is not None:
+            try:
+                self.after_cancel(self.execution_log_poll_after_id)
+            except tk.TclError:
+                pass
+            self.execution_log_poll_after_id = None
+        if hasattr(self, "execution_log"):
+            self.execution_log.info("Application", "Application closing")
+            self.execution_log.close()
         for after_id_name in (
             "station_typeahead_after_id",
             "state_typeahead_after_id",
