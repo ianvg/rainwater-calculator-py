@@ -106,6 +106,13 @@ def common_demand_object_templates() -> dict[str, DemandObject]:
             fixture_uses_per_person_per_day=DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
             fixture_volume_gallons_per_use=DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
         ),
+        "Sink": DemandObject(
+            "Sink",
+            "Sink",
+            demand_mode="fixture_usage",
+            fixture_people=1.0,
+            fixture_uses_per_person_per_day=1.0,
+        ),
         "Urinal": DemandObject("Urinal", "Urinal", 1.0),
     }
     templates.update(

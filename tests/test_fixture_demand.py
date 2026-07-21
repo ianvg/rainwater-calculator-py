@@ -60,6 +60,28 @@ def test_hourly_fixture_demand_distributes_the_calculated_daily_volume() -> None
     assert results["DemandGallons"].sum() == pytest.approx(38.4)
 
 
+def test_monthly_volume_without_schedule_is_uniform_across_24_hours() -> None:
+    config = default_project_config()
+    config.demand.demand_objects = [DemandObject(
+        "Monthly process",
+        "Other indoor",
+        schedule_name="",
+        demand_mode="monthly_volume",
+        monthly_demand_gallons={"jan": 310.0},
+    )]
+    rainfall = pd.DataFrame(
+        {"Date": [pd.Timestamp("2025-01-06")], "Precipitation": [0.0]}
+    )
+
+    assert demand_object_daily_value_for_date(
+        config.demand, config.demand.demand_objects[0], pd.Timestamp("2025-01-06")
+    ) == pytest.approx(10.0)
+    results = simulate_hourly_tank(config, rainfall, tank_size_gallons=100.0)
+
+    assert results["DemandGallons"].sum() == pytest.approx(10.0)
+    assert results["DemandGallons"].tolist() == pytest.approx([10.0 / 24.0] * 24)
+
+
 def test_builtin_toilet_template_uses_editable_activity_defaults() -> None:
     toilet = common_demand_object_templates()["Toilet"]
 
@@ -67,6 +89,16 @@ def test_builtin_toilet_template_uses_editable_activity_defaults() -> None:
     assert toilet.fixture_people == 1.0
     assert toilet.fixture_uses_per_person_per_day == 3.0
     assert toilet.fixture_volume_gallons_per_use == 1.28
+
+
+def test_builtin_sink_template_requires_an_explicit_volume_per_use() -> None:
+    sink = common_demand_object_templates()["Sink"]
+
+    assert sink.object_type == "Sink"
+    assert sink.demand_mode == "fixture_usage"
+    assert sink.fixture_people == 1.0
+    assert sink.fixture_uses_per_person_per_day == 1.0
+    assert sink.fixture_volume_gallons_per_use == 0.0
 
 
 def test_fixture_fields_are_validated_in_custom_library_payload() -> None:

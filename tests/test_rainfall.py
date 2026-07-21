@@ -35,7 +35,7 @@ def test_hyetos_disaggregation_is_reproducible_and_conserves_daily_totals() -> N
         rainfall["Precipitation"].to_numpy(), abs=1e-12
     )
     assert np.all(first.loc[:, HOURLY_PRECIPITATION_COLUMNS].to_numpy() >= 0.0)
-    assert np.count_nonzero(first.loc[0, HOURLY_PRECIPITATION_COLUMNS].to_numpy()) == 0
+    assert np.count_nonzero(first.loc[0, list(HOURLY_PRECIPITATION_COLUMNS)].to_numpy()) == 0
 
 
 def test_hyetos_disaggregation_rejects_negative_precipitation() -> None:

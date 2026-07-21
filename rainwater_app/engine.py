@@ -82,10 +82,10 @@ def _schedule_fractions_for_date(
 def _demand_object_daily_value_for_date(
     demand: DemandProfile, demand_object, date: pd.Timestamp
 ) -> float:
-    schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
-    if schedule is None:
-        return 0.0
     mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+    schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
+    if schedule is None and mode != "monthly_volume":
+        return 0.0
     if mode == "recurring_daily":
         operating_weekdays = getattr(demand_object, "operating_weekdays", None)
         if operating_weekdays is None:
@@ -159,10 +159,13 @@ def _demand_object_sewer_eligible_fraction(
 def _demand_object_hourly_for_date(
     demand: DemandProfile, demand_object, date: pd.Timestamp
 ) -> np.ndarray:
+    mode = getattr(demand_object, "demand_mode", "scheduled_flow")
     schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
     if schedule is None:
-        return np.zeros(24, dtype=np.float64)
-    mode = getattr(demand_object, "demand_mode", "scheduled_flow")
+        if mode == "monthly_volume" and not demand_object.schedule_name:
+            schedule = {day: [1.0] * 24 for day in WEEKDAY_KEYS}
+        else:
+            return np.zeros(24, dtype=np.float64)
     day_key = WEEKDAY_KEYS[date.weekday()]
     multipliers = [
         min(max(float(value), 0.0), 1.0)

@@ -12169,7 +12169,7 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
 
 class DemandObjectDialog(tk.Toplevel):
     OBJECT_TYPES = (
-        "Irrigation system", "Toilet", "Urinal", "Cooling tower", "Ice making",
+        "Irrigation system", "Toilet", "Sink", "Urinal", "Cooling tower", "Ice making",
         "Ice skating", "Other indoor", "Vehicle washing", "Other outdoor", "Other",
     )
     MODE_LABELS = {
@@ -12179,6 +12179,7 @@ class DemandObjectDialog(tk.Toplevel):
         "Monthly volume": "monthly_volume",
     }
     DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    NO_SCHEDULE_LABEL = "-- No schedule --"
 
     def __init__(self, parent: RainwaterTkApp, config: ProjectConfig, demand_object: DemandObject) -> None:
         super().__init__(parent)
@@ -12201,10 +12202,15 @@ class DemandObjectDialog(tk.Toplevel):
             value=f"{_demand_flow_from_gallons_per_minute(demand_object.instantaneous_demand_gallons_per_minute, initial_flow_unit):.8g}"
         )
         schedule_names = list(config.demand.hourly_schedule_library)
+        self.project_schedule_names = schedule_names
         selected_schedule = (
             demand_object.schedule_name
             if demand_object.schedule_name in schedule_names
-            else (schedule_names[0] if schedule_names else "")
+            else (
+                self.NO_SCHEDULE_LABEL
+                if demand_object.demand_mode == "monthly_volume"
+                else (schedule_names[0] if schedule_names else "")
+            )
         )
         self.schedule_var = tk.StringVar(value=selected_schedule)
         mode_label = next(
@@ -12213,15 +12219,25 @@ class DemandObjectDialog(tk.Toplevel):
         )
         self.mode_var = tk.StringVar(value=mode_label)
         self.daily_volume_var = tk.StringVar(value=f"{volume_to_display(demand_object.recurring_daily_gallons, config):.8g}")
+        default_fixture_uses = (
+            DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY
+            if demand_object.object_type == "Toilet"
+            else 1.0
+        )
+        default_fixture_volume = (
+            DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH
+            if demand_object.object_type == "Toilet"
+            else 0.0
+        )
         self.fixture_people_var = tk.StringVar(
             value=f"{(demand_object.fixture_people or 1.0):.8g}"
         )
         self.fixture_uses_var = tk.StringVar(
-            value=f"{(demand_object.fixture_uses_per_person_per_day or DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY):.8g}"
+            value=f"{(demand_object.fixture_uses_per_person_per_day or default_fixture_uses):.8g}"
         )
         fixture_volume = (
             demand_object.fixture_volume_gallons_per_use
-            or DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH
+            or default_fixture_volume
         )
         self.fixture_volume_var = tk.StringVar(
             value=f"{volume_to_display(fixture_volume, config):.8g}"
@@ -12289,12 +12305,17 @@ class DemandObjectDialog(tk.Toplevel):
         demand.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         demand.columnconfigure(1, weight=1)
         ttk.Label(demand, text="Schedule").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
-        schedule_combo = ttk.Combobox(
-            demand, textvariable=self.schedule_var, values=schedule_names,
-            state="readonly" if schedule_names else "disabled", width=39,
+        schedule_values = (
+            [self.NO_SCHEDULE_LABEL, *schedule_names]
+            if demand_object.demand_mode == "monthly_volume"
+            else schedule_names
         )
-        schedule_combo.grid(row=0, column=1, sticky="ew", pady=3)
-        schedule_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_dialog_state())
+        self.schedule_combo = ttk.Combobox(
+            demand, textvariable=self.schedule_var, values=schedule_values,
+            state="readonly" if schedule_values else "disabled", width=39,
+        )
+        self.schedule_combo.grid(row=0, column=1, sticky="ew", pady=3)
+        self.schedule_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_dialog_state())
         ttk.Label(
             demand, textvariable=self.schedule_help_var, foreground="#667278",
             wraplength=560, justify="left",
@@ -12468,16 +12489,31 @@ class DemandObjectDialog(tk.Toplevel):
             default_sewer_eligible_for_object_type(self.type_var.get())
         )
         if (
-            self.type_var.get() == "Toilet"
+            self.type_var.get() in {"Toilet", "Sink"}
             and self.original.name == "New demand object"
             and self.MODE_LABELS.get(self.mode_var.get()) == "scheduled_flow"
         ):
             self.mode_var.set("Fixture use (people x uses)")
             if self.name_var.get().strip() == "New demand object":
-                self.name_var.set("Toilet")
+                self.name_var.set(self.type_var.get())
         self._refresh_dialog_state()
 
     def _mode_changed(self, _event: tk.Event | None = None) -> None:
+        mode = self.MODE_LABELS.get(self.mode_var.get(), "scheduled_flow")
+        if mode == "monthly_volume":
+            self.schedule_combo.configure(
+                values=[self.NO_SCHEDULE_LABEL, *self.project_schedule_names],
+                state="readonly",
+            )
+        else:
+            self.schedule_combo.configure(
+                values=self.project_schedule_names,
+                state="readonly" if self.project_schedule_names else "disabled",
+            )
+            if self.schedule_var.get() == self.NO_SCHEDULE_LABEL:
+                self.schedule_var.set(
+                    self.project_schedule_names[0] if self.project_schedule_names else ""
+                )
         self._refresh_dialog_state()
 
     def _parsed_nonnegative(self, variable: tk.StringVar) -> float | None:
@@ -12527,8 +12563,13 @@ class DemandObjectDialog(tk.Toplevel):
                 "residential calculator uses 5.05. Adjust for the population. The 1.28 gal "
                 "fixture default is the WaterSense toilet limit."
                 if is_toilet
-                else "Daily demand equals people x uses/person/day x volume/use. Adjust each "
-                "assumption for the fixture and population."
+                else (
+                    "Enter the average sink volume per use. If flow and duration are known, "
+                    "volume/use = flow rate x minutes/use. No sink volume is assumed."
+                    if self.type_var.get() == "Sink"
+                    else "Daily demand equals people x uses/person/day x volume/use. Adjust "
+                    "each assumption for the fixture and population."
+                )
             )
             self.schedule_help_var.set(
                 "The calculated daily fixture volume is distributed across the schedule's "
@@ -12552,9 +12593,16 @@ class DemandObjectDialog(tk.Toplevel):
             self.monthly_table_frame.configure(
                 text=f"January-December monthly volumes ({volume_unit(self.config_model)}/month)"
             )
-            self.schedule_help_var.set(
-                "Each monthly total is divided across calendar days, then distributed across the schedule's active hours."
-            )
+            if self.schedule_var.get() == self.NO_SCHEDULE_LABEL:
+                self.schedule_help_var.set(
+                    "If no schedule is selected, each monthly total is divided across calendar "
+                    "days, then distributed equally over 24 hours."
+                )
+            else:
+                self.schedule_help_var.set(
+                    "Each monthly total is divided across calendar days, then distributed "
+                    "across the selected schedule's active hours."
+                )
 
         self.billing_help_var.set(
             "This type normally avoids both water and sewer charges. Confirm the local utility tariff."
@@ -12562,8 +12610,23 @@ class DemandObjectDialog(tk.Toplevel):
             else "This type normally avoids water charges only. Irrigation defaults to sewer-exempt; confirm the local utility tariff."
         )
         identity_error = "" if self.name_var.get().strip() else "Enter a demand object name."
-        if not self.schedule_var.get() or self.schedule_var.get() not in self.config_model.demand.hourly_schedule_library:
+        no_schedule = self.schedule_var.get() == self.NO_SCHEDULE_LABEL
+        if (
+            mode != "monthly_volume"
+            and (
+                not self.schedule_var.get()
+                or self.schedule_var.get()
+                not in self.config_model.demand.hourly_schedule_library
+            )
+        ):
             demand_error = "Add or select a project schedule before saving."
+        elif (
+            mode == "monthly_volume"
+            and not no_schedule
+            and self.schedule_var.get()
+            not in self.config_model.demand.hourly_schedule_library
+        ):
+            demand_error = "Select a project schedule or -- No schedule --."
         elif mode == "scheduled_flow":
             flow = self._parsed_nonnegative(self.instantaneous_demand_var)
             demand_error = (
@@ -12583,7 +12646,11 @@ class DemandObjectDialog(tk.Toplevel):
             elif uses == 0.0:
                 demand_error = "Enter at least one use per person per day."
             elif volume == 0.0:
-                demand_error = "Enter a fixture volume greater than zero."
+                demand_error = (
+                    "Enter the sink volume per use."
+                    if self.type_var.get() == "Sink"
+                    else "Enter a fixture volume greater than zero."
+                )
             else:
                 demand_error = ""
         elif mode == "recurring_daily":
@@ -12691,7 +12758,9 @@ class DemandObjectDialog(tk.Toplevel):
             self.bell()
             return
         name = self.name_var.get().strip()
-        schedule_name = self.schedule_var.get()
+        schedule_name = (
+            "" if self.schedule_var.get() == self.NO_SCHEDULE_LABEL else self.schedule_var.get()
+        )
         mode = self.MODE_LABELS[self.mode_var.get()]
         monthly_display = self._monthly_display_values() or {}
         monthly_internal = {
