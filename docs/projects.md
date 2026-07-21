@@ -54,7 +54,7 @@ Map tiles and address lookup require an internet connection. The map displays Op
 
 ## Create a project
 
-Select **File > Create new project** or press `Ctrl+N`. Unsaved values are cleared and the application returns to a new project state.
+Select **File > Create new project** or press `Ctrl+N`. If the current project has unsaved changes, choose **Save**, **Don't Save**, or **Cancel**.
 
 ## Save a project
 
@@ -72,7 +72,7 @@ Previously saved analysis results are restored with the project, so the analysis
 
 ## Close a project
 
-Select **File > Close project** or press `Ctrl+W`. Save changes first when they need to be retained.
+Select **File > Close project** or press `Ctrl+W`. The application displays the same Save / Don't Save / Cancel choice used by New, Open, Exit, and the window-close button whenever changes are pending. An asterisk in the title and **Unsaved changes** in the status area identify that state.
 
 ## Project-file care
 

@@ -9,7 +9,13 @@ from __future__ import annotations
 
 import math
 
-from rainwater_app.models import DemandObject, MONTH_KEYS, WEEKDAY_KEYS
+from rainwater_app.models import (
+    DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
+    DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
+    DemandObject,
+    MONTH_KEYS,
+    WEEKDAY_KEYS,
+)
 from rainwater_app.units import LITERS_PER_GALLON
 
 
@@ -92,7 +98,14 @@ def common_demand_object_templates() -> dict[str, DemandObject]:
         "Simple recurring demand": DemandObject(
             "Simple recurring demand", "Other", demand_mode="recurring_daily"
         ),
-        "Toilet": DemandObject("Toilet", "Toilet", 3.0),
+        "Toilet": DemandObject(
+            "Toilet",
+            "Toilet",
+            demand_mode="fixture_usage",
+            fixture_people=1.0,
+            fixture_uses_per_person_per_day=DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
+            fixture_volume_gallons_per_use=DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
+        ),
         "Urinal": DemandObject("Urinal", "Urinal", 1.0),
     }
     templates.update(
@@ -133,6 +146,15 @@ def validated_demand_object_library(payload: object) -> dict[str, DemandObject]:
             demand_mode=str(raw_object.get("demand_mode", "scheduled_flow")),
             recurring_daily_gallons=max(
                 _float_or_default(raw_object.get("recurring_daily_gallons")), 0.0
+            ),
+            fixture_people=max(
+                _float_or_default(raw_object.get("fixture_people")), 0.0
+            ),
+            fixture_uses_per_person_per_day=max(
+                _float_or_default(raw_object.get("fixture_uses_per_person_per_day")), 0.0
+            ),
+            fixture_volume_gallons_per_use=max(
+                _float_or_default(raw_object.get("fixture_volume_gallons_per_use")), 0.0
             ),
             operating_days_per_week=min(
                 max(

@@ -65,6 +65,8 @@ from rainwater_app.financial_service import FinancialAnalysisService
 from rainwater_app.candidate_service import CandidateAnalysisService
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
+    DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
+    DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
     DemandObject,
     MONTH_KEYS,
     ProjectConfig,
@@ -75,6 +77,7 @@ from rainwater_app.models import (
     common_hourly_schedule_templates,
     default_sewer_eligible_for_object_type,
     default_hourly_weekly_fractions,
+    fixture_daily_demand_gallons,
     migrate_legacy_demand_inputs,
 )
 from rainwater_app.rainfall import (
@@ -113,6 +116,7 @@ from rainwater_app.pdf_rendering import (
     _draw_pdf_yearly_demand_reliability as draw_pdf_yearly_demand_reliability,
     _write_pdf_with_pypdf as write_pdf_with_pypdf,
 )
+from rainwater_app.project_state import WorkingDraftStore, project_state_fingerprint
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.system_model import (
     compile_builder_system,
@@ -161,6 +165,8 @@ DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 680
 MINIMUM_WINDOW_WIDTH = 1000
 MAX_RECENT_PROJECTS = 8
+PROJECT_STATE_POLL_MS = 1_000
+WORKING_DRAFT_SAVE_MS = 10_000
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
 RAINFALL_DATA_TYPE_BY_LABEL = {
     label: key for key, label in RAINFALL_DATA_TYPE_LABELS.items()
@@ -172,6 +178,35 @@ RAINFALL_RESOLUTION_LABELS = {
     "monthly": "Monthly",
     "unknown": "Unknown",
 }
+
+PROJECT_FORM_VARIABLES = (
+    "project_name_var", "author_name_var", "street_address_var", "city_var",
+    "state_or_province_var", "postal_code_var", "latitude_var", "longitude_var",
+    "unit_var", "country_var", "canadian_precip_var", "system_type_var",
+    "simple_daily_var", "daily_demand_days_var", "hourly_schedule_enabled_var",
+    "use_synthetic_hourly_rainfall_var", "rainfall_data_type_var",
+    "rainfall_resolution_var", "rainfall_timezone_var", "rainfall_timing_var",
+    "pump_capacity_var", "filtration_pump_capacity_var", "filter_recovery_var",
+    "booster_tank_size_var", "booster_initial_fill_var", "booster_refill_level_var",
+    "municipal_backup_enabled_var", "flushes_var", "toilet_flush_var",
+    "urinal_flush_var", "graph_start_var", "graph_end_var", "graph_step_var",
+    "graph_auto_step_count_var", "selected_tank_var",
+    "recommendation_reliability_target_var", "recommendation_marginal_gain_var",
+    "multitank_comparison_var", "initial_fill_var", "reserve_var",
+    "first_flush_antecedent_unit_var", "first_flush_antecedent_var",
+    "financial_currency_var", "financial_water_rate_var", "financial_sewer_rate_var",
+    "financial_tariff_unit_var", "financial_sewer_eligible_var",
+    "financial_installed_cost_var", "financial_incentives_var",
+    "financial_fixed_maintenance_var", "financial_maintenance_percent_var",
+    "financial_analysis_period_var", "financial_discount_rate_var",
+    "financial_utility_escalation_var", "financial_maintenance_escalation_var",
+    "financial_electricity_escalation_var", "financial_pump_power_var",
+    "financial_pump_flow_rate_var", "financial_replacement_cost_var",
+    "financial_replacement_interval_var", "financial_replacement_escalation_var",
+    "optimization_minimum_reliability_var", "optimization_electricity_rate_var",
+    "optimization_objective_var", "optimization_maximum_makeup_var",
+    "optimization_maximum_cost_var", "optimization_positive_savings_var",
+)
 
 
 ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
@@ -566,6 +601,56 @@ class ProjectLocationPickerDialog(tk.Toplevel):
         self.destroy()
 
 
+class UnsavedChangesDialog(tk.Toplevel):
+    def __init__(self, parent: "RainwaterTkApp", project_name: str, action: str) -> None:
+        super().__init__(parent)
+        self.title("Unsaved changes")
+        self.transient(parent)
+        self.resizable(False, False)
+        self.result: str | None = None
+
+        body = ttk.Frame(self, padding=18)
+        body.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(
+            body,
+            text=f"Save changes to {project_name} before {action}?",
+            font=("TkDefaultFont", 11, "bold"),
+            wraplength=430,
+        ).grid(row=0, column=0, columnspan=3, sticky="w")
+        ttk.Label(
+            body,
+            text="Your changes will be lost if you don't save them.",
+            wraplength=430,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(8, 18))
+
+        save_button = ttk.Button(body, text="Save", command=lambda: self._choose("save"))
+        save_button.grid(row=2, column=0, padx=(0, 8))
+        ttk.Button(
+            body, text="Don't Save", command=lambda: self._choose("discard")
+        ).grid(row=2, column=1, padx=8)
+        ttk.Button(body, text="Cancel", command=self._cancel).grid(
+            row=2, column=2, padx=(8, 0)
+        )
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.bind("<Return>", lambda _event: self._choose("save"))
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max((parent.winfo_width() - self.winfo_width()) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - self.winfo_height()) // 2, 0)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        save_button.focus_set()
+
+    def _choose(self, result: str) -> None:
+        self.result = result
+        self.destroy()
+
+    def _cancel(self) -> None:
+        self.result = "cancel"
+        self.destroy()
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -604,6 +689,9 @@ class RainwaterTkApp(tk.Tk):
         )
         self.recent_projects_path = self.application_data_dir / "recent_projects.json"
         self.recent_project_paths = self._load_recent_project_paths()
+        self.working_draft_store = WorkingDraftStore(
+            self.application_data_dir / "recovery"
+        )
         application_state_dir = self.application_data_dir
         self.app_preferences_path = application_state_dir / "app_preferences.json"
         self.app_preferences = self._load_app_preferences()
@@ -669,6 +757,7 @@ class RainwaterTkApp(tk.Tk):
         self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
         self.saved_project_var = tk.StringVar()
         self.status_var = tk.StringVar(value="Ready")
+        self.project_state_var = tk.StringVar(value="All changes saved")
         self.simple_daily_var = tk.StringVar(value="0")
         self.daily_demand_days_var = tk.StringVar(value="7")
         self.flushes_var = tk.StringVar(value="0")
@@ -845,8 +934,14 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_in_progress = False
         self.optimization_result_queue: queue.Queue = queue.Queue()
         self.optimization_poll_after_id: str | None = None
+        self.project_state_poll_after_id: str | None = None
+        self.working_draft_after_id: str | None = None
+        self._saved_state_fingerprint = ""
+        self._last_draft_fingerprint = ""
+        self._project_dirty = False
 
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self.request_exit)
         self.execution_log.info("Application", "Application started")
         self.execution_log_poll_after_id = self.after(75, self._poll_execution_log)
         if self.execution_log_visible_var.get():
@@ -855,6 +950,13 @@ class RainwaterTkApp(tk.Tk):
         self._update_selected_tank_warning()
         self._load_project_list()
         self._populate_from_model()
+        self._accept_current_project_state(clear_draft=False)
+        self.project_state_poll_after_id = self.after(
+            PROJECT_STATE_POLL_MS, self._poll_project_state
+        )
+        self.working_draft_after_id = self.after(
+            WORKING_DRAFT_SAVE_MS, self._autosave_working_draft
+        )
         self._center_main_window()
         self.deiconify()
         if self.migrated_legacy_files:
@@ -875,6 +977,8 @@ class RainwaterTkApp(tk.Tk):
                     APP_TITLE, recovery_notice, parent=self
                 )
             )
+        if self.working_draft_store.exists():
+            self.after_idle(self._offer_working_draft_recovery)
 
     def _center_main_window(self) -> None:
         self.update_idletasks()
@@ -952,6 +1056,11 @@ class RainwaterTkApp(tk.Tk):
         status_frame.grid(row=1, column=0, sticky="ew")
         status_frame.columnconfigure(0, weight=1)
         ttk.Label(status_frame, textvariable=self.status_var, anchor="w").grid(row=0, column=0, sticky="ew")
+        ttk.Label(
+            status_frame,
+            textvariable=self.project_state_var,
+            anchor="e",
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
         self.analysis_progress = ttk.Progressbar(
             status_frame,
             variable=self.analysis_progress_var,
@@ -959,11 +1068,11 @@ class RainwaterTkApp(tk.Tk):
             length=180,
             style="Analysis.Horizontal.TProgressbar",
         )
-        self.analysis_progress.grid(row=0, column=1, sticky="e", padx=(12, 0))
+        self.analysis_progress.grid(row=0, column=2, sticky="e", padx=(12, 0))
         self.cancel_analysis_button = ttk.Button(
             status_frame, text="Cancel analysis", command=self.cancel_analysis, state="disabled"
         )
-        self.cancel_analysis_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.cancel_analysis_button.grid(row=0, column=3, sticky="e", padx=(8, 0))
 
     def _clear_top_level_tab_focus(self, _event: tk.Event) -> None:
         """Keep mouse-selected main tabs from retaining the native dotted focus ring."""
@@ -998,7 +1107,7 @@ class RainwaterTkApp(tk.Tk):
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_separator()
         file_menu.add_command(label="Close project", accelerator="Ctrl+W", command=self.close_project)
-        file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.destroy)
+        file_menu.add_command(label="Exit", accelerator="Ctrl+Q", command=self.request_exit)
         menubar.add_cascade(label="File", menu=file_menu)
 
         analysis_menu = tk.Menu(menubar, tearoff=False)
@@ -1163,7 +1272,7 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _shortcut_exit(self, _event: tk.Event) -> str:
-        self.destroy()
+        self.request_exit()
         return "break"
 
     def _load_recent_project_paths(self) -> list[str]:
@@ -7600,6 +7709,12 @@ class RainwaterTkApp(tk.Tk):
 
     def _demand_object_quantity_summary(self, demand_object: DemandObject) -> str:
         unit = volume_unit(self.config_model)
+        if demand_object.demand_mode == "fixture_usage":
+            daily = fixture_daily_demand_gallons(demand_object)
+            return (
+                f"{volume_to_display(daily, self.config_model):.2f} {unit}/day "
+                f"({demand_object.fixture_people:g} people)"
+            )
         if demand_object.demand_mode == "recurring_daily":
             values = demand_object.monthly_daily_demand_gallons.values()
             value = max(values, default=demand_object.recurring_daily_gallons)
@@ -8004,10 +8119,207 @@ class RainwaterTkApp(tk.Tk):
         self.find_nearest_stations_button.configure(state="normal" if enabled else "disabled")
         self.import_station_button.configure(state="normal" if enabled else "disabled")
 
+    def _project_form_values(self) -> dict[str, object]:
+        values: dict[str, object] = {}
+        for attribute_name in PROJECT_FORM_VARIABLES:
+            variable = getattr(self, attribute_name, None)
+            if isinstance(variable, tk.Variable):
+                values[attribute_name] = variable.get()
+        return values
+
+    def _restore_project_form_values(self, values: dict[str, object], notes: str) -> None:
+        for attribute_name, value in values.items():
+            variable = getattr(self, attribute_name, None)
+            if isinstance(variable, tk.Variable):
+                variable.set(value)
+        self.project_notes_text.delete("1.0", tk.END)
+        self.project_notes_text.insert("1.0", notes)
+
+    def _current_project_fingerprint(self) -> str:
+        return project_state_fingerprint(
+            self.config_model,
+            self.rainfall_df,
+            self.curve_df,
+            self.results_df,
+            self._comparison_results_to_frame(),
+            self.hourly_results_df,
+            form_values=self._project_form_values(),
+            notes=self.project_notes_text.get("1.0", "end-1c"),
+        )
+
+    def _update_project_state_display(self) -> None:
+        project_name = self.active_project_name or self.project_name_var.get().strip()
+        title = APP_TITLE if not project_name else f"{APP_TITLE} - {project_name}"
+        if self._project_dirty:
+            title = f"{title} *"
+            self.project_state_var.set("Unsaved changes")
+        else:
+            self.project_state_var.set("All changes saved")
+        self.title(title)
+
+    def _refresh_project_dirty_state(self) -> bool:
+        self._project_dirty = (
+            self._current_project_fingerprint() != self._saved_state_fingerprint
+        )
+        self._update_project_state_display()
+        return self._project_dirty
+
+    def _poll_project_state(self) -> None:
+        self.project_state_poll_after_id = None
+        try:
+            self._refresh_project_dirty_state()
+        finally:
+            if self.winfo_exists():
+                self.project_state_poll_after_id = self.after(
+                    PROJECT_STATE_POLL_MS, self._poll_project_state
+                )
+
+    def _accept_current_project_state(self, *, clear_draft: bool = True) -> None:
+        self._saved_state_fingerprint = self._current_project_fingerprint()
+        self._last_draft_fingerprint = ""
+        self._project_dirty = False
+        self._update_project_state_display()
+        if clear_draft:
+            self.working_draft_store.clear()
+
+    def _confirm_project_replacement(self, action: str) -> bool:
+        if not self._refresh_project_dirty_state():
+            return True
+        choice = self._ask_unsaved_changes(action)
+        if choice == "cancel":
+            return False
+        if choice == "save":
+            return self.save_project()
+        self.working_draft_store.clear()
+        return True
+
+    def _ask_unsaved_changes(self, action: str) -> str:
+        project_name = (
+            self.project_name_var.get().strip()
+            or self.active_project_name
+            or "this project"
+        )
+        dialog = UnsavedChangesDialog(self, project_name, action)
+        self.wait_window(dialog)
+        return dialog.result or "cancel"
+
+    def _autosave_working_draft(self) -> None:
+        self.working_draft_after_id = None
+        try:
+            if self.analysis_running or not self._refresh_project_dirty_state():
+                return
+            fingerprint = self._current_project_fingerprint()
+            if fingerprint == self._last_draft_fingerprint:
+                return
+            form_values = self._project_form_values()
+            notes = self.project_notes_text.get("1.0", "end-1c")
+            comparison_results = self._comparison_results_to_frame()
+            self.working_draft_store.save(
+                self.config_model,
+                self.rainfall_df,
+                self.curve_df,
+                self.results_df,
+                comparison_results,
+                self.hourly_results_df,
+                project_file_path=self.project_file_path,
+                baseline_fingerprint=self._saved_state_fingerprint,
+                form_values=form_values,
+                notes=notes,
+            )
+            self._last_draft_fingerprint = self._current_project_fingerprint()
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.warning(
+                "Project",
+                "Could not update the working recovery draft",
+                details=str(exc),
+            )
+        finally:
+            if self.winfo_exists():
+                self.working_draft_after_id = self.after(
+                    WORKING_DRAFT_SAVE_MS, self._autosave_working_draft
+                )
+
+    def _offer_working_draft_recovery(self) -> None:
+        restore = messagebox.askyesno(
+            APP_TITLE,
+            "Unsaved work was found from an interrupted session.\n\n"
+            "Restore the working draft? Choose No to discard it.",
+            parent=self,
+        )
+        if not restore:
+            self.working_draft_store.clear()
+            return
+        try:
+            draft = self.working_draft_store.load()
+            source_path = Path(draft.metadata.project_file_path)
+            if source_path.is_file():
+                self.project_file_path = source_path
+                self.store = SQLiteStore(
+                    str(source_path),
+                    backup_dir=project_backup_dir(
+                        source_path, data_dir=self.application_data_dir
+                    ),
+                )
+                self._load_project_list()
+                self._refresh_system_template_library()
+            self.config_model = draft.config
+            self.rainfall_df = draft.rainfall_df
+            self.curve_df = draft.curve_df
+            self.results_df = draft.results_df
+            self.hourly_results_df = draft.hourly_results_df
+            self.comparison_results = self._comparison_results_from_frame(
+                draft.comparison_results_df
+            )
+            self.rainfall_source_label = self.config_model.rainfall_source_label
+            self._clear_results()
+            self._populate_from_model()
+            self._restore_project_form_values(
+                draft.metadata.form_values, draft.metadata.notes
+            )
+            self._set_active_project(self.config_model.name)
+            if not self.results_df.empty and not self.curve_df.empty:
+                self._populate_results()
+                self.after_idle(self._draw_saved_analysis_charts)
+            self._saved_state_fingerprint = (
+                draft.metadata.baseline_fingerprint or "pre-recovery-state"
+            )
+            if self._current_project_fingerprint() == self._saved_state_fingerprint:
+                self._saved_state_fingerprint = "pre-recovery-state"
+            self._last_draft_fingerprint = self._current_project_fingerprint()
+            self._refresh_project_dirty_state()
+            self.status_var.set("Recovered unsaved work from the interrupted session")
+            self.execution_log.info("Project", "Recovered unsaved working draft")
+        except Exception as exc:  # noqa: BLE001
+            self.working_draft_store.clear()
+            self.execution_log.error(
+                "Project", "Could not recover the working draft", exception=exc
+            )
+            messagebox.showwarning(
+                APP_TITLE,
+                f"The unsaved working draft could not be recovered and was discarded:\n{exc}",
+                parent=self,
+            )
+
+    def request_exit(self) -> None:
+        if self.analysis_running:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Wait for the active analysis or optimization to finish before exiting.",
+                parent=self,
+            )
+            return
+        if not self._confirm_project_replacement("exiting"):
+            return
+        self.working_draft_store.clear()
+        if self.project_state_poll_after_id is not None:
+            self.after_cancel(self.project_state_poll_after_id)
+        if self.working_draft_after_id is not None:
+            self.after_cancel(self.working_draft_after_id)
+        self.destroy()
+
     def _set_active_project(self, project_name: str | None) -> None:
         self.active_project_name = project_name.strip() if project_name and project_name.strip() else None
-        title = APP_TITLE if self.active_project_name is None else f"{APP_TITLE} - {self.active_project_name}"
-        self.title(title)
+        self._update_project_state_display()
 
     def auto_set_graph_step(self) -> None:
         self.config_model.unit_system = self.unit_var.get() or "Imperial"
@@ -8035,6 +8347,8 @@ class RainwaterTkApp(tk.Tk):
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before replacing the project.")
             return
+        if not self._confirm_project_replacement("creating a new project"):
+            return
         self.execution_log.info("Project", "Creating a new project")
         self._set_active_project(None)
         self._reset_weather_selection()
@@ -8044,15 +8358,20 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.rainfall_source_label = None
         self.results_df = pd.DataFrame()
         self.curve_df = pd.DataFrame()
+        self.hourly_results_df = pd.DataFrame()
+        self.comparison_results = {}
         self.reliability_var.set("Reliability: --")
         self._clear_results()
         self._populate_from_model()
+        self._accept_current_project_state()
         self.status_var.set("Started a new project")
         self.execution_log.info("Project", "New project ready")
 
     def close_project(self) -> None:
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before closing the project.")
+            return
+        if not self._confirm_project_replacement("closing the project"):
             return
         self.execution_log.info("Project", "Closing the current project")
         self._set_active_project(None)
@@ -8065,6 +8384,8 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.rainfall_source_label = None
         self.results_df = pd.DataFrame()
         self.curve_df = pd.DataFrame()
+        self.hourly_results_df = pd.DataFrame()
+        self.comparison_results = {}
         self.rainfall_summary_var.set("No rainfall file loaded")
         self.reliability_var.set("Reliability: --")
         self.analysis_progress_var.set(0)
@@ -8072,16 +8393,21 @@ class RainwaterTkApp(tk.Tk):
         self._populate_from_model()
         self.project_name_var.set("")
         self.saved_project_var.set("")
+        self._accept_current_project_state()
         self.status_var.set("Closed project")
         self.execution_log.info("Project", "Project closed")
 
-    def load_selected_project(self) -> None:
+    def load_selected_project(self, *, confirm_unsaved: bool = True) -> None:
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before loading another project.")
             return
         name = self.saved_project_var.get()
         if not name:
             messagebox.showinfo(APP_TITLE, "Select a saved project first.")
+            return
+        if confirm_unsaved and not self._confirm_project_replacement(
+            "loading another project"
+        ):
             return
         try:
             self.execution_log.info("Project", "Loading selected project")
@@ -8114,6 +8440,7 @@ class RainwaterTkApp(tk.Tk):
             else:
                 self.reliability_var.set("Reliability: --")
                 self.status_var.set(f"Loaded project '{name}'")
+            self._accept_current_project_state()
             self.execution_log.info(
                 "Project", f"Project loaded with {len(self.rainfall_df):,} rainfall rows"
             )
@@ -8163,6 +8490,8 @@ class RainwaterTkApp(tk.Tk):
         if self.analysis_running:
             messagebox.showinfo(APP_TITLE, "Wait for the active analysis or optimization to finish before opening another project.")
             return
+        if not self._confirm_project_replacement("opening another project file"):
+            return
         previous_path = self.project_file_path
         previous_store = self.store
         try:
@@ -8200,7 +8529,7 @@ class RainwaterTkApp(tk.Tk):
             self._refresh_system_template_library()
             self.saved_project_var.set(projects[0])
             self._load_project_list()
-            self.load_selected_project()
+            self.load_selected_project(confirm_unsaved=False)
             self._set_progress(85, "Opening project: refreshing views", "OpenProject.Horizontal.TProgressbar")
             self._add_recent_project_path(self.project_file_path)
             self._set_progress(100, f"Opened project '{self.config_model.name}' from {self.project_file_path}", "OpenProject.Horizontal.TProgressbar")
@@ -8214,11 +8543,11 @@ class RainwaterTkApp(tk.Tk):
             self.execution_log.error("Project", "Could not open project file", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
 
-    def save_project(self) -> None:
+    def save_project(self) -> bool:
         self._apply_form_to_model()
-        self._save_current_project()
+        return self._save_current_project()
 
-    def save_project_as(self) -> None:
+    def save_project_as(self) -> bool:
         self._apply_form_to_model()
         path = filedialog.asksaveasfilename(
             title="Save project as...",
@@ -8228,7 +8557,7 @@ class RainwaterTkApp(tk.Tk):
             filetypes=[("Rainwater project files", "*.db"), ("SQLite database files", "*.sqlite *.sqlite3"), ("All files", "*.*")],
         )
         if not path:
-            return
+            return False
         name = simpledialog.askstring(
             APP_TITLE,
             "Project name",
@@ -8236,11 +8565,11 @@ class RainwaterTkApp(tk.Tk):
             parent=self,
         )
         if name is None:
-            return
+            return False
         name = name.strip()
         if not name:
             messagebox.showwarning(APP_TITLE, "Project name cannot be blank.")
-            return
+            return False
         self.project_file_path = Path(path)
         self.store = SQLiteStore(
             str(self.project_file_path),
@@ -8251,9 +8580,9 @@ class RainwaterTkApp(tk.Tk):
         self._refresh_system_template_library()
         self.config_model.name = name
         self.project_name_var.set(name)
-        self._save_current_project()
+        return self._save_current_project()
 
-    def _save_current_project(self) -> None:
+    def _save_current_project(self) -> bool:
         self.config_model.rainfall_source_label = self.rainfall_source_label
         try:
             self.execution_log.info("Project", "Saving current project")
@@ -8279,6 +8608,7 @@ class RainwaterTkApp(tk.Tk):
                 "SaveProject.Horizontal.TProgressbar",
             )
             self.execution_log.info("Project", f"Saved project file {self.project_file_path.name}")
+            self._accept_current_project_state()
             if self.store.last_backup_error:
                 self.execution_log.warning(
                     "Project",
@@ -8291,11 +8621,13 @@ class RainwaterTkApp(tk.Tk):
                     f"{self.store.last_backup_error}",
                     parent=self,
                 )
+            return True
         except Exception as exc:  # noqa: BLE001
             self.analysis_progress_var.set(0)
             self.status_var.set("Project save failed")
             self.execution_log.error("Project", "Project save failed", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not save project:\n{exc}")
+            return False
 
     def _comparison_results_to_frame(self) -> pd.DataFrame:
         frames = []
@@ -10089,10 +10421,19 @@ class RainwaterTkApp(tk.Tk):
             mode = getattr(demand_object, "demand_mode", "scheduled_flow")
             if mode == "monthly_volume":
                 schedule = "Monthly volume profile"
-            elif mode == "recurring_daily":
+            elif mode in {"recurring_daily", "fixture_usage"}:
                 days = getattr(demand_object, "operating_weekdays", None) or []
                 labels = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
                 schedule = ", ".join(labels[int(day)] for day in days if 0 <= int(day) <= 6) or "No operating days"
+                if mode == "fixture_usage":
+                    fixture_volume = volume_to_display(
+                        demand_object.fixture_volume_gallons_per_use, cfg
+                    )
+                    schedule = (
+                        f"{schedule}; {demand_object.fixture_people:g} people x "
+                        f"{demand_object.fixture_uses_per_person_per_day:g} uses/person/day x "
+                        f"{fixture_volume:g} {volume_unit(cfg)}/use"
+                    )
             else:
                 schedule = demand_object.schedule_name or "Schedule not specified"
             sewer_basis = (
@@ -10833,7 +11174,7 @@ class RainwaterTkApp(tk.Tk):
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
         if not path:
-            return
+            return False
         export = CandidateAnalysisService(self.config_model).export_data(data)
         export.to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
         self.status_var.set(f"Exported candidate tank performance: {Path(path).name}")
@@ -11833,6 +12174,7 @@ class DemandObjectDialog(tk.Toplevel):
     )
     MODE_LABELS = {
         "Scheduled flow": "scheduled_flow",
+        "Fixture use (people x uses)": "fixture_usage",
         "Recurring daily volume": "recurring_daily",
         "Monthly volume": "monthly_volume",
     }
@@ -11871,6 +12213,22 @@ class DemandObjectDialog(tk.Toplevel):
         )
         self.mode_var = tk.StringVar(value=mode_label)
         self.daily_volume_var = tk.StringVar(value=f"{volume_to_display(demand_object.recurring_daily_gallons, config):.8g}")
+        self.fixture_people_var = tk.StringVar(
+            value=f"{(demand_object.fixture_people or 1.0):.8g}"
+        )
+        self.fixture_uses_var = tk.StringVar(
+            value=f"{(demand_object.fixture_uses_per_person_per_day or DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY):.8g}"
+        )
+        fixture_volume = (
+            demand_object.fixture_volume_gallons_per_use
+            or DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH
+        )
+        self.fixture_volume_var = tk.StringVar(
+            value=f"{volume_to_display(fixture_volume, config):.8g}"
+        )
+        self.fixture_uses_label_var = tk.StringVar()
+        self.fixture_volume_label_var = tk.StringVar()
+        self.fixture_guidance_var = tk.StringVar()
         selected_weekdays = set(
             demand_object.operating_weekdays
             if demand_object.operating_weekdays is not None
@@ -11962,6 +12320,53 @@ class DemandObjectDialog(tk.Toplevel):
         demand_unit_combo.grid(row=0, column=1, padx=(8, 0))
         demand_unit_combo.bind("<<ComboboxSelected>>", self._change_instantaneous_demand_unit)
 
+        self.fixture_frame = ttk.Frame(demand)
+        self.fixture_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
+        self.fixture_frame.columnconfigure(1, weight=1)
+        ttk.Label(self.fixture_frame, text="Number of people").grid(
+            row=0, column=0, sticky="w", pady=3, padx=(0, 8)
+        )
+        ttk.Entry(self.fixture_frame, textvariable=self.fixture_people_var).grid(
+            row=0, column=1, sticky="ew", pady=3
+        )
+        ttk.Label(self.fixture_frame, textvariable=self.fixture_uses_label_var).grid(
+            row=1, column=0, sticky="w", pady=3, padx=(0, 8)
+        )
+        ttk.Entry(self.fixture_frame, textvariable=self.fixture_uses_var).grid(
+            row=1, column=1, sticky="ew", pady=3
+        )
+        ttk.Label(self.fixture_frame, textvariable=self.fixture_volume_label_var).grid(
+            row=2, column=0, sticky="w", pady=3, padx=(0, 8)
+        )
+        fixture_volume_row = ttk.Frame(self.fixture_frame)
+        fixture_volume_row.grid(row=2, column=1, sticky="ew", pady=3)
+        fixture_volume_row.columnconfigure(0, weight=1)
+        ttk.Entry(fixture_volume_row, textvariable=self.fixture_volume_var).grid(
+            row=0, column=0, sticky="ew"
+        )
+        ttk.Label(fixture_volume_row, text=volume_unit(config)).grid(
+            row=0, column=1, padx=(8, 0)
+        )
+        ttk.Label(
+            self.fixture_frame,
+            textvariable=self.fixture_guidance_var,
+            foreground="#667278",
+            wraplength=560,
+            justify="left",
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 7))
+        ttk.Label(self.fixture_frame, text="Operating weekdays").grid(
+            row=4, column=0, sticky="nw", pady=3, padx=(0, 8)
+        )
+        fixture_weekdays = ttk.Frame(self.fixture_frame)
+        fixture_weekdays.grid(row=4, column=1, sticky="w", pady=3)
+        for index, label in enumerate(self.DAY_LABELS):
+            ttk.Checkbutton(
+                fixture_weekdays,
+                text=label,
+                variable=self.weekday_vars[index],
+                command=self._refresh_dialog_state,
+            ).grid(row=0, column=index, padx=(0 if index == 0 else 5, 0))
+
         self.recurring_frame = ttk.Frame(demand)
         self.recurring_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.recurring_frame.columnconfigure(1, weight=1)
@@ -12039,7 +12444,8 @@ class DemandObjectDialog(tk.Toplevel):
         self.bind("<Return>", lambda _event: self._save())
         for variable in (
             self.name_var, self.mode_var, self.schedule_var, self.instantaneous_demand_var,
-            self.daily_volume_var, self.sewer_eligible_var, self.use_monthly_overrides_var,
+            self.daily_volume_var, self.fixture_people_var, self.fixture_uses_var,
+            self.fixture_volume_var, self.sewer_eligible_var, self.use_monthly_overrides_var,
             *self.monthly_vars.values(),
         ):
             variable.trace_add("write", lambda *_args: self._refresh_dialog_state())
@@ -12061,6 +12467,14 @@ class DemandObjectDialog(tk.Toplevel):
         self.sewer_eligible_var.set(
             default_sewer_eligible_for_object_type(self.type_var.get())
         )
+        if (
+            self.type_var.get() == "Toilet"
+            and self.original.name == "New demand object"
+            and self.MODE_LABELS.get(self.mode_var.get()) == "scheduled_flow"
+        ):
+            self.mode_var.set("Fixture use (people x uses)")
+            if self.name_var.get().strip() == "New demand object":
+                self.name_var.set("Toilet")
         self._refresh_dialog_state()
 
     def _mode_changed(self, _event: tk.Event | None = None) -> None:
@@ -12084,13 +12498,41 @@ class DemandObjectDialog(tk.Toplevel):
 
     def _refresh_dialog_state(self) -> None:
         mode = self.MODE_LABELS.get(self.mode_var.get(), "scheduled_flow")
-        for frame in (self.scheduled_frame, self.recurring_frame, self.monthly_mode_frame):
+        for frame in (
+            self.scheduled_frame,
+            self.fixture_frame,
+            self.recurring_frame,
+            self.monthly_mode_frame,
+        ):
             frame.grid_remove()
         if mode == "scheduled_flow":
             self.scheduled_frame.grid()
             self.monthly_table_frame.grid_remove()
             self.schedule_help_var.set(
                 "Schedule values multiply the instantaneous flow in each hour."
+            )
+        elif mode == "fixture_usage":
+            self.fixture_frame.grid()
+            self.monthly_table_frame.grid_remove()
+            is_toilet = self.type_var.get() == "Toilet"
+            self.fixture_uses_label_var.set(
+                "Flushes per person per day" if is_toilet else "Uses per person per day"
+            )
+            self.fixture_volume_label_var.set(
+                "Volume per flush" if is_toilet else "Volume per use"
+            )
+            self.fixture_guidance_var.set(
+                "Planning default: 3.0 flushes/person/day. EPA commercial guidance uses "
+                "3 toilet flushes/day for female occupants and 1 for male occupants; the EPA "
+                "residential calculator uses 5.05. Adjust for the population. The 1.28 gal "
+                "fixture default is the WaterSense toilet limit."
+                if is_toilet
+                else "Daily demand equals people x uses/person/day x volume/use. Adjust each "
+                "assumption for the fixture and population."
+            )
+            self.schedule_help_var.set(
+                "The calculated daily fixture volume is distributed across the schedule's "
+                "active hours on checked weekdays."
             )
         elif mode == "recurring_daily":
             self.recurring_frame.grid()
@@ -12128,6 +12570,22 @@ class DemandObjectDialog(tk.Toplevel):
                 "Instantaneous demand must be a non-negative number."
                 if flow is None else ("Enter an instantaneous demand greater than zero." if flow == 0.0 else "")
             )
+        elif mode == "fixture_usage":
+            people = self._parsed_nonnegative(self.fixture_people_var)
+            uses = self._parsed_nonnegative(self.fixture_uses_var)
+            volume = self._parsed_nonnegative(self.fixture_volume_var)
+            if people is None or uses is None or volume is None:
+                demand_error = "People, uses, and volume per use must be non-negative numbers."
+            elif not any(variable.get() for variable in self.weekday_vars):
+                demand_error = "Select at least one operating weekday."
+            elif people == 0.0:
+                demand_error = "Enter at least one person."
+            elif uses == 0.0:
+                demand_error = "Enter at least one use per person per day."
+            elif volume == 0.0:
+                demand_error = "Enter a fixture volume greater than zero."
+            else:
+                demand_error = ""
         elif mode == "recurring_daily":
             daily = self._parsed_nonnegative(self.daily_volume_var)
             monthly = self._monthly_display_values() if self.use_monthly_overrides_var.get() else {}
@@ -12171,6 +12629,17 @@ class DemandObjectDialog(tk.Toplevel):
             ]
             typical_day = sum(daily_values[:5]) / 5.0
             typical_week = sum(daily_values)
+            january = typical_week * 31.0 / 7.0
+        elif mode == "fixture_usage":
+            people = self._parsed_nonnegative(self.fixture_people_var) or 0.0
+            uses = self._parsed_nonnegative(self.fixture_uses_var) or 0.0
+            volume = volume_to_internal(
+                self._parsed_nonnegative(self.fixture_volume_var) or 0.0,
+                self.config_model,
+            )
+            selected_days = sum(variable.get() for variable in self.weekday_vars)
+            typical_day = people * uses * volume
+            typical_week = typical_day * selected_days
             january = typical_week * 31.0 / 7.0
         elif mode == "recurring_daily":
             daily = volume_to_internal(
@@ -12243,6 +12712,13 @@ class DemandObjectDialog(tk.Toplevel):
             demand_mode=mode,
             recurring_daily_gallons=volume_to_internal(
                 max(_float(self.daily_volume_var.get()), 0.0), self.config_model
+            ),
+            fixture_people=max(_float(self.fixture_people_var.get()), 0.0),
+            fixture_uses_per_person_per_day=max(
+                _float(self.fixture_uses_var.get()), 0.0
+            ),
+            fixture_volume_gallons_per_use=volume_to_internal(
+                max(_float(self.fixture_volume_var.get()), 0.0), self.config_model
             ),
             operating_days_per_week=len(operating_weekdays),
             operating_weekdays=operating_weekdays,

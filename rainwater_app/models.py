@@ -7,6 +7,8 @@ MONTH_KEYS = [
     "jul", "aug", "sep", "oct", "nov", "dec",
 ]
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY = 3.0
+DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH = 1.28
 
 
 def default_hourly_weekly_fractions() -> Dict[str, List[float]]:
@@ -52,6 +54,9 @@ class DemandObject:
     schedule_name: str = ""
     demand_mode: str = "scheduled_flow"
     recurring_daily_gallons: float = 0.0
+    fixture_people: float = 0.0
+    fixture_uses_per_person_per_day: float = 0.0
+    fixture_volume_gallons_per_use: float = 0.0
     operating_days_per_week: int = 7
     monthly_daily_demand_gallons: Dict[str, float] = field(default_factory=dict)
     monthly_demand_gallons: Dict[str, float] = field(default_factory=dict)
@@ -76,6 +81,15 @@ class DemandObject:
                     normalized_weekdays.add(value)
             self.operating_weekdays = sorted(normalized_weekdays)
             self.operating_days_per_week = len(self.operating_weekdays)
+
+
+def fixture_daily_demand_gallons(demand_object: DemandObject) -> float:
+    """Return activity-based daily fixture demand in internal gallons."""
+    return (
+        max(float(demand_object.fixture_people), 0.0)
+        * max(float(demand_object.fixture_uses_per_person_per_day), 0.0)
+        * max(float(demand_object.fixture_volume_gallons_per_use), 0.0)
+    )
 
 
 @dataclass

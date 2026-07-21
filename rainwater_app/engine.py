@@ -7,7 +7,14 @@ from typing import Callable, Iterable
 import numpy as np
 import pandas as pd
 
-from .models import DemandProfile, MONTH_KEYS, ProjectConfig, TankParameters, WEEKDAY_KEYS
+from .models import (
+    DemandProfile,
+    MONTH_KEYS,
+    ProjectConfig,
+    TankParameters,
+    WEEKDAY_KEYS,
+    fixture_daily_demand_gallons,
+)
 from .rainfall import expand_hourly_rainfall
 from .system_model import compile_builder_system
 
@@ -91,6 +98,17 @@ def _demand_object_daily_value_for_date(
             _month_index_key(date), demand_object.recurring_daily_gallons
         )
         return max(float(month_value), 0.0)
+    if mode == "fixture_usage":
+        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
+        if operating_weekdays is None:
+            operating_weekdays = range(
+                min(max(int(demand_object.operating_days_per_week), 0), 7)
+            )
+        return (
+            fixture_daily_demand_gallons(demand_object)
+            if date.weekday() in operating_weekdays
+            else 0.0
+        )
     if mode == "monthly_volume":
         monthly = max(
             float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)),
@@ -165,6 +183,14 @@ def _demand_object_hourly_for_date(
             daily_volume = max(float(demand_object.monthly_daily_demand_gallons.get(
                 _month_index_key(date), demand_object.recurring_daily_gallons
             )), 0.0)
+    elif mode == "fixture_usage":
+        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
+        if operating_weekdays is None:
+            operating_weekdays = range(
+                min(max(int(demand_object.operating_days_per_week), 0), 7)
+            )
+        if date.weekday() in operating_weekdays:
+            daily_volume = fixture_daily_demand_gallons(demand_object)
     elif mode == "monthly_volume":
         monthly = max(float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)), 0.0)
         daily_volume = monthly / monthrange(date.year, date.month)[1]

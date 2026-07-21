@@ -12,6 +12,12 @@ The application keeps writable state outside the installation directory. The def
 
 The application-data directory contains the default `rainwater_projects.db`, preferences, recent-project history, reusable schedule and demand-object libraries, logs, and the backup directory. ACIS and ECCC response caches use the platform cache directory. Set `RWH_APP_DATA_DIR` or `RWH_APP_CACHE_DIR` to an absolute custom location for managed, test, or intentionally portable deployments.
 
+## Unsaved-work recovery
+
+The desktop application marks an edited project with an asterisk in the window title and displays **Unsaved changes** in the status area. Creating, opening, or closing a project and exiting the application offer **Save**, **Don't Save**, and **Cancel** choices when edits are pending. The same guard applies to the operating system's window-close button.
+
+While a project has unsaved changes, a working recovery draft is refreshed in the per-user application-data directory. After a crash, power loss, or forced termination, the next launch offers to restore that draft. A successful project save or an intentional **Don't Save** removes it. Working drafts supplement the saved-project backups below; they are not a replacement for saving a named project.
+
 ## Migration from portable installations
 
 On startup, the desktop application looks beside the executable or source entry point for the former writable files. When a destination file does not already exist, it is copied atomically into the per-user data directory. Existing destination files are never overwritten, and the legacy source files are retained. The application reports which files were copied.
