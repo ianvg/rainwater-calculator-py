@@ -116,19 +116,25 @@ uploading it.
 
 ### 5. Run the optional Streamlit viewer
 
-Install its optional dependency group:
+Install its reviewed, hash-locked dependencies and then install the local project
+without resolving another dependency set:
 
 ```powershell
-python -m pip install -e ".[viewer]"
+.\.venv\Scripts\python.exe -m pip install --require-hashes -r requirements\viewer.txt
+.\.venv\Scripts\python.exe -m pip install --no-build-isolation --no-deps -e .
 ```
 
 Then launch the read-only viewer:
 
 ```powershell
-python -m streamlit run streamlit_app.py
+python -m streamlit run streamlit_app.py --server.address 127.0.0.1 --browser.serverAddress 127.0.0.1
 ```
 
-The viewer opens in a browser at `http://localhost:8501` and reads projects already saved by Tkinter. On Windows, `run_streamlit_viewer.bat` performs these steps.
+The viewer opens in a browser at `http://localhost:8501` and reads projects already saved by Tkinter. On Windows, `run_streamlit_viewer.bat` launches an already-installed viewer and reports the installation commands when dependencies are missing. It never installs or upgrades packages at application startup.
+
+The launcher and documented command bind the unauthenticated viewer to `127.0.0.1`; do not expose it through a public interface or proxy without adding authentication and authorization.
+
+Release builds install `requirements/desktop-build.txt` in pip hash-checking mode, run `pip-audit`, and emit a CycloneDX JSON SBOM beside the executable. Regenerate and review the lockfiles with Python 3.10 and `pip-compile --generate-hashes` whenever dependency declarations change.
 
 ### 6. Clean generated build artifacts
 PyInstaller creates generated folders that can be removed to free disk space:

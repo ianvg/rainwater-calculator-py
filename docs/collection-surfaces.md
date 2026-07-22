@@ -6,7 +6,7 @@ Open **Collection surfaces** to add and edit collection areas. Select the inform
 
 ## Add a standard surface
 
-Choose a predefined surface type and enter its collection area. The application supplies the current default runoff coefficient for that surface type.
+Select **Add collection surface** to open the compact surface library. Choose a predefined surface type and enter its collection area. The application supplies the current default runoff coefficient for that surface type. The selected surface is added to the project table even when its area is left blank, so the area can be entered later. Unselected library templates remain hidden; use **Custom surface** when none of the predefined types fit.
 
 Examples include roof membrane, asphalt-shingle roof, and metal roof. Default coefficients are starting assumptions and should be checked against project conditions and design guidance.
 
@@ -18,7 +18,7 @@ The edit dialog displays the default runoff coefficient below the editable coeff
 
 ## Add a custom surface
 
-Use **Add collection surface** when the predefined list does not represent the project. Enter a descriptive name, area, and defensible runoff coefficient.
+Use **Custom surface** in the library when the predefined list does not represent the project. Enter a descriptive name, area, and defensible runoff coefficient.
 
 ## Runoff coefficient
 

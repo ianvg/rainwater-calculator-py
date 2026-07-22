@@ -1,6 +1,7 @@
 import pandas as pd
 import pytest
 from pypdf import PdfReader
+import tkinter_app
 
 from rainwater_app.climate_normals import PRECIPITATION_NORMAL_RECORD_KEYS
 from rainwater_app.defaults import default_project_config
@@ -62,6 +63,71 @@ class _WidgetStateStub:
 
     def state(self, state) -> None:
         self.last_state = state
+
+
+class _SurfaceTreeStub:
+    def __init__(self) -> None:
+        self.items = {}
+        self.selected = None
+
+    def heading(self, *_args, **_kwargs) -> None:
+        pass
+
+    def get_children(self):
+        return tuple(self.items)
+
+    def delete(self, *item_ids) -> None:
+        for item_id in item_ids:
+            self.items.pop(item_id, None)
+
+    def insert(self, _parent, _position, *, iid, values) -> None:
+        self.items[iid] = values
+
+    def selection_set(self, item_id) -> None:
+        self.selected = item_id
+
+    def focus(self, _item_id) -> None:
+        pass
+
+    def see(self, _item_id) -> None:
+        pass
+
+
+def test_collection_table_hides_zero_area_library_templates() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.surfaces[2].area = 125.0
+    app.surface_tree = _SurfaceTreeStub()
+
+    app._populate_surfaces()
+
+    assert list(app.surface_tree.items) == ["2"]
+    assert app.surface_tree.items["2"][0] == "Roof metal"
+
+
+def test_add_collection_surface_remains_visible_with_blank_area(monkeypatch) -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.surface_tree = _SurfaceTreeStub()
+    app.wait_window = lambda _dialog: None
+
+    class LibraryDialogStub:
+        def __init__(self, _parent) -> None:
+            self.result = Surface("Roof membrane", 0.0, 0.95)
+
+    class SurfaceDialogStub:
+        def __init__(self, _parent, surface, _config) -> None:
+            self.result = Surface(surface.name, 0.0, surface.runoff_coefficient)
+
+    monkeypatch.setattr(tkinter_app, "SurfaceLibraryDialog", LibraryDialogStub)
+    monkeypatch.setattr(tkinter_app, "SurfaceDialog", SurfaceDialogStub)
+
+    app.add_surface()
+
+    assert len(app.config_model.surfaces) == 10
+    assert app.config_model.surfaces[9].area == 0.0
+    assert list(app.surface_tree.items) == ["9"]
+    assert app.surface_tree.selected == "9"
 
 
 class _AnalysisCanvasStub:
