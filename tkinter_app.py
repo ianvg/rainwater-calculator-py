@@ -42,6 +42,18 @@ from rainwater_app.app_paths import (
     project_backup_dir,
     user_data_dir,
 )
+from rainwater_app.climate_normals import (
+    NCEI_CLIMATE_NORMALS_URL,
+    NCEI_BULK_ARCHIVE_SIZE_BYTES,
+    PRECIPITATION_NORMAL_RECORD_KEYS,
+    climate_normals_bulk_archive_installed,
+    climate_normals_bulk_archive_path,
+    download_climate_normals_bulk_archive,
+    fetch_annual_precipitation_normal,
+    fetch_us_annual_precipitation_normal_catalog,
+    filter_climate_normal_stations,
+    remove_climate_normals_bulk_archive,
+)
 from rainwater_app.defaults import default_project_config, default_surface_runoff
 from rainwater_app.eccc import (
     fetch_canadian_daily_station_data,
@@ -67,6 +79,7 @@ from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
     DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
     DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
+    UNIT_SYSTEMS,
     DemandObject,
     MONTH_KEYS,
     ProjectConfig,
@@ -79,6 +92,9 @@ from rainwater_app.models import (
     default_hourly_weekly_fractions,
     fixture_daily_demand_gallons,
     migrate_legacy_demand_inputs,
+    normalize_unit_system,
+    purge_unused_hourly_schedules,
+    unused_hourly_schedule_names,
 )
 from rainwater_app.rainfall import (
     HOURLY_PRECIPITATION_COLUMNS,
@@ -99,13 +115,17 @@ from rainwater_app.recommendations import (
     selected_design_warnings,
 )
 from rainwater_app.reporting import (
+    DEFAULT_REPORT_SECTIONS,
+    REPORT_SECTION_DEFINITIONS,
     REPORT_SCHEMA_VERSION,
     ReportModel,
     atomic_write_text,
     report_average_annual_precipitation as _report_average_annual_precipitation,
+    report_average_annual_rainfall_volumes as _report_average_annual_rainfall_volumes,
     report_demand_summary as _report_demand_summary,
     report_surface_rows as _report_surface_rows,
     report_tank_level_distribution as _report_tank_level_distribution,
+    normalize_report_sections,
     tank_volume_capacity_label as _tank_volume_capacity_label,
     yearly_demand_reliability as _yearly_demand_reliability,
 )
@@ -130,6 +150,7 @@ from rainwater_app.ui_logic import (
     common_demand_object_templates as _common_demand_object_templates,
     demand_flow_from_gallons_per_minute as _demand_flow_from_gallons_per_minute,
     demand_flow_to_gallons_per_minute as _demand_flow_to_gallons_per_minute,
+    graph_step_count as _graph_step_count,
     normalized_demand_object_indices as _normalized_demand_object_indices,
     parse_coordinates as _parse_coordinates,
     safe_project_file_name as _safe_project_file_name,
@@ -143,6 +164,7 @@ from rainwater_app.units import (
     area_to_display,
     area_to_internal,
     area_unit,
+    is_metric,
     precip_to_display,
     precip_to_internal,
     precip_unit,
@@ -224,8 +246,9 @@ Zero-Clause BSD (0BSD) license.
 Permission to use, copy, modify, and/or distribute this software for any
 purpose with or without fee is hereby granted.
 
-APPLICATION ICON:
-The water-drop icon is adapted from the MIT-licensed Tabler Icons collection.
+APPLICATION ICONS:
+The water-drop application icon and selected interface icons, including the
+trash and player controls, are adapted from the MIT-licensed Tabler Icons collection.
 Copyright (c) 2020-2026 Paweł Kuna. https://github.com/tabler/tabler-icons
 
 MAP AND ADDRESS DATA:
@@ -724,6 +747,18 @@ class RainwaterTkApp(tk.Tk):
         self.candidate_sort_reverse = False
         self.candidate_tree_sizes: dict[str, float] = {}
         self.station_options: list[dict] = []
+        self.climate_normal_search_results: list[dict[str, object]] = []
+        self.climate_normal_catalog: list[dict[str, object]] = []
+        self.climate_normal_comparison_rows: dict[str, dict[str, object]] = {}
+        self.climate_normal_sort_column = "annual"
+        self.climate_normal_sort_descending = True
+        self.climate_normal_map_markers: list[object] = []
+        self.climate_normal_map_marker_by_station_id: dict[str, object] = {}
+        self.climate_normal_map_rendered_zoom: int | None = None
+        self.climate_normal_map_redraw_after_id: str | None = None
+        self.climate_normal_map_fit_on_redraw = False
+        self.climate_normal_map_records: list[dict[str, object]] = []
+        self.climate_normal_map_selected_station_id = ""
         self.station_map_markers: list[object] = []
         self.station_map_marker_by_label: dict[str, object] = {}
         self.station_map_rendered_zoom: int | None = None
@@ -896,6 +931,19 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_running = False
         self.analysis_cancel_requested = False
         self.show_tank_points_var = tk.BooleanVar(value=True)
+        initial_report_sections = normalize_report_sections(
+            self.config_model.report_sections
+        )
+        self.report_section_vars = {
+            key: tk.BooleanVar(value=initial_report_sections[key])
+            for key, _label, _html_id, _title in REPORT_SECTION_DEFINITIONS
+        }
+        self.report_include_system_visualization_var = tk.BooleanVar(
+            value=self.config_model.report_include_system_visualization
+        )
+        self.report_include_multitank_charts_var = tk.BooleanVar(
+            value=self.config_model.report_include_multitank_charts
+        )
         self.tank_chart_year_var = tk.StringVar(value="--")
         self.tank_chart_year: int | None = None
         self.tank_chart_range_mode_var = tk.StringVar(value="year")
@@ -911,6 +959,15 @@ class RainwaterTkApp(tk.Tk):
         self.weather_source_note_var = tk.StringVar()
         self.weather_source_link_var = tk.StringVar()
         self.weather_source_url = ACIS_SOURCE_URL
+        self.climate_normal_query_var = tk.StringVar(value="Find station by name")
+        self.climate_normal_station_var = tk.StringVar()
+        self.climate_normal_status_var = tk.StringVar(
+            value="Open this tab to load NOAA 1991-2020 Climate Normals stations."
+        )
+        self.climate_normal_archive_status_var = tk.StringVar()
+        self.climate_normal_archive_progress_var = tk.DoubleVar(value=0.0)
+        self.climate_normal_archive_in_progress = False
+        self.climate_normal_search_placeholder_active = True
         self.rainfall_source_label: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
@@ -932,6 +989,16 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_queue: queue.Queue = queue.Queue()
         self.station_lookup_poll_after_id: str | None = None
         self.station_lookup_in_progress = False
+        self.climate_normal_queue: queue.Queue = queue.Queue()
+        self.climate_normal_poll_after_id: str | None = None
+        self.climate_normal_lookup_in_progress = False
+        self.climate_normal_detail_queue: queue.Queue = queue.Queue()
+        self.climate_normal_detail_poll_after_id: str | None = None
+        self.climate_normal_detail_request_station_id = ""
+        self.climate_normal_detail_in_flight = 0
+        self.climate_normal_detail_in_flight_ids: set[str] = set()
+        self.climate_normal_archive_queue: queue.Queue = queue.Queue()
+        self.climate_normal_archive_poll_after_id: str | None = None
         self.optimization_result_queue: queue.Queue = queue.Queue()
         self.optimization_poll_after_id: str | None = None
         self.project_state_poll_after_id: str | None = None
@@ -1624,7 +1691,13 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(project_frame, text="Project name").grid(row=0, column=0, sticky="w")
         ttk.Entry(project_frame, textvariable=self.project_name_var).grid(row=0, column=1, sticky="ew", padx=(8, 20))
         ttk.Label(project_frame, text="Units").grid(row=0, column=2, sticky="w")
-        unit_combo = ttk.Combobox(project_frame, textvariable=self.unit_var, values=["Imperial", "Metric"], width=12, state="readonly")
+        unit_combo = ttk.Combobox(
+            project_frame,
+            textvariable=self.unit_var,
+            values=UNIT_SYSTEMS,
+            width=15,
+            state="readonly",
+        )
         unit_combo.grid(row=0, column=3, padx=(8, 20))
         unit_combo.bind("<<ComboboxSelected>>", lambda _event: self._change_units())
         ttk.Label(project_frame, text="Country").grid(row=0, column=4, sticky="w")
@@ -1746,6 +1819,146 @@ class RainwaterTkApp(tk.Tk):
             parent=self,
         )
 
+    def _show_multi_site_comparison_info(self) -> None:
+        existing = self.__dict__.get("multi_site_info_window")
+        if existing is not None and existing.winfo_exists():
+            self._refresh_climate_normal_archive_status()
+            existing.deiconify()
+            existing.lift()
+            existing.focus_force()
+            return
+
+        dialog = tk.Toplevel(self)
+        self.multi_site_info_window = dialog
+        dialog.title("About multi-site comparison")
+        dialog.transient(self)
+        dialog.resizable(True, True)
+        dialog.columnconfigure(0, weight=1)
+
+        body = ttk.Frame(dialog, padding=14)
+        body.grid(row=0, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+
+        overview = ttk.LabelFrame(body, text="Purpose", padding=10)
+        overview.grid(row=0, column=0, sticky="ew")
+        overview.columnconfigure(0, weight=1)
+        ttk.Label(
+            overview,
+            text=(
+                "Compare NOAA 1991-2020 annual and seasonal precipitation normals for "
+                "multiple U.S. locations without changing the rainfall data assigned to "
+                "this project."
+            ),
+            foreground="#5f6b70",
+            wraplength=720,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+
+        disclaimer = ttk.LabelFrame(body, text="Planning-data disclaimer", padding=10)
+        disclaimer.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        disclaimer.columnconfigure(0, weight=1)
+        ttk.Label(
+            disclaimer,
+            text=(
+                "Precipitation is shown in the project's current units as water equivalent "
+                "and includes the liquid-water equivalent of frozen precipitation. These "
+                "NOAA Climate Normals use a different source and fixed 1991-2020 period from "
+                "project simulation rainfall. A simulation's average annual precipitation "
+                "may differ because its station, period, precipitation basis, completeness, "
+                "or provider processing may differ."
+            ),
+            foreground="#7a4e00",
+            wraplength=720,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+        source_link = ttk.Label(
+            disclaimer,
+            text="Open NOAA U.S. Climate Normals Quick Access",
+            foreground="#0563c1",
+            cursor="hand2",
+            font=("Segoe UI", 9, "underline"),
+        )
+        source_link.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        source_link.bind(
+            "<Button-1>", lambda _event: webbrowser.open(NCEI_CLIMATE_NORMALS_URL)
+        )
+
+        archive_frame = ttk.LabelFrame(
+            body, text="Optional offline Climate Normals archive", padding=10
+        )
+        archive_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        archive_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            archive_frame,
+            textvariable=self.climate_normal_archive_status_var,
+            foreground="#5f6b70",
+            wraplength=560,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+        archive_actions = ttk.Frame(archive_frame)
+        archive_actions.grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
+        self.download_climate_normal_archive_button = ttk.Button(
+            archive_actions,
+            text="Download archive",
+            command=self.download_climate_normal_archive,
+        )
+        self.download_climate_normal_archive_button.pack(side="left")
+        self.remove_climate_normal_archive_button = ttk.Button(
+            archive_actions,
+            text="Remove archive",
+            command=self.remove_climate_normal_archive,
+        )
+        self.remove_climate_normal_archive_button.pack(side="left", padx=(8, 0))
+        self.climate_normal_archive_progress = ttk.Progressbar(
+            archive_frame,
+            variable=self.climate_normal_archive_progress_var,
+            maximum=100.0,
+        )
+        self.climate_normal_archive_progress.grid(
+            row=1, column=0, sticky="ew", pady=(7, 0)
+        )
+        self.climate_normal_archive_progress.grid_remove()
+        self._refresh_climate_normal_archive_status()
+
+        ttk.Button(body, text="Close", command=dialog.withdraw).grid(
+            row=3, column=0, sticky="e", pady=(12, 0)
+        )
+        dialog.protocol("WM_DELETE_WINDOW", dialog.withdraw)
+        dialog.bind("<Escape>", lambda _event: dialog.withdraw())
+        dialog.update_idletasks()
+        width = max(dialog.winfo_reqwidth(), 760)
+        height = dialog.winfo_reqheight()
+        x = self.winfo_rootx() + max((self.winfo_width() - width) // 2, 0)
+        y = self.winfo_rooty() + max((self.winfo_height() - height) // 2, 0)
+        dialog.geometry(f"{width}x{height}+{x}+{y}")
+        dialog.lift()
+        dialog.focus_force()
+
+    def _rainwater_data_notebook_clicked(self, event: tk.Event) -> str | None:
+        try:
+            tab_index = self.rainwater_data_notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return None
+        if tab_index != self.rainwater_data_notebook.index(
+            self.multi_site_rainwater_tab
+        ):
+            return None
+        tab_right = event.x
+        for probe_x in range(event.x, self.rainwater_data_notebook.winfo_width()):
+            try:
+                probe_index = self.rainwater_data_notebook.index(
+                    f"@{probe_x},{event.y}"
+                )
+            except tk.TclError:
+                break
+            if probe_index != tab_index:
+                break
+            tab_right = probe_x + 1
+        if event.x < tab_right - 28:
+            return None
+        self.after_idle(self._show_multi_site_comparison_info)
+        return "break"
+
     def _create_info_icon(self, size: int = 20) -> tk.PhotoImage:
         image = tk.PhotoImage(master=self, width=size, height=size)
         center = (size - 1) / 2.0
@@ -1796,6 +2009,18 @@ class RainwaterTkApp(tk.Tk):
     def _resize_import_content(self, event: tk.Event) -> None:
         self.import_canvas.itemconfigure(self.import_canvas_window, width=event.width)
 
+    def _resize_multi_site_content(self, event: tk.Event) -> None:
+        self.multi_site_canvas.itemconfigure(
+            self.multi_site_canvas_window, width=event.width
+        )
+
+    def _update_multi_site_scroll_region(
+        self, _event: tk.Event | None = None
+    ) -> None:
+        self.multi_site_canvas.configure(
+            scrollregion=self.multi_site_canvas.bbox("all")
+        )
+
     def _scroll_import_mousewheel(self, event: tk.Event) -> str | None:
         if self.notebook.select() != str(self.import_tab):
             return None
@@ -1824,6 +2049,42 @@ class RainwaterTkApp(tk.Tk):
         else:
             direction = -1 if event.delta > 0 else 1
         self.import_canvas.yview_scroll(direction, "units")
+        return "break"
+
+    def _scroll_multi_site_mousewheel(self, event: tk.Event) -> str | None:
+        if self.notebook.select() != str(self.import_tab):
+            return None
+        if self.rainwater_data_notebook.select() != str(self.multi_site_rainwater_tab):
+            return None
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        independently_scrollable = (
+            self.climate_normal_map,
+            self.climate_normal_state_list,
+            self.climate_normal_station_list,
+            self.climate_normal_tree,
+        )
+        for widget in independently_scrollable:
+            widget_x = widget.winfo_rootx()
+            widget_y = widget.winfo_rooty()
+            if (
+                widget_x <= pointer_x < widget_x + widget.winfo_width()
+                and widget_y <= pointer_y < widget_y + widget.winfo_height()
+            ):
+                return None
+        canvas_x = self.multi_site_canvas.winfo_rootx()
+        canvas_y = self.multi_site_canvas.winfo_rooty()
+        if not (
+            canvas_x <= pointer_x < canvas_x + self.multi_site_canvas.winfo_width()
+            and canvas_y <= pointer_y < canvas_y + self.multi_site_canvas.winfo_height()
+        ):
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        self.multi_site_canvas.yview_scroll(direction, "units")
         return "break"
 
     def _scroll_system_parameters_mousewheel(self, event: tk.Event) -> str | None:
@@ -2104,6 +2365,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_component_editor_baseline: dict[str, object] = {}
         self.system_component_editor_drafts: dict[str, dict[str, object]] = {}
         self.system_component_editor_loading = False
+        self.system_component_graph_step_autosizing = False
         self.system_component_editor_model = self.config_model
         self.system_component_validation_var = tk.StringVar()
         self.apply_system_component_name_button = ttk.Button(
@@ -2217,6 +2479,9 @@ class RainwaterTkApp(tk.Tk):
         )
         for variable in (self.system_component_name_var, *editor_vars.values()):
             variable.trace_add("write", self._system_component_editor_field_changed)
+        editor_vars["graph_step"].trace_add(
+            "write", self._system_component_graph_step_changed
+        )
         ttk.Label(
             self.indirect_system_diagram_frame,
             text=("Link objects by selecting either an output or input node, then the opposite node. "
@@ -3056,7 +3321,7 @@ class RainwaterTkApp(tk.Tk):
         hourly_gallons: float, config: ProjectConfig
     ) -> str:
         flow = max(float(hourly_gallons), 0.0) / 60.0
-        if config.unit_system == "Metric":
+        if is_metric(config):
             return f"{flow * LITERS_PER_GALLON:,.1f} LPM"
         return f"{flow:,.1f} GPM"
 
@@ -4562,6 +4827,30 @@ class RainwaterTkApp(tk.Tk):
             return
         self._update_system_component_editor_state()
 
+    def _system_component_graph_step_changed(self, *_args: object) -> None:
+        if (
+            self.system_component_editor_loading
+            or self.system_component_editor_loaded_id is None
+            or getattr(self, "system_component_graph_step_autosizing", False)
+        ):
+            return
+        item = self._system_layout_item(self.system_component_editor_loaded_id)
+        if item is None or str(item.get("component_type")) != "primary_tank":
+            return
+        values = self._system_component_editor_snapshot(item)
+        try:
+            start = float(str(values["graph_start"]).replace(",", ""))
+            end = float(str(values["graph_end"]).replace(",", ""))
+            step = float(str(values["graph_step"]).replace(",", ""))
+        except ValueError:
+            return
+        step_count = _graph_step_count(start, end, step)
+        if step_count is None:
+            return
+        step_count_var = self.system_component_parameter_vars["graph_auto_step_count"]
+        if step_count_var.get() != str(step_count):
+            step_count_var.set(str(step_count))
+
     def _refresh_system_component_editor(self, *, force_reload: bool = False) -> None:
         if not hasattr(self, "system_component_name_entry"):
             return
@@ -4682,7 +4971,7 @@ class RainwaterTkApp(tk.Tk):
             return
         number = lambda field: float(str(values[field]).strip().replace(",", ""))
         cfg = self.config_model
-        cfg.unit_system = self.unit_var.get() or "Imperial"
+        cfg.unit_system = normalize_unit_system(self.unit_var.get())
         item["name"] = str(values["name"]).strip()
         if component_type == "primary_tank":
             cfg.selected_tank_size_gal = volume_to_internal(number("selected_tank_size"), cfg)
@@ -4756,7 +5045,11 @@ class RainwaterTkApp(tk.Tk):
             self._update_system_component_editor_state()
             return
         step = max((end - start) / int(step_count_value), 1.0)
-        self.system_component_parameter_vars["graph_step"].set(f"{step:.0f}")
+        self.system_component_graph_step_autosizing = True
+        try:
+            self.system_component_parameter_vars["graph_step"].set(f"{step:.0f}")
+        finally:
+            self.system_component_graph_step_autosizing = False
 
     @staticmethod
     def _system_connection_points(
@@ -5138,12 +5431,25 @@ class RainwaterTkApp(tk.Tk):
         self.rainwater_data_notebook.grid(row=0, column=0, sticky="nsew")
         self.daily_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=8)
         self.hourly_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
+        self.multi_site_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
         self.rainwater_data_notebook.add(self.daily_rainwater_tab, text="Daily data")
         self.rainwater_data_notebook.add(self.hourly_rainwater_tab, text="Hourly data")
+        if not hasattr(self, "info_icon_image"):
+            self.info_icon_image = self._create_info_icon()
+        self.rainwater_data_notebook.add(
+            self.multi_site_rainwater_tab,
+            text="Multi-site comparison",
+            image=self.info_icon_image,
+            compound="right",
+        )
+        self.rainwater_data_notebook.bind(
+            "<Button-1>", self._rainwater_data_notebook_clicked, add="+"
+        )
         self.daily_rainwater_tab.columnconfigure(0, weight=1)
         self.daily_rainwater_tab.rowconfigure(1, weight=1)
         self.hourly_rainwater_tab.columnconfigure(0, weight=1)
         self.hourly_rainwater_tab.rowconfigure(3, weight=1)
+        self._build_multi_site_comparison_tab()
         ttk.Label(
             self.hourly_rainwater_tab,
             text=(
@@ -5432,6 +5738,246 @@ class RainwaterTkApp(tk.Tk):
             foreground="#5f6b70",
         ).grid(row=1, column=0, sticky="e", pady=(4, 0))
 
+    def _build_multi_site_comparison_tab(self) -> None:
+        tab = self.multi_site_rainwater_tab
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(0, weight=1)
+        tab.bind("<Map>", self._multi_site_tab_mapped, add="+")
+
+        frame_background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        self.multi_site_canvas = tk.Canvas(
+            tab,
+            highlightthickness=0,
+            borderwidth=0,
+            background=frame_background,
+        )
+        self.multi_site_canvas.grid(row=0, column=0, sticky="nsew")
+        multi_site_scroll_y = ttk.Scrollbar(
+            tab, orient="vertical", command=self.multi_site_canvas.yview
+        )
+        multi_site_scroll_y.grid(row=0, column=1, sticky="ns")
+        self.multi_site_canvas.configure(yscrollcommand=multi_site_scroll_y.set)
+        content = ttk.Frame(self.multi_site_canvas, padding=(0, 0, 8, 8))
+        self.multi_site_canvas_window = self.multi_site_canvas.create_window(
+            (0, 0), window=content, anchor="nw"
+        )
+        content.columnconfigure(0, weight=1)
+        content.bind("<Configure>", self._update_multi_site_scroll_region)
+        self.multi_site_canvas.bind("<Configure>", self._resize_multi_site_content)
+        self.bind_all("<MouseWheel>", self._scroll_multi_site_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._scroll_multi_site_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._scroll_multi_site_mousewheel, add="+")
+
+        search_frame = ttk.LabelFrame(
+            content, text="Find a Climate Normals station", padding=10
+        )
+        search_frame.grid(row=0, column=0, sticky="ew")
+        search_frame.columnconfigure(0, weight=1)
+
+        browser_columns = ttk.Frame(search_frame)
+        browser_columns.grid(row=0, column=0, sticky="ew")
+        browser_columns.columnconfigure(0, weight=2, uniform="station-browser")
+        browser_columns.columnconfigure(1, weight=3, uniform="station-browser")
+        browser_columns.rowconfigure(0, weight=1)
+
+        state_column = ttk.Frame(browser_columns)
+        state_column.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        state_column.columnconfigure(0, weight=1)
+        state_column.rowconfigure(2, weight=1)
+        self.climate_normal_search_entry = tk.Entry(
+            state_column,
+            textvariable=self.climate_normal_query_var,
+            foreground="#7a858a",
+            relief="solid",
+            borderwidth=1,
+        )
+        self.climate_normal_search_entry.grid(row=0, column=0, sticky="ew")
+        self.climate_normal_search_entry.bind(
+            "<FocusIn>", self._climate_normal_search_focus_in
+        )
+        self.climate_normal_search_entry.bind(
+            "<FocusOut>", self._climate_normal_search_focus_out
+        )
+        self.climate_normal_search_entry.bind(
+            "<KeyRelease>", self._climate_normal_search_changed
+        )
+        ttk.Label(
+            state_column,
+            text="US States",
+            font=("Segoe UI", 9, "bold italic"),
+            anchor="w",
+        ).grid(row=1, column=0, sticky="ew", pady=(6, 2))
+        state_list_frame = ttk.Frame(state_column)
+        state_list_frame.grid(row=2, column=0, sticky="nsew")
+        state_list_frame.columnconfigure(0, weight=1)
+        self.climate_normal_state_list = tk.Listbox(
+            state_list_frame,
+            height=7,
+            exportselection=False,
+            activestyle="dotbox",
+            disabledforeground="#90999d",
+        )
+        self.climate_normal_state_list.grid(row=0, column=0, sticky="nsew")
+        climate_state_scroll = ttk.Scrollbar(
+            state_list_frame,
+            orient="vertical",
+            command=self.climate_normal_state_list.yview,
+        )
+        climate_state_scroll.grid(row=0, column=1, sticky="ns")
+        self.climate_normal_state_list.configure(yscrollcommand=climate_state_scroll.set)
+        for _state_code_value, state_name in STATE_OPTIONS:
+            self.climate_normal_state_list.insert(tk.END, f"    {state_name}")
+        self.climate_normal_state_list.bind(
+            "<<ListboxSelect>>", self._climate_normal_state_selected
+        )
+
+        station_list_frame = ttk.Frame(browser_columns)
+        station_list_frame.grid(row=0, column=1, sticky="nsew")
+        station_list_frame.columnconfigure(0, weight=1)
+        station_list_frame.rowconfigure(0, weight=1)
+        self.climate_normal_station_list = tk.Listbox(
+            station_list_frame,
+            height=10,
+            exportselection=False,
+            activestyle="dotbox",
+        )
+        self.climate_normal_station_list.grid(row=0, column=0, sticky="nsew")
+        climate_station_scroll = ttk.Scrollbar(
+            station_list_frame,
+            orient="vertical",
+            command=self.climate_normal_station_list.yview,
+        )
+        climate_station_scroll.grid(row=0, column=1, sticky="ns")
+        self.climate_normal_station_list.configure(
+            yscrollcommand=climate_station_scroll.set
+        )
+        self.climate_normal_station_list.bind(
+            "<<ListboxSelect>>", self._climate_normal_station_selected
+        )
+        self.climate_normal_station_list.bind(
+            "<Double-1>", lambda _event: self.add_selected_climate_normal()
+        )
+
+        station_actions = ttk.Frame(search_frame)
+        station_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        station_actions.columnconfigure(0, weight=1)
+        self.add_climate_normal_button = ttk.Button(
+            station_actions,
+            text="Add to comparison",
+            command=self.add_selected_climate_normal,
+            state="disabled",
+        )
+        self.add_climate_normal_button.grid(row=0, column=1, sticky="e")
+        ttk.Label(
+            station_actions,
+            textvariable=self.climate_normal_status_var,
+            foreground="#5f6b70",
+            wraplength=820,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+
+        climate_map_frame = ttk.LabelFrame(
+            content, text="Climate Normals stations", padding=6
+        )
+        climate_map_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        climate_map_frame.columnconfigure(0, weight=1)
+        self.climate_normal_map = _StationMapView(
+            climate_map_frame, width=800, height=240, corner_radius=0
+        )
+        self.climate_normal_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
+        self.climate_normal_map.set_position(39.5, -98.35)
+        self.climate_normal_map.set_zoom(3)
+        self.climate_normal_map.grid(row=0, column=0, sticky="nsew")
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
+            self.climate_normal_map.canvas.bind(
+                sequence, self._climate_normal_map_view_changed, add="+"
+            )
+        ttk.Label(
+            climate_map_frame,
+            text="Map data © OpenStreetMap contributors",
+            foreground="#5f6b70",
+        ).grid(row=1, column=0, sticky="e", pady=(4, 0))
+
+        comparison_frame = ttk.LabelFrame(
+            content, text="Precipitation normals", padding=10
+        )
+        self.climate_normal_comparison_frame = comparison_frame
+        comparison_frame.grid(row=2, column=0, sticky="nsew", pady=(10, 0))
+        comparison_frame.columnconfigure(0, weight=1)
+        comparison_frame.rowconfigure(0, weight=1)
+        self.climate_normal_tree = ttk.Treeview(
+            comparison_frame,
+            columns=("station", "annual", "winter", "spring", "summer", "autumn"),
+            show="headings",
+            height=6,
+        )
+        headings = {
+            "station": "Station",
+            "annual": "Annual",
+            "winter": "Winter",
+            "spring": "Spring",
+            "summer": "Summer",
+            "autumn": "Autumn",
+        }
+        for column, heading in headings.items():
+            heading_options: dict[str, object] = {
+                "text": heading,
+                "command": (
+                    lambda selected_column=column: self._sort_climate_normal_comparison(
+                        selected_column
+                    )
+                )
+            }
+            self.climate_normal_tree.heading(column, **heading_options)
+        self.climate_normal_tree.column("station", width=330)
+        for column in ("annual", "winter", "spring", "summer", "autumn"):
+            self.climate_normal_tree.column(column, width=115, anchor="e")
+        self.climate_normal_tree.grid(row=0, column=0, sticky="nsew")
+        comparison_scroll = ttk.Scrollbar(
+            comparison_frame, orient="vertical", command=self.climate_normal_tree.yview
+        )
+        comparison_scroll.grid(row=0, column=1, sticky="ns")
+        comparison_scroll_x = ttk.Scrollbar(
+            comparison_frame,
+            orient="horizontal",
+            command=self.climate_normal_tree.xview,
+        )
+        comparison_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.climate_normal_tree.configure(
+            yscrollcommand=comparison_scroll.set,
+            xscrollcommand=comparison_scroll_x.set,
+        )
+
+        self.climate_normal_season_note = ttk.Label(
+            comparison_frame,
+            foreground="#5f6b70",
+            text=(
+                "Meteorological seasons: Winter Dec-Feb; Spring Mar-May; "
+                "Summer Jun-Aug; Autumn Sep-Nov."
+            ),
+        )
+        self.climate_normal_season_note.grid(
+            row=2, column=0, columnspan=2, sticky="w", pady=(6, 0)
+        )
+
+        comparison_actions = ttk.Frame(comparison_frame)
+        comparison_actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(
+            comparison_actions,
+            text="Remove selected",
+            command=self.remove_selected_climate_normal,
+        ).pack(side="left")
+        ttk.Button(
+            comparison_actions,
+            text="Clear comparison",
+            command=self.clear_climate_normal_comparison,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            comparison_actions,
+            text="Export CSV...",
+            command=self.export_climate_normal_comparison,
+        ).pack(side="left", padx=(8, 0))
+
     def _build_collection_tab(self) -> None:
         self.collection_tab.columnconfigure(0, weight=1)
         self.collection_tab.rowconfigure(0, weight=1)
@@ -5521,6 +6067,7 @@ class RainwaterTkApp(tk.Tk):
         self.schedule_add_icon = self._create_schedule_action_icon("#2e8b57", "+")
         self.schedule_duplicate_icon = self._create_schedule_action_icon("#1565c0", "x2")
         self.schedule_delete_icon = self._create_schedule_action_icon("#c62828", "x")
+        self.schedule_purge_icon = self._create_tabler_trash_icon()
         self.schedule_add_button = ttk.Button(
             schedule_toolbar, image=self.schedule_add_icon, command=self.create_hourly_demand_schedule, takefocus=True
         )
@@ -5539,6 +6086,15 @@ class RainwaterTkApp(tk.Tk):
             takefocus=True,
         )
         self.schedule_delete_button.grid(row=0, column=2, padx=(2, 0))
+        self.schedule_purge_button = ttk.Button(
+            schedule_toolbar,
+            image=self.schedule_purge_icon,
+            text="Purge unused objects",
+            compound=tk.NONE,
+            command=self.purge_unused_schedule_objects,
+            takefocus=True,
+        )
+        self.schedule_purge_button.grid(row=0, column=3, padx=(8, 0))
         self.schedule_list = tk.Listbox(self.schedules_tab, width=28, exportselection=False)
         self.schedule_list.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
         self.schedule_list.bind("<<ListboxSelect>>", self._schedule_selection_changed)
@@ -5657,6 +6213,47 @@ class RainwaterTkApp(tk.Tk):
             for y in range(13, 18):
                 for thickness in (-1, 0, 1):
                     image.put("#ffffff", (15 + thickness, y))
+        return image
+
+    def _create_tabler_trash_icon(
+        self, color: str = "#c62828", size: int = 26
+    ) -> tk.PhotoImage:
+        """Rasterize the MIT-licensed Tabler outline trash icon for Tk buttons."""
+        image = tk.PhotoImage(master=self, width=size, height=size)
+        scale = (size - 2) / 24.0
+
+        def point(x: float, y: float) -> tuple[int, int]:
+            return round(1 + x * scale), round(1 + y * scale)
+
+        def line(start: tuple[float, float], end: tuple[float, float]) -> None:
+            x1, y1 = point(*start)
+            x2, y2 = point(*end)
+            steps = max(abs(x2 - x1), abs(y2 - y1), 1)
+            for index in range(steps + 1):
+                x = round(x1 + (x2 - x1) * index / steps)
+                y = round(y1 + (y2 - y1) * index / steps)
+                for offset_x, offset_y in ((0, 0), (1, 0), (0, 1)):
+                    target_x, target_y = x + offset_x, y + offset_y
+                    if 0 <= target_x < size and 0 <= target_y < size:
+                        image.put(color, (target_x, target_y))
+
+        # Tabler "trash" icon geometry on its native 24 x 24 grid.
+        for start, end in (
+            ((4, 7), (20, 7)),
+            ((10, 11), (10, 17)),
+            ((14, 11), (14, 17)),
+            ((5, 7), (6, 19)),
+            ((6, 19), (8, 21)),
+            ((8, 21), (16, 21)),
+            ((16, 21), (18, 19)),
+            ((18, 19), (19, 7)),
+            ((9, 7), (9, 4)),
+            ((9, 4), (10, 3)),
+            ((10, 3), (14, 3)),
+            ((14, 3), (15, 4)),
+            ((15, 4), (15, 7)),
+        ):
+            line(start, end)
         return image
 
     def _build_demand_tab(self) -> None:
@@ -6562,6 +7159,94 @@ class RainwaterTkApp(tk.Tk):
                 ),
             )
 
+    def _build_report_generation_tab(self) -> None:
+        report_tab = self.report_generation_tab
+        report_tab.columnconfigure(0, weight=1)
+
+        ttk.Label(
+            report_tab,
+            text="Choose which sections are included in generated HTML and PDF reports.",
+            font=("Segoe UI", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            report_tab,
+            text=(
+                "These choices are saved with the project. The report cover and table of "
+                "contents are generated automatically."
+            ),
+            foreground="#667278",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 12))
+
+        toolbar = ttk.Frame(report_tab)
+        toolbar.grid(row=2, column=0, sticky="w", pady=(0, 10))
+        ttk.Button(
+            toolbar, text="Select all", command=lambda: self._set_report_sections(True)
+        ).grid(row=0, column=0)
+        ttk.Button(
+            toolbar, text="Clear all", command=lambda: self._set_report_sections(False)
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            toolbar, text="Restore defaults", command=self._restore_default_report_sections
+        ).grid(row=0, column=2, padx=(8, 0))
+
+        sections = ttk.LabelFrame(report_tab, text="Report sections", padding=12)
+        sections.grid(row=3, column=0, sticky="ew")
+        sections.columnconfigure(0, weight=1)
+        sections.columnconfigure(1, weight=1)
+        split_at = (len(REPORT_SECTION_DEFINITIONS) + 1) // 2
+        for index, (key, label, _html_id, _title) in enumerate(REPORT_SECTION_DEFINITIONS):
+            column = 0 if index < split_at else 1
+            row = index if column == 0 else index - split_at
+            ttk.Checkbutton(
+                sections,
+                text=label,
+                variable=self.report_section_vars[key],
+                command=self._apply_report_options_to_model,
+            ).grid(row=row, column=column, sticky="w", padx=(0, 30), pady=3)
+
+        supplemental = ttk.LabelFrame(report_tab, text="Supplemental visuals", padding=12)
+        supplemental.grid(row=4, column=0, sticky="ew", pady=(12, 0))
+        ttk.Checkbutton(
+            supplemental,
+            text="Include system-type visualization",
+            variable=self.report_include_system_visualization_var,
+            command=self._apply_report_options_to_model,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Checkbutton(
+            supplemental,
+            text="Include multi-tank comparison charts when comparison results are available",
+            variable=self.report_include_multitank_charts_var,
+            command=self._apply_report_options_to_model,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+
+        actions = ttk.Frame(report_tab)
+        actions.grid(row=5, column=0, sticky="w", pady=(16, 0))
+        ttk.Button(actions, text="View PDF report", command=self.view_pdf_report).grid(row=0, column=0)
+        ttk.Button(actions, text="View HTML report", command=self.view_html_report).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(actions, text="Export PDF...", command=self.export_pdf_report).grid(row=0, column=2, padx=(18, 0))
+        ttk.Button(actions, text="Export HTML...", command=self.export_html_report).grid(row=0, column=3, padx=(8, 0))
+
+    def _set_report_sections(self, selected: bool) -> None:
+        for variable in self.report_section_vars.values():
+            variable.set(selected)
+        self._apply_report_options_to_model()
+
+    def _restore_default_report_sections(self) -> None:
+        for key, variable in self.report_section_vars.items():
+            variable.set(DEFAULT_REPORT_SECTIONS[key])
+        self._apply_report_options_to_model()
+
+    def _apply_report_options_to_model(self) -> None:
+        self.config_model.report_sections = {
+            key: bool(variable.get()) for key, variable in self.report_section_vars.items()
+        }
+        self.config_model.report_include_system_visualization = bool(
+            self.report_include_system_visualization_var.get()
+        )
+        self.config_model.report_include_multitank_charts = bool(
+            self.report_include_multitank_charts_var.get()
+        )
+
     def _build_results_tab(self) -> None:
         self.results_tab.columnconfigure(0, weight=1)
         self.results_tab.rowconfigure(0, weight=1)
@@ -6571,11 +7256,15 @@ class RainwaterTkApp(tk.Tk):
         self.candidate_results_tab = ttk.Frame(self.results_notebook, padding=8)
         self.multitank_results_tab = ttk.Frame(self.results_notebook, padding=8)
         self.hourly_results_tab = ttk.Frame(self.results_notebook, padding=8)
+        self.report_generation_tab = ttk.Frame(self.results_notebook, padding=12)
         self.results_notebook.add(self.summary_results_tab, text="Single-tank summary")
         self.results_notebook.add(self.candidate_results_tab, text="Candidate performance")
         self.results_notebook.add(self.multitank_results_tab, text="Multitank summary")
         self.results_notebook.add(self.hourly_results_tab, text="Hourly results")
+        self.results_notebook.add(self.report_generation_tab, text="Report generation")
         self.results_notebook.bind("<<NotebookTabChanged>>", self._on_results_subtab_changed)
+
+        self._build_report_generation_tab()
 
         summary = self.summary_results_tab
         summary.columnconfigure(0, weight=1)
@@ -7345,6 +8034,7 @@ class RainwaterTkApp(tk.Tk):
         self.latitude_var.set("" if cfg.latitude is None else f"{cfg.latitude:.8f}")
         self.longitude_var.set("" if cfg.longitude is None else f"{cfg.longitude:.8f}")
         self._update_coordinates_label()
+        cfg.unit_system = normalize_unit_system(cfg.unit_system)
         self.unit_var.set(cfg.unit_system)
         self.system_type_var.set(
             cfg.system_type if cfg.system_type in {"Direct system", "Indirect system"} else "Direct system"
@@ -7451,6 +8141,15 @@ class RainwaterTkApp(tk.Tk):
             f"{cfg.recommendation_marginal_gain_threshold:g}"
         )
         self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
+        report_sections = normalize_report_sections(cfg.report_sections)
+        for key, variable in self.report_section_vars.items():
+            variable.set(report_sections[key])
+        self.report_include_system_visualization_var.set(
+            cfg.report_include_system_visualization
+        )
+        self.report_include_multitank_charts_var.set(
+            cfg.report_include_multitank_charts
+        )
         self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
         self.reserve_var.set(f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}")
         antecedent_unit = (
@@ -7476,6 +8175,8 @@ class RainwaterTkApp(tk.Tk):
         self._refresh_system_animation_dates()
         self._refresh_optimization_assumptions()
         self._refresh_design_recommendations()
+        if hasattr(self, "climate_normal_tree"):
+            self._refresh_climate_normal_comparison()
 
     def _update_setting_unit_labels(self) -> None:
         unit = volume_unit(self.config_model)
@@ -7505,7 +8206,7 @@ class RainwaterTkApp(tk.Tk):
         else:
             cfg.acis_precipitation_field = precipitation_field
         old_unit = cfg.unit_system
-        cfg.unit_system = self.unit_var.get() or "Imperial"
+        cfg.unit_system = normalize_unit_system(self.unit_var.get())
         if old_unit != cfg.unit_system:
             self._populate_from_model()
             return True
@@ -7583,6 +8284,7 @@ class RainwaterTkApp(tk.Tk):
             _float(self.recommendation_marginal_gain_var.get(), 1.0), 0.0
         )
         cfg.multitank_comparison_enabled = bool(self.multitank_comparison_var.get())
+        self._apply_report_options_to_model()
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.minimum_operating_volume_percent = min(
             max(_float(self.reserve_var.get(), 0), 0), 100
@@ -8246,6 +8948,7 @@ class RainwaterTkApp(tk.Tk):
             "Restore the working draft? Choose No to discard it.",
             parent=self,
         )
+
         if not restore:
             self.working_draft_store.clear()
             return
@@ -8322,7 +9025,7 @@ class RainwaterTkApp(tk.Tk):
         self._update_project_state_display()
 
     def auto_set_graph_step(self) -> None:
-        self.config_model.unit_system = self.unit_var.get() or "Imperial"
+        self.config_model.unit_system = normalize_unit_system(self.unit_var.get())
         cfg = self.config_model
         start_gal = volume_to_internal(_float(self.graph_start_var.get(), 500), cfg)
         end_gal = volume_to_internal(_float(self.graph_end_var.get(), 20000), cfg)
@@ -8826,6 +9529,757 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_profile_preview_var.set(
             f"Record-wide distribution across 24 clock hours; {wet_hours} hour bin(s) "
             "contain generated rainfall. Daily totals are conserved exactly."
+        )
+
+    def _multi_site_tab_mapped(self, _event: tk.Event | None = None) -> None:
+        self.after_idle(self._start_climate_normal_catalog_load)
+
+    def _refresh_climate_normal_archive_status(self) -> None:
+        if not hasattr(self, "climate_normal_archive_status_var"):
+            return
+        archive_path = climate_normals_bulk_archive_path()
+        installed = climate_normals_bulk_archive_installed()
+        archive_size_mb = NCEI_BULK_ARCHIVE_SIZE_BYTES / 1_000_000
+        if installed:
+            self.climate_normal_archive_status_var.set(
+                f"Installed ({archive_size_mb:.1f} MB). New station lookups use the local "
+                f"NOAA archive at {archive_path}."
+            )
+        else:
+            self.climate_normal_archive_status_var.set(
+                f"Not installed. Download the {archive_size_mb:.1f} MB official NOAA "
+                "1991-2020 annual/seasonal archive for local station lookups."
+            )
+        if hasattr(self, "download_climate_normal_archive_button"):
+            self.download_climate_normal_archive_button.configure(
+                state="disabled" if installed or self.climate_normal_archive_in_progress else "normal"
+            )
+            self.remove_climate_normal_archive_button.configure(
+                state="normal" if installed and not self.climate_normal_archive_in_progress else "disabled"
+            )
+
+    def download_climate_normal_archive(self) -> None:
+        if self.climate_normal_archive_in_progress:
+            return
+        self.climate_normal_archive_in_progress = True
+        self.climate_normal_archive_progress_var.set(0.0)
+        self.climate_normal_archive_progress.grid()
+        self.download_climate_normal_archive_button.configure(state="disabled")
+        self.remove_climate_normal_archive_button.configure(state="disabled")
+        self.climate_normal_archive_status_var.set(
+            "Connecting to NOAA's public AWS archive mirror..."
+        )
+        threading.Thread(
+            target=self._climate_normal_archive_download_worker,
+            name="rwh-climate-normal-archive-download",
+            daemon=True,
+        ).start()
+        self.climate_normal_archive_poll_after_id = self.after(
+            100, self._poll_climate_normal_archive_download
+        )
+
+    def _climate_normal_archive_download_worker(self) -> None:
+        def report_progress(downloaded: int, total: int) -> None:
+            self.climate_normal_archive_queue.put(
+                ("progress", downloaded, total)
+            )
+
+        try:
+            path = download_climate_normals_bulk_archive(
+                progress_callback=report_progress
+            )
+            self.climate_normal_archive_queue.put(("success", path))
+        except Exception as exc:  # noqa: BLE001
+            self.climate_normal_archive_queue.put(("error", str(exc)))
+
+    def _poll_climate_normal_archive_download(self) -> None:
+        self.climate_normal_archive_poll_after_id = None
+        try:
+            result = self.climate_normal_archive_queue.get_nowait()
+        except queue.Empty:
+            self.climate_normal_archive_poll_after_id = self.after(
+                100, self._poll_climate_normal_archive_download
+            )
+            return
+        while True:
+            try:
+                result = self.climate_normal_archive_queue.get_nowait()
+            except queue.Empty:
+                break
+
+        if result[0] == "progress":
+            downloaded, total = int(result[1]), max(int(result[2]), 1)
+            percent = min(downloaded / total * 100.0, 100.0)
+            self.climate_normal_archive_progress_var.set(percent)
+            self.climate_normal_archive_status_var.set(
+                f"Downloading NOAA archive: {downloaded / 1_000_000:.1f} of "
+                f"{total / 1_000_000:.1f} MB ({percent:.0f}%)."
+            )
+            self.climate_normal_archive_poll_after_id = self.after(
+                100, self._poll_climate_normal_archive_download
+            )
+            return
+
+        self.climate_normal_archive_in_progress = False
+        self.climate_normal_archive_progress.grid_remove()
+        if result[0] == "success":
+            self.execution_log.info(
+                "Climate normals", f"Installed NOAA bulk archive at {result[1]}."
+            )
+            self._refresh_climate_normal_archive_status()
+            messagebox.showinfo(
+                APP_TITLE,
+                "The NOAA 1991-2020 Climate Normals archive is installed. "
+                "New station lookups will use the local archive.",
+                parent=self,
+            )
+        else:
+            self.execution_log.error(
+                "Climate normals", f"Could not install the NOAA bulk archive: {result[1]}"
+            )
+            self._refresh_climate_normal_archive_status()
+            messagebox.showerror(
+                APP_TITLE,
+                f"Could not download the NOAA Climate Normals archive:\n{result[1]}",
+                parent=self,
+            )
+
+    def remove_climate_normal_archive(self) -> None:
+        archive_path = climate_normals_bulk_archive_path()
+        if not climate_normals_bulk_archive_installed():
+            self._refresh_climate_normal_archive_status()
+            return
+        if not messagebox.askyesno(
+            APP_TITLE,
+            "Remove the optional NOAA Climate Normals bulk archive?\n\n"
+            f"{archive_path}\n\n"
+            "Previously cached individual station values will be retained. Future uncached "
+            "lookups will use the online data source.",
+            parent=self,
+        ):
+            return
+        try:
+            removed = remove_climate_normals_bulk_archive()
+        except OSError as exc:
+            messagebox.showerror(
+                APP_TITLE, f"Could not remove the NOAA archive:\n{exc}", parent=self
+            )
+            return
+        if removed:
+            self.execution_log.info(
+                "Climate normals", f"Removed NOAA bulk archive from {archive_path}."
+            )
+        self._refresh_climate_normal_archive_status()
+
+    def _start_climate_normal_catalog_load(self) -> None:
+        if self.climate_normal_catalog or self.climate_normal_lookup_in_progress:
+            return
+        self.climate_normal_lookup_in_progress = True
+        self.climate_normal_status_var.set(
+            "Loading NOAA 1991-2020 Climate Normals stations..."
+        )
+        threading.Thread(
+            target=self._climate_normal_catalog_worker,
+            name="rwh-climate-normal-catalog",
+            daemon=True,
+        ).start()
+        self.climate_normal_poll_after_id = self.after(
+            100, self._poll_climate_normal_catalog
+        )
+
+    def _climate_normal_catalog_worker(self) -> None:
+        try:
+            records = fetch_us_annual_precipitation_normal_catalog()
+            self.climate_normal_queue.put(("success", records))
+        except Exception as exc:  # noqa: BLE001
+            self.climate_normal_queue.put(("error", str(exc)))
+
+    def _poll_climate_normal_catalog(self) -> None:
+        self.climate_normal_poll_after_id = None
+        try:
+            result, payload = self.climate_normal_queue.get_nowait()
+        except queue.Empty:
+            self.climate_normal_poll_after_id = self.after(
+                100, self._poll_climate_normal_catalog
+            )
+            return
+
+        self.climate_normal_lookup_in_progress = False
+        if result == "error":
+            self.climate_normal_status_var.set("Climate Normals station loading failed.")
+            self.execution_log.error(
+                "Climate normals", f"Could not load the station catalog: {payload}"
+            )
+            messagebox.showerror(
+                APP_TITLE,
+                f"Could not load NOAA Climate Normals stations:\n{payload}",
+                parent=self,
+            )
+            return
+
+        self.climate_normal_catalog = [dict(item) for item in payload]
+        self.execution_log.info(
+            "Climate normals",
+            f"Loaded {len(self.climate_normal_catalog)} precipitation-normal stations.",
+        )
+        self._apply_climate_normal_station_filter(fit_map=False)
+
+    def _climate_normal_search_focus_in(self, _event: tk.Event | None = None) -> None:
+        if not self.climate_normal_search_placeholder_active:
+            return
+        self.climate_normal_search_placeholder_active = False
+        self.climate_normal_query_var.set("")
+        self.climate_normal_search_entry.configure(foreground="#1f2d33")
+
+    def _climate_normal_search_focus_out(self, _event: tk.Event | None = None) -> None:
+        if self.climate_normal_query_var.get().strip():
+            return
+        self.climate_normal_search_placeholder_active = True
+        self.climate_normal_query_var.set("Find station by name")
+        self.climate_normal_search_entry.configure(foreground="#7a858a")
+        self._apply_climate_normal_station_filter(fit_map=False)
+
+    def _climate_normal_search_changed(self, _event: tk.Event | None = None) -> None:
+        if self.climate_normal_search_placeholder_active:
+            return
+        query = self.climate_normal_query_var.get().strip()
+        if query:
+            self.climate_normal_state_list.selection_clear(0, tk.END)
+            self.climate_normal_state_list.configure(state=tk.DISABLED)
+        else:
+            self.climate_normal_state_list.configure(state=tk.NORMAL)
+        self._apply_climate_normal_station_filter(fit_map=bool(query))
+
+    def _climate_normal_state_selected(self, _event: tk.Event | None = None) -> None:
+        if str(self.climate_normal_state_list.cget("state")) == str(tk.DISABLED):
+            return
+        self._apply_climate_normal_station_filter(fit_map=True)
+
+    def _selected_climate_normal_state_code(self) -> str:
+        selection = self.climate_normal_state_list.curselection()
+        if not selection:
+            return ""
+        index = int(selection[0])
+        return STATE_OPTIONS[index][0] if 0 <= index < len(STATE_OPTIONS) else ""
+
+    def _climate_normal_name_query(self) -> str:
+        if self.climate_normal_search_placeholder_active:
+            return ""
+        return self.climate_normal_query_var.get().strip()
+
+    def _apply_climate_normal_station_filter(self, *, fit_map: bool) -> None:
+        if not hasattr(self, "climate_normal_station_list"):
+            return
+        query = self._climate_normal_name_query()
+        state_code = "" if query else self._selected_climate_normal_state_code()
+        self.climate_normal_search_results = filter_climate_normal_stations(
+            self.climate_normal_catalog,
+            name_query=query,
+            state_code=state_code,
+        ) if (query or state_code) else []
+        self.climate_normal_station_list.delete(0, tk.END)
+        for record in self.climate_normal_search_results:
+            self.climate_normal_station_list.insert(
+                tk.END, self._climate_normal_station_label(record)
+            )
+        self.climate_normal_station_var.set("")
+        self.add_climate_normal_button.configure(state="disabled")
+        if query:
+            context = f'name containing "{query}" nationwide'
+        elif state_code:
+            context = STATE_NAME_BY_CODE.get(state_code, state_code)
+        else:
+            context = "the United States"
+        count = len(self.climate_normal_search_results)
+        self.climate_normal_status_var.set(
+            f"{count} station(s) shown for {context}."
+            if (query or state_code)
+            else f"Loaded {len(self.climate_normal_catalog)} U.S. station(s). Select a state or search by name."
+        )
+        self.climate_normal_map_records = (
+            list(self.climate_normal_search_results)
+            if (query or state_code)
+            else list(self.climate_normal_catalog)
+        )
+        self._schedule_climate_normal_map_redraw(fit_bounds=fit_map and bool(self.climate_normal_map_records))
+
+    @staticmethod
+    def _climate_normal_station_label(record: dict[str, object]) -> str:
+        return f"{record.get('name', 'Unnamed station')} [{record.get('station_id', '')}]"
+
+    def _climate_normal_station_selected(self, _event: tk.Event | None = None) -> None:
+        selection = self.climate_normal_station_list.curselection()
+        if not selection:
+            self.climate_normal_station_var.set("")
+            self.add_climate_normal_button.configure(state="disabled")
+            self._update_climate_normal_map_selection()
+            return
+        index = int(selection[0])
+        if not 0 <= index < len(self.climate_normal_search_results):
+            return
+        station_id = str(self.climate_normal_search_results[index]["station_id"])
+        self.climate_normal_station_var.set(station_id)
+        self._update_climate_normal_map_selection()
+        record = self.climate_normal_search_results[index]
+        if all(key in record for key in PRECIPITATION_NORMAL_RECORD_KEYS):
+            self.add_climate_normal_button.configure(state="normal")
+            self.climate_normal_status_var.set(
+                f"Selected {record['name']}: "
+                f"{float(record['annual_precipitation_inches']):.2f} in annually."
+            )
+            return
+        self.add_climate_normal_button.configure(state="disabled")
+        if station_id in self.climate_normal_detail_in_flight_ids:
+            self.climate_normal_status_var.set(
+                f"The precipitation normals for {record['name']} are already loading."
+            )
+            return
+        self.climate_normal_detail_request_station_id = station_id
+        self.climate_normal_status_var.set(
+            f"Loading annual and seasonal precipitation normals for {record['name']}..."
+        )
+        self.climate_normal_detail_in_flight_ids.add(station_id)
+        self.climate_normal_detail_in_flight = len(
+            self.climate_normal_detail_in_flight_ids
+        )
+        threading.Thread(
+            target=self._climate_normal_detail_worker,
+            args=(dict(record),),
+            name="rwh-climate-normal-detail",
+            daemon=True,
+        ).start()
+        if self.climate_normal_detail_poll_after_id is None:
+            self.climate_normal_detail_poll_after_id = self.after(
+                100, self._poll_climate_normal_detail
+            )
+
+    def _climate_normal_detail_worker(self, station: dict[str, object]) -> None:
+        station_id = str(station.get("station_id", ""))
+        def report_progress(message: str) -> None:
+            self.climate_normal_detail_queue.put(("progress", station_id, message))
+
+        try:
+            record = fetch_annual_precipitation_normal(
+                station, progress_callback=report_progress
+            )
+            self.climate_normal_detail_queue.put(("success", station_id, record))
+        except Exception as exc:  # noqa: BLE001
+            self.climate_normal_detail_queue.put(("error", station_id, str(exc)))
+
+    def _poll_climate_normal_detail(self) -> None:
+        self.climate_normal_detail_poll_after_id = None
+        try:
+            result, station_id, payload = self.climate_normal_detail_queue.get_nowait()
+        except queue.Empty:
+            self.climate_normal_detail_poll_after_id = self.after(
+                100, self._poll_climate_normal_detail
+            )
+            return
+
+        if result == "progress":
+            if self.climate_normal_station_var.get() == station_id:
+                self.climate_normal_status_var.set(str(payload))
+            self.climate_normal_detail_poll_after_id = self.after(
+                100, self._poll_climate_normal_detail
+            )
+            return
+
+        self.climate_normal_detail_in_flight_ids.discard(station_id)
+        self.climate_normal_detail_in_flight = len(
+            self.climate_normal_detail_in_flight_ids
+        )
+        if result == "success":
+            updated_record = dict(payload)
+            for collection in (
+                self.climate_normal_catalog,
+                self.climate_normal_search_results,
+            ):
+                for index, record in enumerate(collection):
+                    if str(record.get("station_id", "")) == station_id:
+                        collection[index] = dict(updated_record)
+            if self.climate_normal_station_var.get() == station_id:
+                self.add_climate_normal_button.configure(state="normal")
+                self.climate_normal_status_var.set(
+                    f"Selected {updated_record['name']}: "
+                    f"{float(updated_record['annual_precipitation_inches']):.2f} in annually; "
+                    "seasonal normals loaded."
+                )
+        elif self.climate_normal_station_var.get() == station_id:
+            self.add_climate_normal_button.configure(state="disabled")
+            self.climate_normal_status_var.set(str(payload))
+        if self.climate_normal_detail_in_flight or not self.climate_normal_detail_queue.empty():
+            self.climate_normal_detail_poll_after_id = self.after(
+                100, self._poll_climate_normal_detail
+            )
+
+    def add_selected_climate_normal(self) -> None:
+        selection = self.climate_normal_station_list.curselection()
+        index = int(selection[0]) if selection else -1
+        if index < 0 or index >= len(self.climate_normal_search_results):
+            messagebox.showinfo(
+                APP_TITLE, "Find and select a NOAA Climate Normals station first.", parent=self
+            )
+            return
+        record = dict(self.climate_normal_search_results[index])
+        if not all(key in record for key in PRECIPITATION_NORMAL_RECORD_KEYS):
+            messagebox.showinfo(
+                APP_TITLE,
+                "Wait for the station's annual and seasonal precipitation normals "
+                "to finish loading.",
+                parent=self,
+            )
+            return
+        query = self._climate_normal_name_query()
+        state_code = self._selected_climate_normal_state_code()
+        record["searched_location"] = (
+            query or STATE_NAME_BY_CODE.get(state_code, "United States")
+        )
+        station_id = str(record["station_id"])
+        self.climate_normal_comparison_rows[station_id] = record
+        self._refresh_climate_normal_comparison()
+        self.climate_normal_status_var.set(
+            f"Added {record['name']} to the precipitation comparison."
+        )
+
+    def _climate_normal_map_marker_clicked(self, marker: object) -> None:
+        marker_data = getattr(marker, "data", {})
+        station_ids = (
+            marker_data.get("station_ids", []) if isinstance(marker_data, dict) else []
+        )
+        if len(station_ids) > 1:
+            latitude, longitude = getattr(marker, "position")
+            self.climate_normal_map.set_position(latitude, longitude)
+            self.climate_normal_map.set_zoom(
+                min(round(self.climate_normal_map.zoom) + 2, self.climate_normal_map.max_zoom)
+            )
+            self._schedule_climate_normal_map_redraw()
+            return
+        if not station_ids:
+            return
+        station_id = str(station_ids[0])
+        visible_ids = [str(item.get("station_id", "")) for item in self.climate_normal_search_results]
+        if station_id not in visible_ids:
+            record = next(
+                (
+                    item
+                    for item in self.climate_normal_catalog
+                    if str(item.get("station_id", "")) == station_id
+                ),
+                None,
+            )
+            if record is None:
+                return
+            self.climate_normal_search_placeholder_active = False
+            self.climate_normal_query_var.set(str(record.get("name", "")))
+            self.climate_normal_search_entry.configure(foreground="#1f2d33")
+            self.climate_normal_state_list.selection_clear(0, tk.END)
+            self.climate_normal_state_list.configure(state=tk.DISABLED)
+            self._apply_climate_normal_station_filter(fit_map=True)
+            visible_ids = [
+                str(item.get("station_id", "")) for item in self.climate_normal_search_results
+            ]
+        if station_id not in visible_ids:
+            return
+        index = visible_ids.index(station_id)
+        self.climate_normal_station_list.selection_clear(0, tk.END)
+        self.climate_normal_station_list.selection_set(index)
+        self.climate_normal_station_list.activate(index)
+        self.climate_normal_station_list.see(index)
+        self._climate_normal_station_selected()
+
+    def _clear_climate_normal_map_markers(self) -> None:
+        markers = tuple(self.climate_normal_map_markers)
+        self.climate_normal_map_markers = []
+        self.climate_normal_map_marker_by_station_id = {}
+        for marker in markers:
+            try:
+                marker.delete()
+            except (IndexError, tk.TclError):
+                pass
+
+    def _render_climate_normal_map(self, *, fit_bounds: bool) -> None:
+        if not hasattr(self, "climate_normal_map") or not self.climate_normal_map.winfo_exists():
+            return
+        self._clear_climate_normal_map_markers()
+        selected_station_id = self.climate_normal_station_var.get()
+        self.climate_normal_map_selected_station_id = selected_station_id
+        valid_stations = [
+            station
+            for station in self.climate_normal_map_records
+            if self._station_coordinates(station) is not None
+        ]
+        positions = [self._station_coordinates(station) for station in valid_stations]
+        zoom = max(round(self.climate_normal_map.zoom), 1)
+        self.climate_normal_map_rendered_zoom = zoom
+        for cluster in self._cluster_stations(valid_stations, zoom):
+            cluster_positions = [self._station_coordinates(station) for station in cluster]
+            latitude = sum(
+                position[0] for position in cluster_positions if position is not None
+            ) / len(cluster_positions)
+            longitude = sum(
+                position[1] for position in cluster_positions if position is not None
+            ) / len(cluster_positions)
+            station_ids = [str(station.get("station_id", "")) for station in cluster]
+            selected = selected_station_id in station_ids
+            selected_record = next(
+                (
+                    station
+                    for station in cluster
+                    if str(station.get("station_id", "")) == selected_station_id
+                ),
+                None,
+            )
+            marker_text = (
+                str(selected_record.get("name", ""))
+                if selected_record is not None and len(cluster) == 1
+                else f"{len(cluster)} stations"
+                if len(cluster) > 1
+                else None
+            )
+            marker = self.climate_normal_map.set_marker(
+                latitude,
+                longitude,
+                text=marker_text,
+                command=self._climate_normal_map_marker_clicked,
+                data={"station_ids": station_ids},
+                marker_color_circle="#b71c1c" if selected else "#1565c0",
+                marker_color_outside="#d32f2f" if selected else "#1976d2",
+            )
+            self.climate_normal_map_markers.append(marker)
+            for station_id in station_ids:
+                self.climate_normal_map_marker_by_station_id[station_id] = marker
+        valid_positions = [position for position in positions if position is not None]
+        if not fit_bounds or not valid_positions:
+            return
+        if len(valid_positions) == 1:
+            self.climate_normal_map.set_position(*valid_positions[0])
+            self.climate_normal_map.set_zoom(10)
+            self._schedule_climate_normal_map_redraw()
+            return
+        latitudes = [position[0] for position in valid_positions]
+        longitudes = [position[1] for position in valid_positions]
+        latitude_padding = max((max(latitudes) - min(latitudes)) * 0.06, 0.05)
+        longitude_padding = max((max(longitudes) - min(longitudes)) * 0.06, 0.05)
+        self.climate_normal_map.fit_bounding_box(
+            (max(latitudes) + latitude_padding, min(longitudes) - longitude_padding),
+            (min(latitudes) - latitude_padding, max(longitudes) + longitude_padding),
+        )
+        self._schedule_climate_normal_map_redraw()
+
+    def _update_climate_normal_map_selection(self) -> None:
+        selected_station_id = self.climate_normal_station_var.get()
+        markers_to_update = {
+            marker
+            for station_id in (
+                self.climate_normal_map_selected_station_id,
+                selected_station_id,
+            )
+            if (
+                marker := self.climate_normal_map_marker_by_station_id.get(station_id)
+            ) is not None
+        }
+        self.climate_normal_map_selected_station_id = selected_station_id
+        for marker in markers_to_update:
+            marker_data = getattr(marker, "data", {})
+            station_ids = (
+                marker_data.get("station_ids", [])
+                if isinstance(marker_data, dict)
+                else []
+            )
+            selected = selected_station_id in station_ids
+            marker.marker_color_circle = "#b71c1c" if selected else "#1565c0"
+            marker.marker_color_outside = "#d32f2f" if selected else "#1976d2"
+            if selected and len(station_ids) == 1:
+                record = next(
+                    (
+                        item
+                        for item in self.climate_normal_catalog
+                        if str(item.get("station_id", "")) == selected_station_id
+                    ),
+                    None,
+                )
+                marker.set_text(str(record.get("name", "")) if record else None)
+            else:
+                marker.set_text(f"{len(station_ids)} stations" if len(station_ids) > 1 else None)
+
+    def _climate_normal_map_view_changed(self, _event: tk.Event | None = None) -> None:
+        self._schedule_climate_normal_map_redraw()
+
+    def _schedule_climate_normal_map_redraw(self, *, fit_bounds: bool = False) -> None:
+        self.climate_normal_map_fit_on_redraw = (
+            self.climate_normal_map_fit_on_redraw or fit_bounds
+        )
+        if self.climate_normal_map_redraw_after_id is not None:
+            self.after_cancel(self.climate_normal_map_redraw_after_id)
+        self.climate_normal_map_redraw_after_id = self.after(
+            200, self._redraw_climate_normal_map
+        )
+
+    def _redraw_climate_normal_map(self) -> None:
+        self.climate_normal_map_redraw_after_id = None
+        fit_bounds = self.climate_normal_map_fit_on_redraw
+        self.climate_normal_map_fit_on_redraw = False
+        if not hasattr(self, "climate_normal_map") or not self.climate_normal_map.winfo_exists():
+            return
+        if fit_bounds or round(self.climate_normal_map.zoom) != self.climate_normal_map_rendered_zoom:
+            self._render_climate_normal_map(fit_bounds=fit_bounds)
+
+    def _ranked_climate_normal_rows(self) -> list[dict[str, object]]:
+        sort_keys = dict(
+            zip(
+                ("annual", "winter", "spring", "summer", "autumn"),
+                PRECIPITATION_NORMAL_RECORD_KEYS,
+                strict=True,
+            )
+        )
+        sort_column = self.__dict__.get("climate_normal_sort_column", "annual")
+        descending = self.__dict__.get("climate_normal_sort_descending", True)
+        if sort_column == "station":
+            return sorted(
+                self.climate_normal_comparison_rows.values(),
+                key=lambda item: (
+                    str(item["name"]).casefold(),
+                    str(item.get("station_id", "")).casefold(),
+                ),
+                reverse=descending,
+            )
+        record_key = sort_keys.get(sort_column, sort_keys["annual"])
+        return sorted(
+            self.climate_normal_comparison_rows.values(),
+            key=lambda item: (
+                (-1.0 if descending else 1.0) * float(item[record_key]),
+                str(item["name"]).casefold(),
+            ),
+        )
+
+    def _sort_climate_normal_comparison(self, column: str) -> None:
+        sortable_columns = {
+            "station",
+            "annual",
+            "winter",
+            "spring",
+            "summer",
+            "autumn",
+        }
+        if column not in sortable_columns:
+            return
+        if column == self.__dict__.get("climate_normal_sort_column", "annual"):
+            self.climate_normal_sort_descending = not self.__dict__.get(
+                "climate_normal_sort_descending", True
+            )
+        else:
+            self.climate_normal_sort_column = column
+            self.climate_normal_sort_descending = column != "station"
+        self._refresh_climate_normal_comparison()
+
+    def _refresh_climate_normal_sort_headings(self) -> None:
+        if not hasattr(self.climate_normal_tree, "heading"):
+            return
+        labels = {
+            "station": "Station",
+            "annual": "Annual",
+            "winter": "Winter",
+            "spring": "Spring",
+            "summer": "Summer",
+            "autumn": "Autumn",
+        }
+        active_column = self.__dict__.get("climate_normal_sort_column", "annual")
+        descending = self.__dict__.get("climate_normal_sort_descending", True)
+        for column, label in labels.items():
+            indicator = " ▼" if descending else " ▲"
+            self.climate_normal_tree.heading(
+                column,
+                text=f"{label}{indicator}" if column == active_column else label,
+            )
+
+    def _refresh_climate_normal_comparison(self) -> None:
+        unit = precip_unit(self.config_model)
+        comparison_frame = self.__dict__.get("climate_normal_comparison_frame")
+        if comparison_frame is not None:
+            comparison_frame.configure(text=f"Precipitation normals ({unit})")
+        self._refresh_climate_normal_sort_headings()
+        self.climate_normal_tree.delete(*self.climate_normal_tree.get_children())
+        for record in self._ranked_climate_normal_rows():
+            self.climate_normal_tree.insert(
+                "",
+                "end",
+                iid=str(record["station_id"]),
+                values=(
+                    f"{record.get('name', '')} [{record.get('station_id', '')}]",
+                    *(
+                        f"{precip_to_display(float(record[key]), self.config_model):,.2f}"
+                        for key in PRECIPITATION_NORMAL_RECORD_KEYS
+                    ),
+                ),
+            )
+
+    def remove_selected_climate_normal(self) -> None:
+        for station_id in self.climate_normal_tree.selection():
+            self.climate_normal_comparison_rows.pop(station_id, None)
+        self._refresh_climate_normal_comparison()
+
+    def clear_climate_normal_comparison(self) -> None:
+        self.climate_normal_comparison_rows.clear()
+        self._refresh_climate_normal_comparison()
+
+    def export_climate_normal_comparison(self) -> None:
+        rows = self._ranked_climate_normal_rows()
+        if not rows:
+            messagebox.showinfo(
+                APP_TITLE, "Add at least one station before exporting.", parent=self
+            )
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export multi-site weather comparison",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            unit = precip_unit(self.config_model)
+            with Path(path).open("w", encoding="utf-8", newline="") as output:
+                writer = csv.writer(output)
+                writer.writerow(
+                    [
+                        "Rank",
+                        "Searched location",
+                        "NOAA station",
+                        "Station ID",
+                        f"Annual precipitation normal ({unit} water equivalent)",
+                        f"Winter precipitation normal ({unit} water equivalent)",
+                        f"Spring precipitation normal ({unit} water equivalent)",
+                        f"Summer precipitation normal ({unit} water equivalent)",
+                        f"Autumn precipitation normal ({unit} water equivalent)",
+                        "Normal period",
+                        "Latitude",
+                        "Longitude",
+                        "Source",
+                    ]
+                )
+                for rank, record in enumerate(rows, start=1):
+                    writer.writerow(
+                        [
+                            rank,
+                            record.get("searched_location", record.get("name", "")),
+                            record.get("name", ""),
+                            record.get("station_id", ""),
+                            *(
+                                f"{precip_to_display(float(record[key]), self.config_model):.2f}"
+                                for key in PRECIPITATION_NORMAL_RECORD_KEYS
+                            ),
+                            record.get("period", "1991-2020"),
+                            record.get("latitude", ""),
+                            record.get("longitude", ""),
+                            record.get("provider", "NOAA NCEI U.S. Climate Normals"),
+                        ]
+                    )
+        except OSError as exc:
+            self.climate_normal_status_var.set("Could not export the comparison.")
+            messagebox.showerror("Export failed", str(exc), parent=self)
+            return
+        self.climate_normal_status_var.set(
+            f"Exported comparison to {Path(path).name}."
         )
 
     def find_acis_stations(self) -> None:
@@ -9793,6 +11247,35 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
         self._refresh_schedule_management()
 
+    def purge_unused_schedule_objects(self) -> None:
+        demand = self.config_model.demand
+        unused_names = unused_hourly_schedule_names(demand)
+        if not unused_names:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No unused project schedule objects were found.",
+                parent=self,
+            )
+            return
+        schedule_list = "\n".join(f"- {name}" for name in unused_names)
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Purge {len(unused_names)} unused project schedule object(s)?\n\n"
+            f"{schedule_list}\n\nThis cannot be undone after the project is saved.",
+            parent=self,
+        ):
+            return
+        removed = purge_unused_hourly_schedules(demand)
+        self.hourly_schedule_summary_var.set(
+            f"Purged {len(removed)} unused schedule object(s)"
+        )
+        self.status_var.set(
+            f"Purged {len(removed)} unused project schedule object(s)"
+        )
+        self._refresh_schedule_management(
+            select_name=demand.active_hourly_schedule_name
+        )
+
     def _synthetic_hourly_rainfall_setting_changed(self) -> None:
         self.config_model.use_synthetic_hourly_rainfall = bool(
             self.use_synthetic_hourly_rainfall_var.get()
@@ -10286,6 +11769,7 @@ class RainwaterTkApp(tk.Tk):
             "state_typeahead_after_id",
             "country_typeahead_after_id",
             "station_map_redraw_after_id",
+            "climate_normal_archive_poll_after_id",
         ):
             after_id = getattr(self, after_id_name, None)
             if after_id is not None:
@@ -10332,9 +11816,6 @@ class RainwaterTkApp(tk.Tk):
             "project_name": self.project_name_var.get().strip() or self.config_model.name,
             "author_name": self.author_name_var.get().strip(),
             "end_uses": end_uses,
-            "multitank_available": bool(
-                self.config_model.multitank_comparison_enabled and self.comparison_results
-            ),
         }
 
     def _default_end_uses_text(self) -> str:
@@ -10592,6 +12073,9 @@ class RainwaterTkApp(tk.Tk):
                 precipitation_field, "Total precipitation"
             ),
             "surfaces": _report_surface_rows(cfg),
+            "average_annual_rainfall_volumes": _report_average_annual_rainfall_volumes(
+                self.results_df, cfg
+            ),
             "first_flush_antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
             "first_flush_antecedent_dry_value": _antecedent_dry_period_from_days(
                 cfg.first_flush_antecedent_dry_days,
@@ -10772,13 +12256,21 @@ class RainwaterTkApp(tk.Tk):
                 "generated_at": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
                 "result_years": int(result_dates.dt.year.nunique()) if not result_dates.empty else 0,
             },
-            "include_multitank_charts": bool(metadata.get("include_multitank_charts", False)),
-            "include_system_visualization": bool(metadata.get("include_system_visualization", False)),
+            "report_sections": normalize_report_sections(cfg.report_sections),
+            "include_multitank_charts": bool(
+                cfg.report_include_multitank_charts
+                and cfg.multitank_comparison_enabled
+                and self.comparison_results
+            ),
+            "include_system_visualization": bool(
+                cfg.report_include_system_visualization
+            ),
             "system_type": cfg.system_type,
             "project_latitude": cfg.latitude,
             "project_longitude": cfg.longitude,
             "weather_station_latitude": station_latitude,
             "weather_station_longitude": station_longitude,
+            "map_tile_url": OSM_TILE_URL,
             "multitank_charts": self._multitank_report_chart_data(),
         })
 
@@ -12014,7 +13506,7 @@ class SurfaceDialog(tk.Toplevel):
 class ReportDialog(tk.Toplevel):
     def __init__(self, parent: RainwaterTkApp, defaults: dict[str, object]) -> None:
         super().__init__(parent)
-        self.title("PDF Report")
+        self.title("Report details")
         self.resizable(True, False)
         self.result: dict[str, object] | None = None
         self.author_name = str(defaults.get("author_name", ""))
@@ -12044,25 +13536,8 @@ class ReportDialog(tk.Toplevel):
         self.end_uses_text.grid(row=4, column=1, sticky="ew", pady=3)
         self.end_uses_text.insert("1.0", str(defaults["end_uses"]))
 
-        self.include_multitank_var = tk.BooleanVar(value=False)
-        self.multitank_check = ttk.Checkbutton(
-            body,
-            text="Include multi-tank sizing charts",
-            variable=self.include_multitank_var,
-        )
-        self.multitank_check.grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        if not bool(defaults.get("multitank_available", False)):
-            self.multitank_check.state(["disabled"])
-
-        self.include_system_visualization_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
-            body,
-            text="Include system-type visualization",
-            variable=self.include_system_visualization_var,
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(6, 0))
-
         buttons = ttk.Frame(body)
-        buttons.grid(row=7, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
         ttk.Button(buttons, text="Continue", command=self._save).grid(row=0, column=1)
 
@@ -12073,8 +13548,6 @@ class ReportDialog(tk.Toplevel):
         self.result = {key: var.get().strip() for key, var in self.vars.items()}
         self.result["author_name"] = self.author_name.strip()
         self.result["end_uses"] = self.end_uses_text.get("1.0", "end").strip() or "Not specified"
-        self.result["include_multitank_charts"] = bool(self.include_multitank_var.get())
-        self.result["include_system_visualization"] = bool(self.include_system_visualization_var.get())
         self.destroy()
 
 
@@ -12195,7 +13668,7 @@ class DemandObjectDialog(tk.Toplevel):
             value=demand_object.object_type if demand_object.object_type in self.OBJECT_TYPES else "Other"
         )
         self.sewer_eligible_var = tk.BooleanVar(value=bool(demand_object.sewer_eligible))
-        initial_flow_unit = "lpm" if config.unit_system == "Metric" else "gpm"
+        initial_flow_unit = "lpm" if is_metric(config) else "gpm"
         self.instantaneous_demand_unit_var = tk.StringVar(value=initial_flow_unit)
         self._instantaneous_demand_unit = initial_flow_unit
         self.instantaneous_demand_var = tk.StringVar(

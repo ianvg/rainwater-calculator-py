@@ -37,6 +37,38 @@ MONTH_LABELS = {
 
 REPORT_SCHEMA_VERSION = 2
 
+REPORT_SECTION_DEFINITIONS = (
+    ("design_recommendations", "Design recommendations", "design-recommendations", "Design Recommendations and Review Conditions"),
+    ("project_information", "Project information", "project-information", "Project Information"),
+    ("executive_summary", "Executive summary", "executive-summary", "Executive Summary"),
+    ("notes", "Notes", "notes", "Notes"),
+    ("surface_area_summary", "Surface area summary", "surface-area-summary", "Surface Area Summary"),
+    ("rainfall_volume_summary", "Rainfall volume summary", "rainfall-volume-summary", "Rainfall Volume Summary"),
+    ("tank_summary", "Tank summary", "tank-summary", "Tank Summary"),
+    ("candidate_performance", "Candidate performance", "candidate-performance", "Candidate Performance"),
+    ("water_balance", "Reconciled water balance", "water-balance", "Reconciled Water Balance"),
+    ("demand_summary", "Demand summary", "demand-summary", "Demand Summary"),
+    ("end_use_performance", "End-use performance", "end-use-performance", "End-use Performance"),
+    ("financial_analysis", "Financial analysis", "financial-analysis", "Financial Analysis"),
+    ("rainfall_quality", "Rainfall quality and completeness", "rainfall-quality", "Rainfall Quality and Completeness"),
+    ("yearly_rainfall", "Yearly rainfall summary", "yearly-rainfall", "Yearly Rainfall Summary"),
+    ("rainfall_events", "Rainfall-event summary", "rainfall-events", "Rainfall-event Summary"),
+    ("analysis_provenance", "Analysis provenance", "analysis-provenance", "Analysis Provenance"),
+    ("reliability_curve", "Reliability curve", "reliability-curve", "Reliability Curve"),
+    ("yearly_demand_reliability", "Yearly demand reliability", "yearly-demand-reliability", "Yearly Demand Reliability"),
+    ("tank_level_distribution", "Tank level distribution", "tank-level-distribution", "Tank Level Distribution"),
+)
+DEFAULT_REPORT_SECTIONS = {key: True for key, _label, _html_id, _title in REPORT_SECTION_DEFINITIONS}
+
+
+def normalize_report_sections(value: object) -> dict[str, bool]:
+    """Return a complete, forward-compatible set of report section choices."""
+    supplied = value if isinstance(value, Mapping) else {}
+    return {
+        key: bool(supplied.get(key, default))
+        for key, default in DEFAULT_REPORT_SECTIONS.items()
+    }
+
 
 class ReportValidationError(ValueError):
     """Raised when renderer input does not satisfy the report schema."""
@@ -111,6 +143,10 @@ class ReportModel(Mapping[str, object]):
         normalized.setdefault("rainfall_quality", {})
         normalized.setdefault("yearly_rainfall_summary", [])
         normalized.setdefault("rainfall_event_summary", {})
+        normalized.setdefault("average_annual_rainfall_volumes", {})
+        normalized["report_sections"] = normalize_report_sections(
+            normalized.get("report_sections")
+        )
         _validate_report_value(normalized)
         return cls(version, normalized)
 
@@ -222,6 +258,32 @@ def report_surface_rows(config: ProjectConfig) -> list[dict[str, object]]:
         for surface in config.surfaces
         if surface.area > 0
     ]
+
+
+def report_average_annual_rainfall_volumes(
+    results: pd.DataFrame, config: ProjectConfig
+) -> dict[str, float]:
+    """Summarize gross rain, first flush, and usable rain as mean annual volumes."""
+    columns = {
+        "total_average_rain": "GrossCollectedGallons",
+        "average_first_flush_diversion": "FirstFlushLossGallons",
+        "total_usable_average_rain": "CollectedGallons",
+    }
+    if results.empty or "Date" not in results:
+        return {key: 0.0 for key in columns}
+    values = pd.DataFrame({"Date": pd.to_datetime(results["Date"], errors="coerce")})
+    for key, column in columns.items():
+        values[key] = pd.to_numeric(
+            results.get(column, pd.Series(0.0, index=results.index)), errors="coerce"
+        ).fillna(0.0)
+    values = values.dropna(subset=["Date"])
+    if values.empty:
+        return {key: 0.0 for key in columns}
+    annual = values.groupby(values["Date"].dt.year)[list(columns)].sum()
+    return {
+        key: volume_to_display(float(annual[key].mean()), config)
+        for key in columns
+    }
 
 
 def report_demand_summary(

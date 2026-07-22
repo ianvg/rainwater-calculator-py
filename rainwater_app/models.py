@@ -9,6 +9,17 @@ MONTH_KEYS = [
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY = 3.0
 DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH = 1.28
+ENGLISH_UNIT_SYSTEM = "English (I-P)"
+METRIC_UNIT_SYSTEM = "Metric (SI)"
+UNIT_SYSTEMS = (ENGLISH_UNIT_SYSTEM, METRIC_UNIT_SYSTEM)
+
+
+def normalize_unit_system(value: object) -> str:
+    """Normalize current and legacy unit-system labels to their canonical names."""
+    label = str(value or "").strip().casefold()
+    if label in {"metric", "metric (si)", "si"}:
+        return METRIC_UNIT_SYSTEM
+    return ENGLISH_UNIT_SYSTEM
 
 
 def default_hourly_weekly_fractions() -> Dict[str, List[float]]:
@@ -115,6 +126,29 @@ class DemandProfile:
     drip_irrigation: Dict[str, float] = field(default_factory=dict)
     vehicular_washing: Dict[str, float] = field(default_factory=dict)
     other_outdoor: Dict[str, float] = field(default_factory=dict)
+
+
+def unused_hourly_schedule_names(demand: DemandProfile) -> List[str]:
+    """Return project schedules that are neither active nor assigned to demand objects."""
+    used_names = {
+        demand_object.schedule_name
+        for demand_object in demand.demand_objects
+        if demand_object.schedule_name
+    }
+    if demand.active_hourly_schedule_name:
+        used_names.add(demand.active_hourly_schedule_name)
+    return [
+        name for name in demand.hourly_schedule_library
+        if name not in used_names
+    ]
+
+
+def purge_unused_hourly_schedules(demand: DemandProfile) -> List[str]:
+    """Remove and return unreferenced project schedules while retaining the active one."""
+    unused_names = unused_hourly_schedule_names(demand)
+    for name in unused_names:
+        del demand.hourly_schedule_library[name]
+    return unused_names
 
 
 def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
@@ -265,7 +299,7 @@ class ProjectConfig:
     postal_code: str = ""
     latitude: float | None = None
     longitude: float | None = None
-    unit_system: str = "Imperial"
+    unit_system: str = ENGLISH_UNIT_SYSTEM
     country_code: str = "USA"
     system_type: str = "Direct system"
     system_layout: List[Dict[str, object]] = field(default_factory=list)
@@ -301,6 +335,9 @@ class ProjectConfig:
     system_parameters: SystemComponentParameters = field(default_factory=SystemComponentParameters)
     financial_parameters: FinancialParameters = field(default_factory=FinancialParameters)
     optimization_parameters: OptimizationParameters = field(default_factory=OptimizationParameters)
+    report_sections: Dict[str, bool] = field(default_factory=dict)
+    report_include_system_visualization: bool = False
+    report_include_multitank_charts: bool = False
 
     def to_dict(self) -> Dict:
         return asdict(self)

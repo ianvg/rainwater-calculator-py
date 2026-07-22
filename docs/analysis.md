@@ -12,7 +12,7 @@ The primary tank controls the detailed daily tank-level results, report tank sum
 
 ## Results views
 
-The **Results** tab contains **Single-tank summary**, **Candidate performance**, **Multitank summary**, and **Hourly results** sub-tabs. Single-tank summary shows the primary tank's reliability curve, daily storage, distribution, yearly reliability, and result rows. Multitank summary overlays every tank entered in **Tank size comparison** on three charts: tank water over time, tank-level distribution, and yearly demand reliability. Tank-level distributions use six percentage-of-capacity bins so different tank sizes can be compared on the same scale.
+The **Results** tab contains **Single-tank summary**, **Candidate performance**, **Multitank summary**, **Hourly results**, and **Report generation** sub-tabs. Single-tank summary shows the primary tank's reliability curve, daily storage, distribution, yearly reliability, and result rows. Multitank summary overlays every tank entered in **Tank size comparison** on three charts: tank water over time, tank-level distribution, and yearly demand reliability. Tank-level distributions use six percentage-of-capacity bins so different tank sizes can be compared on the same scale. Report generation controls which sections and supplemental visuals appear in HTML and PDF reports; those choices are saved with the project.
 
 **Candidate performance** is a sortable table covering every capacity on the reliability curve. Each row reports reliability, total demand, rainwater supplied, sewer-eligible rainwater supplied, rainwater shortfall, municipal makeup, remaining system unmet demand, overflow, first-flush loss, treatment loss, and final primary-tank storage. When financial inputs are configured, it also reports end-use-aware net annual savings and simple payback. Select a row and choose **Use selected as primary**, or double-click it, to copy that capacity into the primary-tank input before rerunning the detailed analysis. **Export CSV** writes the full candidate dataset using the project's displayed volume unit.
 
@@ -34,7 +34,7 @@ Review the minimum and maximum tank size, graph step, initial storage assumption
 
 Each recurring-daily demand object selects how many days per week it applies. A five-day object applies Monday through Friday. Monthly-volume objects remain distributed across every day of the selected month, then follow their assigned hourly schedule within each day.
 
-Enter the desired **Number of steps** and select **Auto** to divide the tank-size range into that many increments. New projects default to 20 steps. The selected count is stored with the project.
+Enter the desired **Number of steps** and select **Auto** to divide the tank-size range into that many increments. If you manually change **Graph step**, the number of steps updates to show how many increments are needed to span the configured range. You can still change the number and select **Auto** again at any time. New projects default to 20 steps. The selected count is stored with the project.
 
 ## Run the analysis
 

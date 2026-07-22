@@ -130,7 +130,7 @@ The initial explicit first-flush model is implemented using the rainfall-history
 
 Implementation requirements include:
 
-- [Implemented] Add first-flush depth to collection-surface parameters, with automatic Imperial and Metric conversion.
+- [Implemented] Add first-flush depth to collection-surface parameters, with automatic English (I-P) and Metric (SI) conversion.
 - [Implemented] Define a rainfall event using a configurable antecedent dry period. Consecutive wet observations within the same event do not trigger another diversion.
 - [Implemented] Divert up to the configured depth on the first wet observation only; unused depth does not carry into a consecutive wet observation.
 - [Implemented per surface] Multiple surfaces have independent diverter allowances. A shared downstream diverter remains planned.
@@ -164,6 +164,22 @@ Implementation requirements include:
 - [Implemented] Add a recommendation aid that identifies diminishing reliability gains, exposes the threshold as a user-controlled assumption, and avoids presenting it as a universally optimal tank size.
 - [Implemented] Include candidate hydraulic metrics in saved analysis results and invalidate them when rainfall, demand, loss, operating-level, or system inputs change. Economic columns are recalculated from the saved annual supply when financial inputs change.
 - [Implemented] Add reconciliation tests proving that each candidate row matches an independent simulation of the same tank size.
+
+## Multi-site weather comparison
+
+[Implemented] A **Multi-site comparison** sub-tab under **Rainwater Data** provides NOAA Quick Access-style state browsing and a nationwide station-name search for fixed 1991-2020 precipitation normals. A clustered, navigable OpenStreetMap view shows the applicable NOAA stations without slowing broad-zoom interaction. Users can add multiple stations to a comparison showing annual and meteorological-season precipitation in the project's current inches or millimeters setting, then export the table to CSV. Values are water equivalent; snowfall depth is intentionally excluded to prevent unlike quantities from being combined.
+
+The comparison is session-only and does not replace project rainfall or invalidate simulation results. An on-screen disclaimer explains that the simulation average may differ because its station, observation period, precipitation basis, completeness, or provider processing can differ. Network requests run off the Tkinter UI thread, and provider responses, city ranking, station-ID lookup, and comparison ordering have focused tests.
+
+Future work may add preliminary roof-area and runoff-coefficient screening, saved comparison sets, and a deliberate action for copying selected location metadata into a project. Keep these estimates separate from simulated collection, demand satisfaction, storage reliability, first-flush losses, and overflow.
+
+## Multi-project comparison report
+
+[Not started] Add a separate report type named **Multi-project comparison report**. It should let users select multiple rainwater project database files, choose a project from each file when necessary, and compare them without changing or overwriting the project currently open in the desktop application.
+
+The report should normalize displayed units and compare the inputs and most recent saved results that are meaningful across projects, including location and rainfall provenance, collection area, average annual precipitation, runoff assumptions, demand, selected tank size, annual rainwater supplied, reliability, municipal makeup, overflow, first-flush and treatment losses, economics, and major review conditions. Missing, stale, incompatible, or never-run analysis results must be identified rather than silently recalculated or treated as zero.
+
+Implement the report through the shared validated report-model and renderer architecture, with HTML, LaTeX, and direct-PDF output following the same accessibility and portability requirements as single-project reports. Include a concise comparison table, clearly labelled project-specific assumptions, and charts only where units, analysis periods, and metrics are genuinely comparable. Project files must be opened read-only for comparison, schema compatibility must be validated, and tests should cover different unit systems, rainfall periods, schema versions, duplicate project names, missing files, and partial results.
 
 ## Rainfall timing and data-resolution clarity
 

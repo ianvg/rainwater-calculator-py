@@ -10,6 +10,7 @@ from pypdf.annotations import Link
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
 from .reporting import (
+    REPORT_SECTION_DEFINITIONS,
     ReportModel,
     clip_pdf_text as _clip_pdf_text,
     pdf_escape as _pdf_escape,
@@ -36,48 +37,52 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         selected_reliability = f"{report['selected_reliability']:.2f}%"
 
     pages: list[list[str]] = [[]]
+    discarded_commands: list[str] = []
     section_pages: dict[str, int] = {}
     toc_links: list[tuple[tuple[float, float, float, float], str]] = []
+    section_choices = report["report_sections"]
+    pdf_titles_by_key = {
+        key: ("Design Recommendations" if key == "design_recommendations" else title)
+        for key, _label, _html_id, title in REPORT_SECTION_DEFINITIONS
+    }
     section_titles = (
-        "Design Recommendations",
-        "Executive Summary",
-        "Project Information",
-        "Notes",
-        "Surface Area Summary",
-        "Tank Summary",
-        "Candidate Performance",
-        "Reconciled Water Balance",
+        *(
+            pdf_titles_by_key[key]
+            for key, _label, _html_id, _title in REPORT_SECTION_DEFINITIONS
+            if section_choices[key]
+        ),
         *(("System Visualization",) if report.get("include_system_visualization") else ()),
-        "Demand Summary",
-        "End-use Performance",
-        "Financial Analysis",
-        "Rainfall Quality and Completeness",
-        "Yearly Rainfall Summary",
-        "Rainfall-event Summary",
-        "Analysis Provenance",
-        "Reliability Curve",
-        "Yearly Demand Reliability",
-        "Tank Level Distribution",
     )
     y = 744.0
+    section_active = True
 
     def page() -> list[str]:
-        return pages[-1]
+        return pages[-1] if section_active else discarded_commands
 
     def add_page() -> None:
         nonlocal y
+        if not section_active:
+            discarded_commands.clear()
+            y = 744.0
+            return
         pages.append([])
         y = 744.0
 
     def text(x: float, y_pos: float, value: object, size: int = 10, bold: bool = False) -> None:
+        if not section_active:
+            return
         font = "F2" if bold else "F1"
         safe = _pdf_escape(value)
         page().append(f"BT /{font} {size} Tf 1 0 0 1 {x:.2f} {y_pos:.2f} Tm ({safe}) Tj ET")
 
     def line(x1: float, y1: float, x2: float, y2: float, width: float = 0.5) -> None:
+        if not section_active:
+            return
         page().append(f"{width:.2f} w {x1:.2f} {y1:.2f} m {x2:.2f} {y2:.2f} l S")
 
     def circle(center_x: float, center_y: float, radius: float, width: float = 1.2) -> None:
+        if not section_active:
+            return
         control = radius * 0.55228475
         page().append(
             f"{width:.2f} w {center_x + radius:.2f} {center_y:.2f} m "
@@ -92,6 +97,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         )
 
     def filled_star(center_x: float, center_y: float, radius: float, color: str) -> None:
+        if not section_active:
+            return
         rgb = {
             "blue": (0.08, 0.40, 0.75),
             "red": (0.84, 0.10, 0.13),
@@ -112,6 +119,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
 
     def add_wrapped(value: object, x: float = 54.0, size: int = 10, width: int = 90, indent: float = 0.0) -> None:
         nonlocal y
+        if not section_active:
+            return
         for wrapped in _wrap_pdf_text(str(value), width):
             if y < 72:
                 add_page()
@@ -119,7 +128,27 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
             y -= size + 4
 
     def heading(value: str) -> None:
-        nonlocal y
+        nonlocal y, section_active
+        previous_active = section_active
+        matching_key = next(
+            (
+                key
+                for key, title in pdf_titles_by_key.items()
+                if value == title
+                or (key == "yearly_demand_reliability" and value.startswith(title))
+            ),
+            None,
+        )
+        section_active = matching_key is None or bool(section_choices[matching_key])
+        if not section_active:
+            if pages[-1] == [] and len(pages) > 1:
+                pages.pop()
+            discarded_commands.clear()
+            y = 744.0
+            return
+        if not previous_active:
+            pages.append([])
+            y = 744.0
         if y < 112:
             add_page()
         section_pages[value] = len(pages) - 1
@@ -169,39 +198,29 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         add_wrapped(f"- {warning}", indent=10)
     y -= 4
 
-    heading("Executive Summary")
-    executive = report.get("executive_summary", {})
-    financial = report.get("financial_summary", {})
-    payback = executive.get("simple_payback_years")
-    for label, value in (
-        ("Selected reliability", selected_reliability),
-        ("Average annual rainwater supply", f'{float(executive.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Average annual municipal makeup", f'{float(executive.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Average annual overflow", f'{float(executive.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Net annual savings", f'{financial.get("currency", "USD")} {float(executive.get("net_annual_savings", 0.0)):,.2f}/year'),
-        ("Simple payback", f"{float(payback):.1f} years" if payback is not None else "Not achieved"),
-    ):
-        add_wrapped(f"{label}: {value}")
-    y -= 4
-
     heading("Project Information")
-    for label, value in [
+    project_information = [
         ("Client name", metadata["client_name"]),
         ("Date", metadata["date"]),
         ("Location", metadata["location"]),
+        (
+            "Project location coordinates",
+            f"{float(report['project_latitude']):.6f}, {float(report['project_longitude']):.6f}"
+            if report.get("project_latitude") is not None and report.get("project_longitude") is not None
+            else None,
+        ),
+        (
+            "Weather station coordinates",
+            f"{float(report['weather_station_latitude']):.6f}, {float(report['weather_station_longitude']):.6f}"
+            if report.get("weather_station_latitude") is not None and report.get("weather_station_longitude") is not None
+            else None,
+        ),
         ("Project name", metadata["project_name"]),
         ("End-uses of water", metadata["end_uses"]),
-        (
-            "Average annual precipitation",
-            f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
-        ),
-        ("Precipitation basis", report["precipitation_basis"]),
-        (
-            "Selected tank size",
-            f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
-        ),
-        ("Selected tank reliability", selected_reliability),
-    ]:
+    ]
+    for label, value in project_information:
+        if value is None:
+            continue
         if y < 84:
             add_page()
         text(54, y, f"{label}:", size=10, bold=True)
@@ -254,6 +273,27 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         text(map_x + 5, map_y + 5, "Portable coordinate diagram; not a street map", size=7)
         y = map_y - 8
 
+    heading("Executive Summary")
+    executive = report.get("executive_summary", {})
+    financial = report.get("financial_summary", {})
+    payback = executive.get("simple_payback_years")
+    for label, value in (
+        (
+            "Average annual precipitation",
+            f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+        ),
+        ("Precipitation basis", report["precipitation_basis"]),
+        ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
+        ("Selected reliability", selected_reliability),
+        ("Average annual rainwater supply", f'{float(executive.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
+        ("Average annual municipal makeup", f'{float(executive.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
+        ("Average annual overflow", f'{float(executive.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
+        ("Net annual savings", f'{financial.get("currency", "USD")} {float(executive.get("net_annual_savings", 0.0)):,.2f}/year'),
+        ("Simple payback", f"{float(payback):.1f} years" if payback is not None else "Not achieved"),
+    ):
+        add_wrapped(f"{label}: {value}")
+    y -= 4
+
     heading("Notes")
     notes = str(report.get("notes", "")).strip() or "No notes provided."
     for paragraph_index, paragraph in enumerate(notes.splitlines() or [notes]):
@@ -277,6 +317,24 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         text(330, y, area_text, size=9)
         text(450, y, runoff, size=9)
         y -= 14
+
+    heading("Rainfall Volume Summary")
+    rainfall_volumes = report.get("average_annual_rainfall_volumes", {})
+    for label, key in (
+        ("Total average rain", "total_average_rain"),
+        ("Average first-flush diversion", "average_first_flush_diversion"),
+        ("Total usable average rain", "total_usable_average_rain"),
+    ):
+        add_wrapped(
+            f'{label}: {float(rainfall_volumes.get(key, 0.0)):,.0f} '
+            f'{report["volume_unit"]}/year'
+        )
+    add_wrapped(
+        "Total average rain is gross runoff after surface runoff coefficients and before "
+        "first flush. Total usable average rain is net collected volume after first-flush "
+        "diversion."
+    )
+    y -= 4
 
     heading("Tank Summary")
     text(54, y, "Tank property", size=10, bold=True)

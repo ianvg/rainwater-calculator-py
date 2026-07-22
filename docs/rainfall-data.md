@@ -1,5 +1,17 @@
 # Rainfall data
 
+## Compare annual and seasonal precipitation at multiple U.S. sites
+
+Open **Rainwater Data > Multi-site comparison** to compare NOAA 1991-2020 annual and seasonal precipitation normals without changing the daily rainfall assigned to the current project. Select a state to browse its stations, or type in **Find station by name** to search station names across the entire United States. While a name search contains text, state selection is disabled; clear the search to browse by state again. Select a station and add it to the comparison. Each selected station becomes one row with Annual, Winter, Spring, Summer, and Autumn values. The initial order is highest to lowest annual precipitation. Select the Station heading to sort names alphabetically, or select any precipitation heading to sort by that period; select the same heading again to reverse the order. The arrow on the active heading indicates the direction. The current table order is retained in CSV exports. Use the page scrollbar or the mouse wheel outside the map and selection lists to move between the station browser, map, and comparison table; the table also has its own vertical and horizontal scrollbars.
+
+Values use the project's current precipitation unit (inches or millimeters) and represent water equivalent. They include rain and the liquid-water equivalent of frozen precipitation. Winter is December-February, Spring is March-May, Summer is June-August, and Autumn is September-November. These are not rain-only totals, and snowfall depth must not be added to or subtracted from them.
+
+The station browser uses NOAA Quick Access station names and identifiers joined to NOAA's GHCN-D station inventory for coordinates. Its navigable map uses OpenStreetMap tiles and groups nearby stations at broad zoom levels for responsiveness. Select a cluster to zoom closer. Annual and seasonal precipitation values come from NOAA NCEI's [U.S. Climate Normals Quick Access](https://www.ncei.noaa.gov/access/us-climate-normals/#dataset=normals-annualseasonal&timeframe=30) dataset and use the fixed 1991-2020 normal period. The station catalog is cached locally for 30 days, and retrieved station values are cached for one year. Requests reuse the NOAA connection when possible, suppress duplicate lookups for a station already loading, and report the status of a single automatic retry when NOAA is slow or unavailable.
+
+The official 54.2 MB NOAA annual/seasonal bulk archive is optional. It can be selected while installing the Windows application or downloaded later by selecting the information icon beside the **Multi-site comparison** subtab. That dialog also contains the comparison overview, planning-data disclaimer, and NOAA source link. When installed, the station catalog and uncached annual-normal lookups are read locally from the archive; the online NOAA services remain the fallback when it is absent. The archive section can remove the archive and recover its disk space. Removing it retains ordinary cached station values and does not affect projects or imported rainfall.
+
+This comparison is a preliminary screening tool, not simulation input. Project simulations use imported daily rainfall, which may come from a different station, observation period, precipitation basis, or provider-processing method. Consequently, the average annual precipitation shown after a simulation may differ from the Climate Normals comparison value. Adding or removing comparison rows does not modify the current project or invalidate its results.
+
 ## Find stations near project coordinates
 
 When project latitude and longitude are available, select **Find Nearest 10** to search geographically around the project. The calculator expands the search area as needed, ranks stations by great-circle distance, and displays the nearest ten stations that overlap the requested historical period. Distances are shown in kilometres, and the resulting stations can be selected, mapped, and imported through the normal workflow. This search does not require a State or Province/Territory selection.
@@ -50,7 +62,7 @@ Choose the CSV import action and select a rainfall file. The standard input cont
 | `Date` | Observation date |
 | `Precipitation` | Daily precipitation amount |
 
-Header capitalization and surrounding spaces are ignored, and additional columns are allowed. Use one row per day and preferably format dates as `YYYY-MM-DD`. Precipitation must be numeric and use inches for an Imperial project or millimetres for a Metric project. Blank or nonnumeric precipitation values are treated as zero by the simulation but retained in the quality metadata as missing observations.
+Header capitalization and surrounding spaces are ignored, and additional columns are allowed. Use one row per day and preferably format dates as `YYYY-MM-DD`. Precipitation must be numeric and use inches for an English (I-P) project or millimetres for a Metric (SI) project. Blank or nonnumeric precipitation values are treated as zero by the simulation but retained in the quality metadata as missing observations.
 
 ```csv
 Date,Precipitation

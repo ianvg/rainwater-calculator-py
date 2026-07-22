@@ -47,6 +47,27 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.first_flush_antecedent_dry_days == 1.0
     assert config.first_flush_antecedent_dry_unit == "days"
     assert config.use_synthetic_hourly_rainfall is False
+    assert config.unit_system == "English (I-P)"
+    assert config.report_sections == {}
+    assert config.report_include_system_visualization is False
+    assert config.report_include_multitank_charts is False
+
+
+def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
+    database = tmp_path / "report-options.db"
+    store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+    config = default_project_config()
+    config.name = "Report options"
+    config.report_sections = {"notes": False, "financial_analysis": True}
+    config.report_include_system_visualization = True
+    config.report_include_multitank_charts = True
+
+    store.save_project(config)
+    loaded, _rainfall = store.load_project(config.name)
+
+    assert loaded.report_sections == config.report_sections
+    assert loaded.report_include_system_visualization is True
+    assert loaded.report_include_multitank_charts is True
 
 
 def test_storage_and_project_schema_versions_are_explicit(tmp_path) -> None:
@@ -569,6 +590,7 @@ def test_comparison_tank_sizes_are_loaded() -> None:
     config = SQLiteStore._config_from_dict(
         {
             "name": "Comparison project",
+            "unit_system": "Metric",
             "multitank_comparison_enabled": True,
             "comparison_tank_sizes_gal": [2500, 5000.5, 10000],
             "analysis_unit_system": "Metric",
@@ -576,8 +598,9 @@ def test_comparison_tank_sizes_are_loaded() -> None:
     )
 
     assert config.multitank_comparison_enabled is True
+    assert config.unit_system == "Metric (SI)"
     assert config.comparison_tank_sizes_gal == [2500.0, 5000.5, 10000.0]
-    assert config.analysis_unit_system == "Metric"
+    assert config.analysis_unit_system == "Metric (SI)"
 
 
 def test_single_field_address_migrates_to_street_address() -> None:

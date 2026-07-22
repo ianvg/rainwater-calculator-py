@@ -2,8 +2,16 @@ import pandas as pd
 import pytest
 from pypdf import PdfReader
 
+from rainwater_app.climate_normals import PRECIPITATION_NORMAL_RECORD_KEYS
 from rainwater_app.defaults import default_project_config
-from rainwater_app.models import DemandObject, Surface, WEEKDAY_KEYS
+from rainwater_app.models import (
+    DemandObject,
+    METRIC_UNIT_SYSTEM,
+    Surface,
+    WEEKDAY_KEYS,
+    purge_unused_hourly_schedules,
+    unused_hourly_schedule_names,
+)
 from rainwater_app.reporting import (
     ReportModel,
     report_average_annual_precipitation as _report_average_annual_precipitation,
@@ -18,6 +26,7 @@ from rainwater_app.ui_logic import (
     antecedent_dry_period_to_days as _antecedent_dry_period_to_days,
     demand_flow_from_gallons_per_minute as _demand_flow_from_gallons_per_minute,
     demand_flow_to_gallons_per_minute as _demand_flow_to_gallons_per_minute,
+    graph_step_count as _graph_step_count,
     normalized_demand_object_indices as _normalized_demand_object_indices,
     parse_coordinates as _parse_coordinates,
     system_object_editor_validation as _system_object_editor_validation,
@@ -31,6 +40,31 @@ def test_antecedent_dry_period_converts_between_days_and_hours() -> None:
     assert _antecedent_dry_period_from_days(1.5, "hours") == 36.0
     assert _antecedent_dry_period_to_days(36.0, "hours") == 1.5
     assert _antecedent_dry_period_from_days(1.5, "days") == 1.5
+
+
+def test_purge_unused_schedules_preserves_active_and_assigned_objects() -> None:
+    demand = default_project_config().demand
+    profile = {day: [1.0] * 24 for day in WEEKDAY_KEYS}
+    demand.hourly_schedule_library = {
+        "Active": profile,
+        "Assigned": profile,
+        "Unused morning": profile,
+        "Unused evening": profile,
+    }
+    demand.active_hourly_schedule_name = "Active"
+    demand.demand_objects = [
+        DemandObject("Irrigation", schedule_name="Assigned"),
+    ]
+
+    assert unused_hourly_schedule_names(demand) == [
+        "Unused morning",
+        "Unused evening",
+    ]
+    assert purge_unused_hourly_schedules(demand) == [
+        "Unused morning",
+        "Unused evening",
+    ]
+    assert list(demand.hourly_schedule_library) == ["Active", "Assigned"]
 
 
 def _valid_primary_editor_values() -> dict[str, object]:
@@ -48,6 +82,67 @@ def _valid_primary_editor_values() -> dict[str, object]:
 
 def test_system_object_editor_accepts_valid_primary_parameters() -> None:
     assert _system_object_editor_validation("primary_tank", _valid_primary_editor_values()) == []
+
+
+@pytest.mark.parametrize(
+    ("start", "end", "step", "expected"),
+    [
+        (500.0, 20_000.0, 500.0, 39),
+        (500.0, 20_000.0, 700.0, 28),
+        (0.0, 1_000.0, 2_000.0, 1),
+        (500.0, 500.0, 100.0, None),
+        (500.0, 20_000.0, 0.0, None),
+    ],
+)
+def test_graph_step_count_tracks_manual_step_size(
+    start: float, end: float, step: float, expected: int | None
+) -> None:
+    assert _graph_step_count(start, end, step) == expected
+
+
+def test_graph_step_editor_syncs_manual_count_without_overriding_auto_count() -> None:
+    class Variable:
+        def __init__(self, value: str, on_set=None) -> None:
+            self.value = value
+            self.on_set = on_set
+
+        def get(self) -> str:
+            return self.value
+
+        def set(self, value: str) -> None:
+            self.value = value
+            if self.on_set is not None:
+                self.on_set()
+
+    app = object.__new__(RainwaterTkApp)
+    app.system_component_editor_loading = False
+    app.system_component_graph_step_autosizing = False
+    app.system_component_editor_loaded_id = "primary"
+    app.system_builder_selected_id = "primary"
+    variables = {
+        "graph_start": Variable("500"),
+        "graph_end": Variable("20000"),
+        "graph_step": Variable("500"),
+        "graph_auto_step_count": Variable("39"),
+    }
+    app.system_component_parameter_vars = variables
+    app._system_layout_item = lambda _component_id: {"component_type": "primary_tank"}
+    app._system_component_editor_snapshot = lambda _item: {
+        key: variable.get() for key, variable in variables.items()
+    }
+    variables["graph_step"].on_set = app._system_component_graph_step_changed
+
+    variables["graph_step"].set("700")
+
+    assert variables["graph_auto_step_count"].get() == "28"
+
+    variables["graph_start"].set("0")
+    variables["graph_end"].set("1000")
+    variables["graph_auto_step_count"].set("3")
+    app._auto_set_system_component_graph_step()
+
+    assert variables["graph_step"].get() == "333"
+    assert variables["graph_auto_step_count"].get() == "3"
 
 
 @pytest.mark.parametrize(
@@ -189,6 +284,337 @@ def test_eccc_station_label_includes_province_name() -> None:
     )
 
     assert label == "Toronto - 456 in Ontario"
+
+
+def test_climate_normal_station_label_includes_station_id() -> None:
+    label = RainwaterTkApp._climate_normal_station_label(
+        {
+            "name": "CEDARVILLE, CA US",
+            "station_id": "USC00041614",
+            "annual_precipitation_inches": 13.12,
+            "distance_km": 10.0,
+        }
+    )
+
+    assert label == "CEDARVILLE, CA US [USC00041614]"
+
+
+def test_climate_normal_comparison_ranks_wetter_sites_first() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.climate_normal_comparison_rows = {
+        "dry": {"name": "Dry", "annual_precipitation_inches": 8.0},
+        "wet": {"name": "Wet", "annual_precipitation_inches": 42.5},
+    }
+
+    assert [row["name"] for row in app._ranked_climate_normal_rows()] == ["Wet", "Dry"]
+
+
+def test_climate_normal_comparison_sorts_season_column_both_directions() -> None:
+    class Tree:
+        headings: dict[str, str] = {}
+
+        def heading(self, column: str, *, text: str) -> None:
+            self.headings[column] = text
+
+        @staticmethod
+        def get_children() -> tuple[()]:
+            return ()
+
+        @staticmethod
+        def delete(*_items) -> None:
+            pass
+
+        @staticmethod
+        def insert(*_args, **_kwargs) -> None:
+            pass
+
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.climate_normal_comparison_rows = {
+        "a": {
+            "station_id": "a",
+            "name": "Annual wetter",
+            "annual_precipitation_inches": 50.0,
+            "winter_precipitation_inches": 8.0,
+            "spring_precipitation_inches": 12.0,
+            "summer_precipitation_inches": 20.0,
+            "autumn_precipitation_inches": 10.0,
+        },
+        "b": {
+            "station_id": "b",
+            "name": "Winter wetter",
+            "annual_precipitation_inches": 40.0,
+            "winter_precipitation_inches": 15.0,
+            "spring_precipitation_inches": 10.0,
+            "summer_precipitation_inches": 8.0,
+            "autumn_precipitation_inches": 7.0,
+        },
+    }
+    app.climate_normal_tree = Tree()
+
+    app._sort_climate_normal_comparison("winter")
+
+    assert [row["station_id"] for row in app._ranked_climate_normal_rows()] == ["b", "a"]
+    assert app.climate_normal_tree.headings["winter"] == "Winter ▼"
+
+    app._sort_climate_normal_comparison("winter")
+
+    assert [row["station_id"] for row in app._ranked_climate_normal_rows()] == ["a", "b"]
+    assert app.climate_normal_tree.headings["winter"] == "Winter ▲"
+
+
+def test_climate_normal_comparison_sorts_station_names_both_directions() -> None:
+    class Tree:
+        headings: dict[str, str] = {}
+
+        def heading(self, column: str, *, text: str) -> None:
+            self.headings[column] = text
+
+        @staticmethod
+        def get_children() -> tuple[()]:
+            return ()
+
+        @staticmethod
+        def delete(*_items) -> None:
+            pass
+
+        @staticmethod
+        def insert(*_args, **_kwargs) -> None:
+            pass
+
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.climate_normal_comparison_rows = {
+        "z": {
+            "station_id": "z",
+            "name": "Zanesville",
+            **{key: 10.0 for key in PRECIPITATION_NORMAL_RECORD_KEYS},
+        },
+        "a": {
+            "station_id": "a",
+            "name": "athens",
+            **{key: 20.0 for key in PRECIPITATION_NORMAL_RECORD_KEYS},
+        },
+    }
+    app.climate_normal_tree = Tree()
+
+    app._sort_climate_normal_comparison("station")
+
+    assert [row["station_id"] for row in app._ranked_climate_normal_rows()] == ["a", "z"]
+    assert app.climate_normal_tree.headings["station"] == "Station ▲"
+
+    app._sort_climate_normal_comparison("station")
+
+    assert [row["station_id"] for row in app._ranked_climate_normal_rows()] == ["z", "a"]
+    assert app.climate_normal_tree.headings["station"] == "Station ▼"
+
+
+def test_climate_normal_comparison_displays_seasons_in_project_units() -> None:
+    class Tree:
+        inserted: list[tuple[str, tuple[str, ...]]] = []
+
+        @staticmethod
+        def get_children() -> tuple[()]:
+            return ()
+
+        @staticmethod
+        def delete(*_items) -> None:
+            pass
+
+        def insert(self, _parent, _position, *, iid: str, values: tuple[str, ...]) -> None:
+            self.inserted.append((iid, values))
+
+    class Frame:
+        text = ""
+
+        def configure(self, *, text: str) -> None:
+            self.text = text
+
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.unit_system = METRIC_UNIT_SYSTEM
+    app.climate_normal_comparison_rows = {
+        "USW00013873": {
+            "station_id": "USW00013873",
+            "name": "ATHENS BEN EPPS AP",
+            "annual_precipitation_inches": 1.0,
+            "winter_precipitation_inches": 2.0,
+            "spring_precipitation_inches": 3.0,
+            "summer_precipitation_inches": 4.0,
+            "autumn_precipitation_inches": 5.0,
+        }
+    }
+    app.climate_normal_tree = Tree()
+    app.climate_normal_comparison_frame = Frame()
+
+    app._refresh_climate_normal_comparison()
+
+    assert app.climate_normal_comparison_frame.text == "Precipitation normals (mm)"
+    assert app.climate_normal_tree.inserted == [
+        (
+            "USW00013873",
+            (
+                "ATHENS BEN EPPS AP [USW00013873]",
+                "25.40",
+                "50.80",
+                "76.20",
+                "101.60",
+                "127.00",
+            ),
+        )
+    ]
+
+
+def test_multi_site_mousewheel_scrolls_page_outside_nested_controls() -> None:
+    class Notebook:
+        def __init__(self, selected: object) -> None:
+            self.selected = selected
+
+        def select(self) -> str:
+            return str(self.selected)
+
+    class Widget:
+        def __init__(self, x: int, y: int, width: int, height: int) -> None:
+            self.bounds = (x, y, width, height)
+
+        def winfo_rootx(self) -> int:
+            return self.bounds[0]
+
+        def winfo_rooty(self) -> int:
+            return self.bounds[1]
+
+        def winfo_width(self) -> int:
+            return self.bounds[2]
+
+        def winfo_height(self) -> int:
+            return self.bounds[3]
+
+    class Canvas(Widget):
+        scrolls: list[tuple[int, str]] = []
+
+        def yview_scroll(self, direction: int, units: str) -> None:
+            self.scrolls.append((direction, units))
+
+    class Event:
+        num = None
+        delta = -120
+
+    app = object.__new__(RainwaterTkApp)
+    app.import_tab = object()
+    app.multi_site_rainwater_tab = object()
+    app.notebook = Notebook(app.import_tab)
+    app.rainwater_data_notebook = Notebook(app.multi_site_rainwater_tab)
+    app.climate_normal_map = Widget(10, 300, 500, 200)
+    app.climate_normal_state_list = Widget(10, 80, 150, 150)
+    app.climate_normal_station_list = Widget(170, 80, 340, 150)
+    app.climate_normal_tree = Widget(10, 550, 500, 150)
+    app.multi_site_canvas = Canvas(0, 0, 600, 700)
+    app.winfo_pointerxy = lambda: (550, 250)
+
+    result = app._scroll_multi_site_mousewheel(Event())
+
+    assert result == "break"
+    assert app.multi_site_canvas.scrolls == [(1, "units")]
+
+
+def test_multi_site_mousewheel_leaves_map_scrolling_to_map() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.import_tab = object()
+    app.multi_site_rainwater_tab = object()
+    app.notebook = type("Notebook", (), {"select": lambda _self: str(app.import_tab)})()
+    app.rainwater_data_notebook = type(
+        "Notebook", (), {"select": lambda _self: str(app.multi_site_rainwater_tab)}
+    )()
+
+    class Widget:
+        def winfo_rootx(self) -> int:
+            return 0
+
+        def winfo_rooty(self) -> int:
+            return 0
+
+        def winfo_width(self) -> int:
+            return 500
+
+        def winfo_height(self) -> int:
+            return 500
+
+    app.climate_normal_map = Widget()
+    app.climate_normal_state_list = Widget()
+    app.climate_normal_station_list = Widget()
+    app.climate_normal_tree = Widget()
+    app.multi_site_canvas = Widget()
+    app.winfo_pointerxy = lambda: (100, 100)
+
+    assert app._scroll_multi_site_mousewheel(type("Event", (), {})()) is None
+
+
+def test_multi_site_tab_info_icon_opens_help_without_selecting_tab() -> None:
+    class Notebook:
+        @staticmethod
+        def index(tab: object) -> int:
+            if isinstance(tab, str) and tab.startswith("@"):
+                x = int(tab[1:].split(",", maxsplit=1)[0])
+                return 2 if x < 400 else 3
+            return 2
+
+        @staticmethod
+        def winfo_width() -> int:
+            return 600
+
+    class Event:
+        x = 380
+        y = 10
+
+    app = object.__new__(RainwaterTkApp)
+    app.rainwater_data_notebook = Notebook()
+    app.multi_site_rainwater_tab = object()
+    scheduled: list[object] = []
+    app.after_idle = scheduled.append
+
+    result = app._rainwater_data_notebook_clicked(Event())
+
+    assert result == "break"
+    assert scheduled == [app._show_multi_site_comparison_info]
+
+
+def test_climate_normal_selection_does_not_duplicate_pending_request() -> None:
+    class Variable:
+        def __init__(self, value: str = "") -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+    class StationList:
+        @staticmethod
+        def curselection() -> tuple[int]:
+            return (0,)
+
+    class Button:
+        def configure(self, **_kwargs: str) -> None:
+            pass
+
+    app = object.__new__(RainwaterTkApp)
+    app.climate_normal_station_list = StationList()
+    app.climate_normal_search_results = [
+        {"station_id": "USW00013873", "name": "ATHENS BEN EPPS AP"}
+    ]
+    app.climate_normal_station_var = Variable()
+    app.climate_normal_status_var = Variable()
+    app.add_climate_normal_button = Button()
+    app.climate_normal_detail_in_flight_ids = {"USW00013873"}
+    app._update_climate_normal_map_selection = lambda: None
+
+    app._climate_normal_station_selected()
+
+    assert app.climate_normal_station_var.get() == "USW00013873"
+    assert app.climate_normal_status_var.get() == (
+        "The precipitation normals for ATHENS BEN EPPS AP are already loading."
+    )
 
 
 def test_report_surfaces_only_include_positive_areas() -> None:
@@ -433,6 +859,16 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
 
     html = RainwaterTkApp._build_report_html(None, report)
     latex = RainwaterTkApp._build_report_latex(None, report)
+    html_executive = html[html.index('id="executive-summary"'):html.index('id="notes"')]
+    html_project_information = html[
+        html.index('id="project-information"'):html.index('id="executive-summary"')
+    ]
+    latex_executive = latex[
+        latex.index(r"\section{Executive Summary}"):latex.index(r"\section{Notes}")
+    ]
+    latex_project_information = latex[
+        latex.index(r"\section{Project Information}"):latex.index(r"\section{Executive Summary}")
+    ]
     pdf_commands: list[str] = []
     RainwaterTkApp._draw_pdf_reliability_curve(None, pdf_commands, 0, 0, 400, 200, report)
     yearly_pdf_commands: list[str] = []
@@ -446,6 +882,14 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "stroke:#d71920" in html
     assert "Primary tank size" in html
     assert "Executive design summary" in html
+    assert "Precipitation basis" in html_executive
+    assert "Rain only" in html_executive
+    assert "Average annual precipitation" in html_executive
+    assert "42.38 in" in html_executive
+    assert "Precipitation basis" not in html_project_information
+    assert "Average annual precipitation" not in html_project_information
+    assert "Selected tank size" not in html_project_information
+    assert "Selected tank reliability" not in html_project_information
     assert "Candidate tank performance" in html
     assert "Design recommendations and review conditions" in html
     assert "Smallest tank meeting reliability target" in html
@@ -476,9 +920,16 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert 'id="project-location-map"' in html
     assert "Project location" in html
     assert "Weather station" in html
-    assert "tile.openstreetmap.org" not in html
+    assert "<dt>Project location coordinates</dt><dd>33.950000, -83.330000</dd>" in html
+    assert "<dt>Weather station coordinates</dt><dd>33.947730, -83.327360</dd>" in html
+    assert html.index("Project location coordinates") < html.index('id="project-location-map"')
+    assert html.index("Weather station coordinates") < html.index('id="project-location-map"')
+    assert "<caption>Location coordinates</caption>" not in html
+    assert "tile.openstreetmap.org" in html
+    assert '<image href="https://tile.openstreetmap.org/' in html
     assert "unpkg.com" not in html
-    assert "Portable coordinate diagram" in html
+    assert "Map data &copy; OpenStreetMap contributors" in html
+    assert "Static map tiles require an internet connection" in html
     assert "Rainfall quality and completeness" in html
     assert "99.73% (Good)" in html
     assert "2024-03-04" in html
@@ -501,12 +952,17 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert 'href="#notes"' in html
     assert 'href="#yearly-demand-reliability"' in html
     assert 'href="#tank-level-distribution"' in html
-    assert html.index('id="project-information"') < html.index('id="notes"') < html.index('id="surface-area-summary"')
+    assert (
+        html.index('id="project-information"')
+        < html.index('id="executive-summary"')
+        < html.index('id="notes"')
+        < html.index('id="design-recommendations"')
+    )
     assert "Coordinate with facilities.\nConfirm irrigation schedule." in html
     assert "<td>101</td><td>3,001</td>" in html
     assert "365,001 gal" in html
     assert "Produced by Jane Engineer" in html
-    assert "Selected tank size" in html
+    assert "Selected tank" in html_executive
     assert "750 gal" in html
     assert "42.38 in" in html
     assert "Rain only" in html
@@ -565,15 +1021,28 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Smallest tank meeting reliability target" in latex
     assert "Rainfall record contains an incomplete calendar year." in latex
     assert r"\section{System Visualization - Indirect system}" in latex
-    assert r"\textbf{Selected tank size} & 750 gal" in latex
+    assert "Precipitation basis & Rain only" in latex_executive
+    assert "Selected tank & 750 gal" in latex_executive
+    assert "Selected reliability & 65.00\\%" in latex_executive
+    assert "Average annual precipitation & 42.38 in" in latex_executive
+    assert "Precipitation basis" not in latex_project_information
+    assert "Average annual precipitation" not in latex_project_information
+    assert "Selected tank size" not in latex_project_information
+    assert "Selected tank reliability" not in latex_project_information
+    assert r"\textbf{Project location coordinates} & 33.950000, -83.330000" in latex
+    assert r"\textbf{Weather station coordinates} & 33.947730, -83.327360" in latex
     assert r"\section{Notes}" in latex
-    assert latex.index(r"\section{Project Information}") < latex.index(r"\section{Notes}") < latex.index(r"\section{Surface Area Summary}")
+    assert (
+        latex.index(r"\section{Project Information}")
+        < latex.index(r"\section{Executive Summary}")
+        < latex.index(r"\section{Notes}")
+    )
     assert r"Coordinate with facilities.\par Confirm irrigation schedule." in latex
     assert "750 gal" in latex
     assert r"\section{Demand Summary}" in latex
     assert "365,001 gal" in latex
     assert r"\textbf{Produced by:} Jane Engineer" in latex
-    assert "42.375 in" in latex
+    assert "42.38 in" in latex
     assert "Rain only" in latex
     assert r"\section{Yearly Demand Reliability - 750 gal tank}" in latex
     assert r"\section{Yearly Demand Reliability - 1,500 gal tank}" in latex
@@ -598,6 +1067,17 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     app = object.__new__(RainwaterTkApp)
     app._write_fallback_pdf_report(pdf_path, ReportModel.from_payload(report))
     pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(pdf_path).pages)
+    pdf_executive = pdf_text[
+        pdf_text.rindex("Executive Summary"):pdf_text.rindex("Notes")
+    ]
+    pdf_project_information = pdf_text[
+        pdf_text.rindex("Project Information"):pdf_text.rindex("Executive Summary")
+    ]
+    assert (
+        pdf_text.index("Project Information")
+        < pdf_text.index("Executive Summary")
+        < pdf_text.index("Notes")
+    )
     assert "Design Recommendations" in pdf_text
     assert "Smallest tank meeting reliability target" in pdf_text
     assert "Rainfall record contains an incomplete calendar year." in pdf_text
@@ -615,6 +1095,18 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
         assert section in pdf_text
     assert "Observed station data" in pdf_text
     assert "America/New_York" in pdf_text
+    assert "Precipitation basis: Rain only" in pdf_executive
+    assert "Selected tank: 750 gal" in pdf_executive
+    assert "Selected reliability: 65.00%" in pdf_executive
+    assert "Average annual precipitation: 42.38 in" in pdf_executive
+    assert "Precipitation basis" not in pdf_project_information
+    assert "Average annual precipitation" not in pdf_project_information
+    assert "Selected tank size" not in pdf_project_information
+    assert "Selected tank reliability" not in pdf_project_information
+    assert "Project location coordinates:" in pdf_text
+    assert "33.950000, -83.330000" in pdf_text
+    assert "Weather station coordinates:" in pdf_text
+    assert "33.947730, -83.327360" in pdf_text
 
     report["metadata"]["author_name"] = ""
     assert "Produced by" not in RainwaterTkApp._build_report_html(None, report)

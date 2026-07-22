@@ -20,6 +20,7 @@ from .models import (
     DemandObject,
     DemandProfile,
     FinancialParameters,
+    normalize_unit_system,
     OptimizationParameters,
     ProjectConfig,
     Surface,
@@ -30,7 +31,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 3
+PROJECT_SCHEMA_VERSION = 5
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -572,7 +573,7 @@ class SQLiteStore:
             postal_code=payload.get("postal_code", ""),
             latitude=_optional_float(payload.get("latitude")),
             longitude=_optional_float(payload.get("longitude")),
-            unit_system=payload.get("unit_system", "Imperial"),
+            unit_system=normalize_unit_system(payload.get("unit_system")),
             country_code=payload.get("country_code", "USA"),
             system_type=(
                 payload.get("system_type")
@@ -640,11 +641,25 @@ class SQLiteStore:
             weather_station_latitude=_optional_float(payload.get("weather_station_latitude")),
             weather_station_longitude=_optional_float(payload.get("weather_station_longitude")),
             analysis_input_signature=payload.get("analysis_input_signature"),
-            analysis_unit_system=payload.get("analysis_unit_system"),
+            analysis_unit_system=(
+                normalize_unit_system(payload.get("analysis_unit_system"))
+                if payload.get("analysis_unit_system")
+                else None
+            ),
             tank_parameters=tank_params,
             system_parameters=system_params,
             financial_parameters=financial_params,
             optimization_parameters=optimization_params,
+            report_sections={
+                str(key): bool(value)
+                for key, value in payload.get("report_sections", {}).items()
+            } if isinstance(payload.get("report_sections", {}), dict) else {},
+            report_include_system_visualization=bool(
+                payload.get("report_include_system_visualization", False)
+            ),
+            report_include_multitank_charts=bool(
+                payload.get("report_include_multitank_charts", False)
+            ),
         )
 
 

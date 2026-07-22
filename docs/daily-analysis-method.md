@@ -1,6 +1,6 @@
 # Daily analysis formulas and mass balance
 
-This page documents the formulas and calculation order used by the calculator's daily tank analysis. All calculations are performed internally in inches, square feet, and US gallons. Metric project inputs and displayed results are converted at the application boundary.
+This page documents the formulas and calculation order used by the calculator's daily tank analysis. All calculations are performed internally in inches, square feet, and US gallons. Metric (SI) project inputs and displayed results are converted at the application boundary.
 
 ## Symbols
 

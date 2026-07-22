@@ -20,7 +20,7 @@ This subpage records report work that remains after the executive summary, candi
 - Split the large inline HTML generator into maintained templates and reusable section, table, and chart components.
 - [Implemented by retirement] Remove the separate legacy Flask report template so the desktop and legacy web paths cannot drift.
 - [Implemented for the report path] Make report construction deterministic and read-only. Weather-station lookup and other network work completes before rendering and report generation does not mutate the project.
-- [Implemented with embedded coordinate diagram] Make exported HTML genuinely portable by bundling required assets or substituting an embedded static map.
+- [Implemented with a static tile viewport and offline coordinate table] Avoid a JavaScript mapping dependency while preserving labeled location context and an offline fallback.
 - [Implemented] Write report files atomically by validating a temporary sibling file before replacing the requested destination.
 - Add report-schema compatibility rules so saved or queued report data remains renderable after application upgrades.
 

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .models import ProjectConfig
+from .models import METRIC_UNIT_SYSTEM, ProjectConfig, normalize_unit_system
 
 SQFT_PER_SQM = 10.7639
 LITERS_PER_GALLON = 3.78541
@@ -8,7 +8,7 @@ MM_PER_INCH = 25.4
 
 
 def is_metric(config: ProjectConfig) -> bool:
-    return config.unit_system == "Metric"
+    return normalize_unit_system(config.unit_system) == METRIC_UNIT_SYSTEM
 
 
 def area_unit(config: ProjectConfig) -> str:

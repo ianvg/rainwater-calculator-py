@@ -19,6 +19,15 @@ from rainwater_app.models import (
 from rainwater_app.units import LITERS_PER_GALLON
 
 
+def graph_step_count(graph_start: float, graph_end: float, graph_step: float) -> int | None:
+    """Return the increments needed to span a graph range at a manual step size."""
+    if not all(math.isfinite(value) for value in (graph_start, graph_end, graph_step)):
+        return None
+    if graph_end <= graph_start or graph_step <= 0:
+        return None
+    return max(1, math.ceil((graph_end - graph_start) / graph_step))
+
+
 def demand_flow_to_gallons_per_minute(value: float, unit: str) -> float:
     if unit == "gpm":
         return value

@@ -28,7 +28,7 @@ A higher coefficient produces more calculated gross runoff for the same rainfall
 
 ## First-flush diversion
 
-Enter a non-negative first-flush depth for each surface. The value is inches in Imperial projects and millimeters in Metric projects; it is stored internally in inches. Zero disables diversion for that surface.
+Enter a non-negative first-flush depth for each surface. The value is inches in English (I-P) projects and millimeters in Metric (SI) projects; it is stored internally in inches. Zero disables diversion for that surface.
 
 The **Antecedent dry period** defines rainfall events using rainfall history and defaults to the paper's recommended single dry day. Enter the threshold in either days or hours; changing the unit converts the displayed value without changing the duration. A wet observation begins a new event when it is the first wet observation or when the time since the preceding wet observation exceeds the configured duration. First flush is diverted only on that first wet observation; consecutive wet observations do not divert another first flush. If rainfall on the first observation is shallower than the configured diversion depth, all runoff from that observation is diverted and no unused allowance carries to the next observation.
 

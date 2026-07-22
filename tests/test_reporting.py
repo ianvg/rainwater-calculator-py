@@ -1,14 +1,18 @@
 import math
 
 import pytest
+import pandas as pd
+from pypdf import PdfReader
 
 import rainwater_app.reporting as reporting
 from rainwater_app.report_service import ReportRenderingService
+from rainwater_app.defaults import default_project_config
 from rainwater_app.reporting import (
     REPORT_SCHEMA_VERSION,
     ReportModel,
     ReportValidationError,
     atomic_write_text,
+    report_average_annual_rainfall_volumes,
 )
 
 
@@ -55,6 +59,7 @@ def test_report_model_normalizes_legacy_payload_and_is_versioned() -> None:
     assert model.schema_version == REPORT_SCHEMA_VERSION
     assert model["schema_version"] == REPORT_SCHEMA_VERSION
     assert model["recommendations"] == []
+    assert all(model["report_sections"].values())
     assert model.to_dict()["metadata"] == {"project_name": "Test"}
 
 
@@ -76,6 +81,96 @@ def test_report_rendering_service_writes_pdf(tmp_path) -> None:
     ReportRenderingService().pdf(target, _renderable_report())
 
     assert target.read_bytes().startswith(b"%PDF")
+
+
+def test_average_annual_rainfall_volumes_reconcile_gross_first_flush_and_usable() -> None:
+    results = pd.DataFrame(
+        {
+            "Date": ["2024-01-01", "2024-02-01", "2025-01-01"],
+            "GrossCollectedGallons": [100.0, 200.0, 500.0],
+            "FirstFlushLossGallons": [10.0, 20.0, 50.0],
+            "CollectedGallons": [90.0, 180.0, 450.0],
+        }
+    )
+
+    summary = report_average_annual_rainfall_volumes(
+        results, default_project_config()
+    )
+
+    assert summary == {
+        "total_average_rain": 400.0,
+        "average_first_flush_diversion": 40.0,
+        "total_usable_average_rain": 360.0,
+    }
+
+
+def test_rainfall_volume_summary_is_grouped_in_every_report_format(tmp_path) -> None:
+    report = _renderable_report()
+    report["average_annual_rainfall_volumes"] = {
+        "total_average_rain": 12_500.0,
+        "average_first_flush_diversion": 750.0,
+        "total_usable_average_rain": 11_750.0,
+    }
+    service = ReportRenderingService()
+
+    html = service.html(report)
+    latex = service.latex(report)
+    target = tmp_path / "rainfall-volumes.pdf"
+    service.pdf(target, report)
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(target).pages)
+
+    assert 'id="rainfall-volume-summary"' in html
+    assert "12,500 gal/year" in html
+    assert "11,750 gal/year" in html
+    assert r"\section{Rainfall Volume Summary}" in latex
+    assert "12,500 gal/year" in latex
+    assert "Rainfall Volume Summary" in pdf_text
+    assert "Total average rain: 12,500 gal/year" in pdf_text
+    assert "Total usable average rain: 11,750 gal/year" in pdf_text
+
+
+def test_report_section_choices_apply_to_html_latex_and_pdf(tmp_path) -> None:
+    report = _renderable_report()
+    report["report_sections"] = {
+        "executive_summary": True,
+        "candidate_performance": False,
+        "financial_analysis": False,
+    }
+    service = ReportRenderingService()
+
+    html = service.html(report)
+    latex = service.latex(report)
+    target = tmp_path / "selected-sections.pdf"
+    service.pdf(target, report)
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(target).pages)
+
+    assert 'id="executive-summary"' in html
+    assert 'id="candidate-performance"' not in html
+    assert 'href="#candidate-performance"' not in html
+    assert r"\section{Executive Summary}" in latex
+    assert r"\section{Candidate Performance}" not in latex
+    assert "Executive Summary" in pdf_text
+    assert "Candidate Performance" not in pdf_text
+    assert "Financial Analysis" not in pdf_text
+
+
+def test_project_information_precedes_executive_summary_in_all_formats(tmp_path) -> None:
+    report = _renderable_report()
+    service = ReportRenderingService()
+
+    html = service.html(report)
+    latex = service.latex(report)
+    target = tmp_path / "section-order.pdf"
+    service.pdf(target, report)
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(target).pages)
+
+    assert html.index('<section id="project-information">') < html.index(
+        '<section id="executive-summary">'
+    )
+    assert latex.index(r"\section{Project Information}") < latex.index(
+        r"\section{Executive Summary}"
+    )
+    assert pdf_text.index("Project Information") < pdf_text.index("Executive Summary")
 
 
 @pytest.mark.parametrize(

@@ -2,7 +2,7 @@
 
 Reports summarize the project inputs, hydraulic performance, end-use allocation, financial results, provenance, and reliability charts.
 
-The HTML report begins with an **Executive design summary** containing the selected tank, reliability, average annual rainwater supply, municipal makeup, system unmet demand, overflow, first-flush and treatment losses, net annual savings, and simple payback. When financial inputs are not configured, the report says so instead of implying that zero-value economics represent a completed assessment.
+The HTML report begins with an **Executive design summary** containing average annual precipitation, the selected tank, reliability, average annual rainwater supply, municipal makeup, system unmet demand, overflow, first-flush and treatment losses, net annual savings, and simple payback. When financial inputs are not configured, the report says so instead of implying that zero-value economics represent a completed assessment.
 
 The **Candidate tank performance** table extends the reliability curve with average annual supply, municipal makeup, system unmet demand, overflow, first-flush loss, treatment loss, end-of-record storage, net annual savings, and simple payback. The selected primary tank is highlighted. In HTML, select a column heading to sort the table.
 
@@ -18,15 +18,17 @@ The **Analysis provenance and reproducibility** section identifies the rainfall 
 
 All report formats consume the same validated report model. The model currently uses report schema version 2 and rejects missing required sections, unsupported schema versions, and non-finite numeric values before rendering. The HTML, LaTeX, and direct PDF outputs include the same design recommendations, review conditions, rainfall quality, yearly rainfall, rainfall-event, lifecycle financial, and provenance sections.
 
-The HTML report is self-contained: its styles, scripts, charts, and coordinate diagram are embedded and it does not require Leaflet, map tiles, or another online asset. The coordinate diagram is intentionally labeled as a schematic rather than a street map. Every HTML chart includes a data table directly beneath it, so its values remain available when JavaScript is disabled, in print, and to assistive technology.
+The HTML report embeds its styles, scripts, charts, and map layout without requiring Leaflet or another JavaScript mapping library. When project or weather-station coordinates are available, the static map loads the configured OpenStreetMap tiles and overlays labeled project and station markers. Map imagery requires an internet connection, while the coordinate table remains available offline. Every HTML chart includes a data table directly beneath it, so its values remain available when JavaScript is disabled, in print, and to assistive technology.
 
 HTML and PDF exports are generated into temporary sibling files, checked for non-empty or valid output, and atomically replace the requested destination only after generation succeeds. An interrupted or failed export therefore does not overwrite an existing completed report.
 
-Project information includes mean annual precipitation, calculated as the mean of the yearly precipitation totals in the imported record. The value is displayed in inches for Imperial projects and millimeters for Metric projects. The report also identifies whether the rainfall import uses **Total precipitation** or **Rain only**.
+The Executive Summary includes mean annual precipitation, calculated as the mean of the yearly precipitation totals in the imported record. The value is displayed in inches for English (I-P) projects and millimeters for Metric (SI) projects. The summary also identifies whether the rainfall import uses **Total precipitation** or **Rain only**.
+
+Project Information appears before the Executive Summary in HTML, LaTeX, and direct-PDF reports.
 
 Each report includes a table of contents. HTML entries link to anchored report sections, LaTeX-generated PDFs use hyperlinked contents entries, and pypdf-generated PDFs include clickable contents links and document-outline bookmarks.
 
-Project notes appear as the second report section, immediately after Project Information. Multiline notes retain their paragraph structure. Reports display `No notes provided.` when the project notes field is blank.
+Project notes appear immediately after the Executive Summary. Multiline notes retain their paragraph structure. Reports display `No notes provided.` when the project notes field is blank.
 
 Report reliability is the percentage of simulated calendar days on which usable tank water can supply 100% of the daily demand. Water at or below the configured minimum operating level is unavailable for normal withdrawal and therefore can reduce reliability.
 
@@ -38,9 +40,11 @@ The Tank Level Distribution plot follows the yearly reliability plot. It groups 
 
 The surface-area summary includes only collection surfaces whose configured area is greater than zero. It reports each surface's runoff coefficient and first-flush depth, followed by the antecedent dry period in its selected unit, detected event count, and total diverted volume. Daily and hourly result exports retain gross runoff, first-flush loss, and net collection separately. Zero-area default and custom surfaces are omitted from PDF, HTML, and LaTeX report output.
 
+The **Rainfall volume summary** groups the mean annual collection volumes derived from the simulated calendar-year totals. **Total average rain** is gross runoff after applying each surface's runoff coefficient and before first flush. **Average first-flush diversion** is shown separately. **Total usable average rain** is the net collected volume after subtracting first-flush diversion, so total average rain equals first-flush diversion plus total usable average rain. Values use the project's displayed volume unit per year.
+
 The tank summary appears below the surface-area summary and identifies the selected tank size using the project's current volume units. Additional tank properties, such as tank type, may be added in future versions.
 
-The demand summary reports both mean simulated demand per day and mean total demand per month for each calendar month. The 12 months are arranged as two groups of Month, Demand per Day, and Demand per Month. Total Annual Demand is the mean of the simulated yearly demand totals and is displayed below two thin rules. Demand values use gallons for Imperial projects and liters for Metric projects, and all displayed demand values are rounded to the nearest whole unit.
+The demand summary reports both mean simulated demand per day and mean total demand per month for each calendar month. The 12 months are arranged as two groups of Month, Demand per Day, and Demand per Month. Total Annual Demand is the mean of the simulated yearly demand totals and is displayed below two thin rules. Demand values use gallons for English (I-P) projects and liters for Metric (SI) projects, and all displayed demand values are rounded to the nearest whole unit.
 
 ## Report information
 
@@ -55,6 +59,10 @@ When generating a report, review or enter:
 
 The PDF, LaTeX, and HTML outputs are generated from the same report content so their values and units remain aligned.
 
+Before previewing or exporting, open **Results > Report generation**. Select the core sections to include, or use **Select all**, **Clear all**, and **Restore defaults** for quick changes. The report cover is always included, and each format builds its table of contents from the selected sections. Section choices are saved with the project and apply to both preview and export.
+
+Use **Supplemental visuals** on the same sub-tab to include the system-type visualization and, when comparison results are available, the multi-tank comparison charts.
+
 ## Preview a report
 
 Select **View > View PDF report** or **View > View HTML report**, then complete the report-information dialog. The application generates the report in a temporary directory and immediately opens it in the operating system's default PDF viewer or web browser. HTML previews are served only on the local loopback interface (`127.0.0.1`) while the application is running, avoiding browser restrictions on temporary `file://` pages. No save location is required for a preview.
@@ -65,9 +73,9 @@ Temporary previews are intended for review. Export a report when a permanent pro
 
 Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
 
-Select **Include system-type visualization** in the report-information dialog to place a schematic of the applied direct or indirect system immediately after the Tank summary. The schematic identifies the primary analyzed tank size and the principal flow path to the end uses.
+Select **Include system-type visualization** under **Results > Report generation > Supplemental visuals** to place a schematic of the applied direct or indirect system in the report. The schematic identifies the primary analyzed tank size and the principal flow path to the end uses.
 
-When **Multi-tank comparison** is enabled and comparison analysis is available, the report-information dialog enables **Include multi-tank sizing charts**. Selecting it appends **Tank level distribution - multitank**, the combined yearly reliability comparison, one stacked yearly demand reliability chart for each comparison tank, and the combined tank-water history. The primary tank's original charts remain in their normal report positions. The option is disabled when multi-tank comparison is not active.
+When **Multi-tank comparison** is enabled and comparison analysis is available, select **Include multi-tank comparison charts** under **Supplemental visuals**. This appends **Tank level distribution - multitank**, the combined yearly reliability comparison, one stacked yearly demand reliability chart for each comparison tank, and the combined tank-water history. If comparison results are unavailable, the saved option remains selected but no multi-tank charts are added.
 
 In HTML reports, the combined **Yearly demand reliability - multitank** chart includes a checked legend control for each tank size. Clear a tank's checkbox to hide its line and select it again to restore the line.
 
@@ -81,7 +89,7 @@ When `pdflatex` is available, the application saves LaTeX source and compiles it
 
 ## HTML details
 
-The generated file can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. The optional location map currently uses online Leaflet assets and OpenStreetMap tiles, so that part of the report requires network access. Its reliability chart includes point details on hover. In the Yearly Demand Reliability chart, hover over either stacked-bar segment to see the year's met and unmet day counts and percentages. Hover over a yellow marker to see that year's reliability or the overall reliability across the analyzed years.
+The generated file can be opened in a modern browser, emailed with the project deliverables, or printed to PDF. The optional location map uses the configured OpenStreetMap tile source without loading Leaflet, so only the map imagery requires network access. Its reliability chart includes point details on hover. In the Yearly Demand Reliability chart, hover over either stacked-bar segment to see the year's met and unmet day counts and percentages. Hover over a yellow marker to see that year's reliability or the overall reliability across the analyzed years.
 
 ## Report review
 

@@ -4,15 +4,60 @@ from __future__ import annotations
 
 import html
 import json
+import math
+import re
 
 import pandas as pd
 
 from .reporting import (
+    REPORT_SECTION_DEFINITIONS,
     ReportModel,
     latex_escape as _latex_escape,
     latex_number as _latex_number,
     latex_row as _latex_row,
 )
+
+
+def _enabled_report_section_keys(report: ReportModel) -> set[str]:
+    choices = report["report_sections"]
+    return {key for key, enabled in choices.items() if enabled}
+
+
+def _filter_latex_report_sections(document: str, report: ReportModel) -> str:
+    enabled = _enabled_report_section_keys(report)
+    for key, _label, _html_id, title in REPORT_SECTION_DEFINITIONS:
+        if key in enabled:
+            continue
+        title_pattern = re.escape(title)
+        if key == "yearly_demand_reliability":
+            title_pattern += r"[^}]*"
+        document = re.sub(
+            rf"\n\\section\{{{title_pattern}\}}.*?(?=\n\\section\{{|\n\\end\{{document\}})",
+            "",
+            document,
+            flags=re.DOTALL,
+        )
+    return document
+
+
+def _filter_html_report_sections(document: str, report: ReportModel) -> str:
+    enabled = _enabled_report_section_keys(report)
+    for key, _label, html_id, _title in REPORT_SECTION_DEFINITIONS:
+        if key in enabled:
+            continue
+        document = re.sub(
+            rf'<section id="{re.escape(html_id)}"[^>]*>.*?</section>',
+            "",
+            document,
+            flags=re.DOTALL,
+        )
+        document = re.sub(
+            rf'<li><a href="#{re.escape(html_id)}">.*?</a></li>',
+            "",
+            document,
+            flags=re.DOTALL,
+        )
+    return document
 
 
 def render_latex(
@@ -34,6 +79,15 @@ def render_latex(
     )
     if not surface_rows:
         surface_rows = _latex_row("No collection surfaces", "0.00", "0.000", "0.000")
+    rainfall_volumes = report.get("average_annual_rainfall_volumes", {})
+    rainfall_volume_rows_latex = "\n".join(
+        _latex_row(label, f'{float(rainfall_volumes.get(key, 0.0)):,.0f} {volume}/year')
+        for label, key in (
+            ("Total average rain", "total_average_rain"),
+            ("Average first-flush diversion", "average_first_flush_diversion"),
+            ("Total usable average rain", "total_usable_average_rain"),
+        )
+    )
     demand_rows = "\n".join(
         _latex_row(
             report["monthly_demand"][index]["month"],
@@ -71,6 +125,12 @@ def render_latex(
     executive_rows_latex = "\n".join(
         _latex_row(label, value)
         for label, value in (
+            (
+                "Average annual precipitation",
+                f'{float(report["average_annual_precipitation"]):,.2f} {report["precipitation_unit"]}',
+            ),
+            ("Precipitation basis", report["precipitation_basis"]),
+            ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {volume}'),
             ("Selected reliability", f'{float(report.get("selected_reliability") or 0.0):.2f}%'),
             ("Average annual rainwater supply", f'{float(executive.get("average_annual_supply", 0.0)):,.0f} {volume}/year'),
             ("Average annual municipal makeup", f'{float(executive.get("average_annual_municipal_makeup", 0.0)):,.0f} {volume}/year'),
@@ -214,9 +274,19 @@ def render_latex(
         f"({_latex_number(point['tank_size'])},{_latex_number(point['reliability'])})"
         for point in report["curve"]
     )
-    selected_reliability = "--"
-    if report["selected_reliability"] is not None:
-        selected_reliability = f"{report['selected_reliability']:.2f}\\%"
+    project_coordinate_rows_latex = ""
+    if report.get("project_latitude") is not None and report.get("project_longitude") is not None:
+        project_coordinate_rows_latex += (
+            r"\textbf{Project location coordinates} & "
+            f"{float(report['project_latitude']):.6f}, "
+            f"{float(report['project_longitude']):.6f} \\\\\n"
+        )
+    if report.get("weather_station_latitude") is not None and report.get("weather_station_longitude") is not None:
+        project_coordinate_rows_latex += (
+            r"\textbf{Weather station coordinates} & "
+            f"{float(report['weather_station_latitude']):.6f}, "
+            f"{float(report['weather_station_longitude']):.6f} \\\\\n"
+        )
     author_line = ""
     if metadata.get("author_name", "").strip():
         author_line = rf"\noindent\textbf{{Produced by:}} {_latex_escape(metadata['author_name'])}\par\medskip"
@@ -378,7 +448,7 @@ legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
 {equipment}\end{{tikzpicture}}\end{{center}}
 """
 
-    return rf"""\documentclass[11pt]{{article}}
+    document = rf"""\documentclass[11pt]{{article}}
 \usepackage[margin=0.75in]{{geometry}}
 \usepackage{{booktabs}}
 \usepackage{{pgfplots}}
@@ -411,6 +481,16 @@ Decision aid & Tank size & Reliability & Basis and tradeoff \\
 {warnings_latex}
 \end{{itemize}}
 
+\section{{Project Information}}
+\begin{{tabular}}{{@{{}}p{{1.6in}}p{{4.8in}}@{{}}}}
+\textbf{{Client name}} & {_latex_escape(metadata["client_name"])} \\
+\textbf{{Date}} & {_latex_escape(metadata["date"])} \\
+\textbf{{Location}} & {_latex_escape(metadata["location"])} \\
+{project_coordinate_rows_latex}
+\textbf{{Project name}} & {_latex_escape(metadata["project_name"])} \\
+\textbf{{End-uses of water}} & {_latex_escape(metadata["end_uses"])} \\
+\end{{tabular}}
+
 \section{{Executive Summary}}
 \begin{{longtable}}{{@{{}}p{{2.8in}}p{{3.5in}}@{{}}}}
 \toprule
@@ -419,19 +499,6 @@ Metric & Result \\
 {executive_rows_latex}
 \bottomrule
 \end{{longtable}}
-
-\section{{Project Information}}
-\begin{{tabular}}{{@{{}}p{{1.6in}}p{{4.8in}}@{{}}}}
-\textbf{{Client name}} & {_latex_escape(metadata["client_name"])} \\
-\textbf{{Date}} & {_latex_escape(metadata["date"])} \\
-\textbf{{Location}} & {_latex_escape(metadata["location"])} \\
-\textbf{{Project name}} & {_latex_escape(metadata["project_name"])} \\
-\textbf{{End-uses of water}} & {_latex_escape(metadata["end_uses"])} \\
-\textbf{{Average annual precipitation}} & {_latex_number(report['average_annual_precipitation'])} {_latex_escape(report['precipitation_unit'])} \\
-\textbf{{Precipitation basis}} & {_latex_escape(report['precipitation_basis'])} \\
-\textbf{{Selected tank size}} & {_latex_number(report['selected_tank_size'])} {_latex_escape(report['volume_unit'])} \\
-\textbf{{Selected tank reliability}} & {selected_reliability} \\
-\end{{tabular}}
 
 \section{{Notes}}
 {notes_latex}
@@ -446,6 +513,17 @@ Surface & Area ({_latex_escape(area)}) & Runoff coefficient & First flush ({_lat
 \end{{longtable}}
 
 \noindent First-flush event dry-period threshold: {_latex_number(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0)))} {_latex_escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0))}. Diverted volume: {_latex_number(report.get('first_flush_loss', 0.0))} {_latex_escape(volume)}.
+
+\section{{Rainfall Volume Summary}}
+\begin{{longtable}}{{@{{}}p{{3.4in}}r@{{}}}}
+\toprule
+Average annual volume & Value \\
+\midrule
+{rainfall_volume_rows_latex}
+\bottomrule
+\end{{longtable}}
+
+\noindent Total average rain is gross runoff after surface runoff coefficients and before first flush. Total usable average rain is the net collected volume after first-flush diversion.
 
 \section{{Tank Summary}}
 \begin{{tabular}}{{@{{}}lr@{{}}}}
@@ -649,6 +727,7 @@ grid=major,
 {multitank_latex}
 \end{{document}}
 """
+    return _filter_latex_report_sections(document, report)
 
 
 def _build_system_visualization_html(report: dict[str, object]) -> str:
@@ -687,6 +766,99 @@ def _build_system_visualization_html(report: dict[str, object]) -> str:
 </svg></div></section>'''
 
 
+def _web_mercator_pixel(
+    latitude: float, longitude: float, zoom: int
+) -> tuple[float, float]:
+    """Project a coordinate to global Web Mercator pixels at a tile zoom level."""
+    latitude = min(max(float(latitude), -85.05112878), 85.05112878)
+    scale = 256.0 * (2 ** zoom)
+    x = (float(longitude) + 180.0) / 360.0 * scale
+    sine = math.sin(math.radians(latitude))
+    y = (0.5 - math.log((1.0 + sine) / (1.0 - sine)) / (4.0 * math.pi)) * scale
+    return x, y
+
+
+def _build_static_location_map_html(
+    report: ReportModel, map_points: list[dict[str, object]]
+) -> str:
+    """Build a static tile viewport without requiring a JavaScript map library."""
+    if not map_points:
+        return ""
+    width, height = 800.0, 340.0
+    selected_zoom = 2
+    projected: list[tuple[float, float]] = []
+    for zoom in range(16, 1, -1):
+        candidate = [
+            _web_mercator_pixel(point["latitude"], point["longitude"], zoom)
+            for point in map_points
+        ]
+        x_span = max(value[0] for value in candidate) - min(value[0] for value in candidate)
+        y_span = max(value[1] for value in candidate) - min(value[1] for value in candidate)
+        if x_span <= width - 140.0 and y_span <= height - 110.0:
+            selected_zoom = zoom
+            projected = candidate
+            break
+    if not projected:
+        projected = [
+            _web_mercator_pixel(point["latitude"], point["longitude"], selected_zoom)
+            for point in map_points
+        ]
+    center_x = (min(value[0] for value in projected) + max(value[0] for value in projected)) / 2.0
+    center_y = (min(value[1] for value in projected) + max(value[1] for value in projected)) / 2.0
+    viewport_left = center_x - width / 2.0
+    viewport_top = center_y - height / 2.0
+    tile_url = str(
+        report.get("map_tile_url", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+    )
+    tile_count = 2 ** selected_zoom
+    tile_images: list[str] = []
+    first_tile_x = math.floor(viewport_left / 256.0)
+    last_tile_x = math.floor((viewport_left + width) / 256.0)
+    first_tile_y = math.floor(viewport_top / 256.0)
+    last_tile_y = math.floor((viewport_top + height) / 256.0)
+    for tile_y in range(first_tile_y, last_tile_y + 1):
+        if not 0 <= tile_y < tile_count:
+            continue
+        for tile_x in range(first_tile_x, last_tile_x + 1):
+            source = (
+                tile_url.replace("{z}", str(selected_zoom))
+                .replace("{x}", str(tile_x % tile_count))
+                .replace("{y}", str(tile_y))
+                .replace("{s}", "a")
+            )
+            x = tile_x * 256.0 - viewport_left
+            y = tile_y * 256.0 - viewport_top
+            tile_images.append(
+                f'<image href="{html.escape(source, quote=True)}" x="{x:.2f}" y="{y:.2f}" '
+                'width="256" height="256" preserveAspectRatio="none"/>'
+            )
+    markers: list[str] = []
+    for point, (projected_x, projected_y) in zip(map_points, projected):
+        latitude = float(point["latitude"])
+        longitude = float(point["longitude"])
+        marker_x = projected_x - viewport_left
+        marker_y = projected_y - viewport_top
+        label = html.escape(str(point["label"]), quote=True)
+        color = html.escape(str(point["color"]), quote=True)
+        markers.append(
+            f'<circle cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="10" fill="{color}" '
+            'stroke="#fff" stroke-width="3">'
+            f'<title>{label}: {latitude:.6f}, {longitude:.6f}</title></circle>'
+            f'<text class="map-marker-label" x="{marker_x + 15:.2f}" y="{marker_y + 5:.2f}">{label}</text>'
+        )
+    return (
+        '<div id="project-location-map" class="location-map">'
+        '<svg viewBox="0 0 800 340" role="img" aria-label="Static map of project and weather-station locations">'
+        '<defs><clipPath id="location-map-clip"><rect width="800" height="340" rx="6"/></clipPath></defs>'
+        '<g clip-path="url(#location-map-clip)">'
+        '<rect width="800" height="340" fill="#e6ecef"/>'
+        f'{"".join(tile_images)}'
+        f'<g font-family="Arial,sans-serif" font-size="14" font-weight="700">{"".join(markers)}</g>'
+        '</g></svg></div>'
+        '<p class="map-note">Map data &copy; OpenStreetMap contributors. Static map tiles require an internet connection.</p>'
+    )
+
+
 def render_html(
     report: ReportModel | dict[str, object]
 ) -> str:
@@ -702,15 +874,16 @@ def render_html(
     station_longitude = report.get("weather_station_longitude")
     project_latitude = report.get("project_latitude")
     project_longitude = report.get("project_longitude")
-    project_location_map_html = ""
     map_points: list[dict[str, object]] = []
     if station_latitude is not None and station_longitude is not None:
-        map_points.append({
+        map_points.append(
+            {
                 "latitude": float(station_latitude),
                 "longitude": float(station_longitude),
                 "color": "#d71920",
                 "label": "Weather station",
-            })
+            }
+        )
     if project_latitude is not None and project_longitude is not None:
         map_points.append(
             {
@@ -720,58 +893,7 @@ def render_html(
                 "label": "Project location",
             }
         )
-    if map_points:
-        project_legend = (
-            '<span class="project-star">★</span> Project location '
-            if project_latitude is not None and project_longitude is not None else ""
-        )
-        station_legend = (
-            '<span class="station-star">★</span> Weather station'
-            if station_latitude is not None and station_longitude is not None else ""
-        )
-        project_location_map_html = (
-            '<div id="project-location-map" class="location-map" '
-            f'data-points="{escape(json.dumps(map_points))}" '
-            'aria-label="Project and weather-station location map"></div>'
-            f'<div class="map-legend">{project_legend}{station_legend}</div>'
-        )
-    if map_points:
-        latitudes = [float(point["latitude"]) for point in map_points]
-        longitudes = [float(point["longitude"]) for point in map_points]
-        latitude_midpoint = (max(latitudes) + min(latitudes)) / 2.0
-        longitude_midpoint = (max(longitudes) + min(longitudes)) / 2.0
-        latitude_span = max(max(latitudes) - min(latitudes), 0.02)
-        longitude_span = max(max(longitudes) - min(longitudes), 0.02)
-        markers = ""
-        coordinate_rows = ""
-        for point in map_points:
-            latitude = float(point["latitude"])
-            longitude = float(point["longitude"])
-            marker_x = 400.0 + (longitude - longitude_midpoint) / (longitude_span * 1.4) * 680.0
-            marker_y = 170.0 - (latitude - latitude_midpoint) / (latitude_span * 1.4) * 240.0
-            markers += (
-                f'<circle cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="10" '
-                f'fill="{escape(point["color"])}"><title>{escape(point["label"])}: '
-                f'{latitude:.6f}, {longitude:.6f}</title></circle>'
-                f'<text x="{marker_x + 14:.2f}" y="{marker_y + 4:.2f}">'
-                f'{escape(point["label"])}</text>'
-            )
-            coordinate_rows += (
-                f'<tr><td>{escape(point["label"])}</td><td>{latitude:.6f}</td>'
-                f'<td>{longitude:.6f}</td></tr>'
-            )
-        project_location_map_html = (
-            '<div id="project-location-map" class="location-map">'
-            '<svg viewBox="0 0 800 340" role="img" '
-            'aria-label="Schematic project and weather-station coordinate map">'
-            '<rect x="1" y="1" width="798" height="338" fill="#eef4f5" stroke="#9aabad"/>'
-            '<g stroke="#c9d4d7"><path d="M200 1V339M400 1V339M600 1V339"/>'
-            '<path d="M1 85H799M1 170H799M1 255H799"/></g>'
-            f'<g font-family="Arial,sans-serif" font-size="14" font-weight="700">{markers}</g>'
-            '</svg></div><p class="map-note">Portable coordinate diagram; not a street map.</p>'
-            '<div class="table-scroll"><table class="chart-data"><caption>Location coordinates</caption>'
-            f'<thead><tr><th>Location</th><th>Latitude</th><th>Longitude</th></tr></thead><tbody>{coordinate_rows}</tbody></table></div>'
-        )
+    project_location_map_html = _build_static_location_map_html(report, map_points)
     multitank_toc_html = "".join(
         f'<li><a href="#multitank-chart-{index}">{escape(chart.get("title", f"Multitank chart {index}"))}</a></li>'
         for index, chart in enumerate(report.get("multitank_charts", []), start=1)
@@ -850,19 +972,22 @@ def render_html(
             ("Client name", metadata["client_name"]),
             ("Date", metadata["date"]),
             ("Location", metadata["location"]),
+            (
+                "Project location coordinates",
+                f"{float(report['project_latitude']):.6f}, {float(report['project_longitude']):.6f}"
+                if report.get("project_latitude") is not None and report.get("project_longitude") is not None
+                else None,
+            ),
+            (
+                "Weather station coordinates",
+                f"{float(report['weather_station_latitude']):.6f}, {float(report['weather_station_longitude']):.6f}"
+                if report.get("weather_station_latitude") is not None and report.get("weather_station_longitude") is not None
+                else None,
+            ),
             ("Project name", metadata["project_name"]),
             ("End-uses of water", metadata["end_uses"]),
-            (
-                "Average annual precipitation",
-                f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
-            ),
-            ("Precipitation basis", report["precipitation_basis"]),
-            (
-                "Selected tank size",
-                f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
-            ),
-            ("Selected tank reliability", selected_text),
         ]
+        if value is not None
     )
     notes_html = escape(report.get("notes", "").strip() or "No notes provided.")
     summary = report.get("executive_summary", {})
@@ -876,6 +1001,11 @@ def render_html(
     executive_cards = "".join(
         f'<div class="metric"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
         for label, value in (
+            (
+                "Average annual precipitation",
+                f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+            ),
+            ("Precipitation basis", report["precipitation_basis"]),
             ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
             ("Reliability", selected_text),
             ("Average annual supply", f'{float(summary.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
@@ -1212,7 +1342,17 @@ def render_html(
         f'<td>{int(row["count"]):,}</td></tr>'
         for row in distribution
     )
-    return f"""<!doctype html>
+    rainfall_volumes = report.get("average_annual_rainfall_volumes", {})
+    rainfall_volume_rows = "".join(
+        f'<tr><td>{escape(label)}</td><td>{float(rainfall_volumes.get(key, 0.0)):,.0f} '
+        f'{escape(report["volume_unit"])}/year</td></tr>'
+        for label, key in (
+            ("Total average rain", "total_average_rain"),
+            ("Average first-flush diversion", "average_first_flush_diversion"),
+            ("Total usable average rain", "total_usable_average_rain"),
+        )
+    )
+    document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
 <style>
@@ -1232,7 +1372,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .metric-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }} .metric {{ min-width:0; padding:16px; border:1px solid var(--line); border-radius:6px; background:#f8fbfa; }} .metric span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }} .metric strong {{ display:block; margin-top:5px; font-size:17px; overflow-wrap:anywhere; }}
 .table-scroll {{ overflow-x:auto; }} .table-scroll table {{ min-width:1040px; }} .selected-row {{ background:#e8f4ef; font-weight:700; }} .sort-button {{ width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:inherit; text-transform:inherit; cursor:pointer; }} .sort-button::after {{ content:' \2195'; color:#93a1a7; }} .notice {{ padding:10px 12px; border-left:4px solid #d17a00; background:#fff7e8; }} .balance-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }} .balance-grid h3 {{ margin:0 0 8px; font-size:16px; }}
 .demand-rule td {{ height:5px; padding:0; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }} .demand-total td {{ border-bottom:0; font-weight:700; }}
-.location-map {{ height:auto; overflow:hidden; }} .location-map svg {{ min-width:0; }} .map-note {{ color:var(--muted); font-size:12px; }}
+.location-map {{ height:auto; overflow:hidden; }} .location-map svg {{ min-width:0; background:#e6ecef; }} .map-marker-label {{ fill:#17242b; stroke:#fff; stroke-width:4px; paint-order:stroke; }} .map-note {{ color:var(--muted); font-size:12px; }}
 .review-warning {{ margin-top:18px; padding:14px 18px; border-left:5px solid #b34b00; background:#fff1e5; }} .review-warning h3 {{ margin:0 0 6px; }} .review-warning ul {{ margin:0; padding-left:20px; }} .review-clear {{ color:#246b49; font-weight:700; }}
 .chart-data {{ margin-top:14px; }} .chart-data caption {{ text-align:left; font-weight:700; padding:8px 0; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
@@ -1247,14 +1387,15 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 @media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#executive-summary">Executive summary</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#project-information">Project information</a></li><li><a href="#notes">Notes</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
-<section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
-<section id="design-recommendations"><h2>Design recommendations and review conditions</h2><p>{escape(recommendation_assumptions)}</p><p>These are decision aids based on the simulated candidates and stated assumptions, not a universal optimum.</p><div class="table-scroll"><table><thead><tr><th>Decision aid</th><th>Tank size</th><th>Reliability</th><th>Basis and tradeoff</th></tr></thead><tbody>{recommendation_rows}</tbody></table></div>{warnings_section}</section>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
+<section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
+<section id="design-recommendations"><h2>Design recommendations and review conditions</h2><p>{escape(recommendation_assumptions)}</p><p>These are decision aids based on the simulated candidates and stated assumptions, not a universal optimum.</p><div class="table-scroll"><table><thead><tr><th>Decision aid</th><th>Tank size</th><th>Reliability</th><th>Basis and tradeoff</th></tr></thead><tbody>{recommendation_rows}</tbody></table></div>{warnings_section}</section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))):g} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
+<section id="rainfall-volume-summary"><h2>Rainfall volume summary</h2><p>Average annual volumes are calculated from the simulated calendar-year totals. Total average rain is gross runoff after surface runoff coefficients and before first flush. Total usable average rain is net collected volume after first-flush diversion.</p><table><thead><tr><th>Average annual volume</th><th>Value</th></tr></thead><tbody>{rainfall_volume_rows}</tbody></table></section>
 <section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
@@ -1411,6 +1552,7 @@ function changeTankHistoryYear(sectionId,delta){{
 }}
 document.querySelectorAll('.tank-history').forEach((section)=>refreshTankHistory(section.id));
 </script></body></html>"""
+    return _filter_html_report_sections(document, report)
 
 
 def _build_multitank_report_html(report: dict[str, object]) -> str:
@@ -1722,4 +1864,3 @@ def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) 
         f'<thead><tr><th>Series</th><th>Date</th><th>{html.escape(str(chart["y_label"]))}</th>'
         f'</tr></thead><tbody>{data_rows}</tbody></table></div></section>'
     )
-
