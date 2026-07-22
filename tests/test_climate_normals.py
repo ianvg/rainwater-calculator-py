@@ -55,7 +55,9 @@ def _ghcnd_line(
     )
 
 
-def _write_bulk_archive(path, station_id: str = "USW00013873") -> None:
+def _write_bulk_archive(
+    path, station_id: str = "USW00013873", *, include_incomplete: bool = False
+) -> None:
     contents = (
         '"STATION","LATITUDE","LONGITUDE","ELEVATION","NAME",'
         '"ANN-PRCP-NORMAL","DJF-PRCP-NORMAL","MAM-PRCP-NORMAL",'
@@ -69,6 +71,17 @@ def _write_bulk_archive(path, station_id: str = "USW00013873") -> None:
         member = tarfile.TarInfo(f"{station_id}.csv")
         member.size = len(contents)
         archive.addfile(member, io.BytesIO(contents))
+        if include_incomplete:
+            incomplete_contents = (
+                '"STATION","LATITUDE","LONGITUDE","ELEVATION","NAME",'
+                '"ANN-PRCP-NORMAL","DJF-PRCP-NORMAL","MAM-PRCP-NORMAL",'
+                '"JJA-PRCP-NORMAL","SON-PRCP-NORMAL"\n'
+                '"USC00041614","41.53","-120.17","1400.0",'
+                '"CEDARVILLE, CA US","13.12","3.00","3.12","4.00","-9999"\n'
+            ).encode("utf-8")
+            incomplete_member = tarfile.TarInfo("USC00041614.csv")
+            incomplete_member.size = len(incomplete_contents)
+            archive.addfile(incomplete_member, io.BytesIO(incomplete_contents))
 
 
 def test_normal_payload_keeps_only_valid_annual_precipitation_records() -> None:
@@ -246,6 +259,46 @@ def test_catalog_can_be_built_offline_from_installed_bulk_archive(
             "elevation_m": pytest.approx(239.0),
         }
     ]
+
+
+def test_installed_archive_ignores_unfiltered_online_catalog_cache(
+    monkeypatch, tmp_path
+) -> None:
+    archive_path = climate_normals_bulk_archive_path(tmp_path)
+    _write_bulk_archive(archive_path)
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals.NCEI_BULK_ARCHIVE_SIZE_BYTES",
+        archive_path.stat().st_size,
+    )
+    (tmp_path / "noaa_normals_1991_2020_station_catalog.json").write_text(
+        '[{"station_id":"USC00000001","name":"INCOMPLETE",'
+        '"state":"CA","latitude":40.0,"longitude":-120.0}]',
+        encoding="utf-8",
+    )
+
+    catalog = fetch_us_annual_precipitation_normal_catalog(cache_dir=tmp_path)
+
+    assert [record["station_id"] for record in catalog] == ["USW00013873"]
+    assert (
+        tmp_path / "noaa_normals_1991_2020_complete_station_catalog.json"
+    ).is_file()
+
+
+def test_installed_archive_catalog_excludes_station_missing_a_season(
+    monkeypatch, tmp_path
+) -> None:
+    archive_path = climate_normals_bulk_archive_path(tmp_path)
+    _write_bulk_archive(
+        archive_path, station_id="USW00013873", include_incomplete=True
+    )
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals.NCEI_BULK_ARCHIVE_SIZE_BYTES",
+        archive_path.stat().st_size,
+    )
+
+    catalog = fetch_us_annual_precipitation_normal_catalog(cache_dir=tmp_path)
+
+    assert [record["station_id"] for record in catalog] == ["USW00013873"]
 
 
 def test_bulk_archive_download_is_verified_and_removable(monkeypatch, tmp_path) -> None:

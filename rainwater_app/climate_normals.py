@@ -59,6 +59,7 @@ _QUICK_ACCESS_STATION_PATTERN = re.compile(
 )
 DEFAULT_CACHE_DIR = user_cache_dir() / "weather"
 CATALOG_CACHE_NAME = "noaa_normals_1991_2020_station_catalog.json"
+BULK_CATALOG_CACHE_NAME = "noaa_normals_1991_2020_complete_station_catalog.json"
 CATALOG_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 ANNUAL_VALUE_CACHE_NAME = "noaa_normals_1991_2020_annual_values.json"
 ANNUAL_VALUE_CACHE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
@@ -223,13 +224,16 @@ def fetch_us_annual_precipitation_normal_catalog(
     Coordinates and state codes are joined from NOAA's authoritative GHCN-D station inventory.
     The merged catalog is cached so subsequent browsing and name filtering are local.
     """
-    cache_path = cache_dir / CATALOG_CACHE_NAME
+    archive_installed = climate_normals_bulk_archive_installed(cache_dir)
+    cache_path = cache_dir / (
+        BULK_CATALOG_CACHE_NAME if archive_installed else CATALOG_CACHE_NAME
+    )
     if _cache_is_current(cache_path, max_age_seconds):
         cached = _read_catalog_cache(cache_path)
         if cached is not None:
             return cached
 
-    if climate_normals_bulk_archive_installed(cache_dir):
+    if archive_installed:
         catalog = _catalog_from_bulk_archive(
             climate_normals_bulk_archive_path(cache_dir)
         )

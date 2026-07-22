@@ -72,6 +72,7 @@ from rainwater_app.execution_log import (
     ExecutionLogger,
     normalize_log_detail,
 )
+from rainwater_app.example_projects import EXAMPLE_PROJECT_LABELS, build_completed_example
 from rainwater_app.financial import tariff_rate_per_gallon
 from rainwater_app.financial_service import FinancialAnalysisService
 from rainwater_app.candidate_service import CandidateAnalysisService
@@ -1006,6 +1007,7 @@ class RainwaterTkApp(tk.Tk):
         self.climate_normal_archive_in_progress = False
         self.climate_normal_search_placeholder_active = True
         self.rainfall_source_label: str | None = None
+        self.active_example_id: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
         self.station_popdown_key_command: str | None = None
@@ -1207,6 +1209,13 @@ class RainwaterTkApp(tk.Tk):
         )
         self.recent_menu = tk.Menu(file_menu, tearoff=False)
         file_menu.add_cascade(label="Open recent project", menu=self.recent_menu)
+        examples_menu = tk.Menu(file_menu, tearoff=False)
+        for example_id, label in EXAMPLE_PROJECT_LABELS.items():
+            examples_menu.add_command(
+                label=label,
+                command=lambda value=example_id: self.load_example_project(value),
+            )
+        file_menu.add_cascade(label="Examples", menu=examples_menu)
         file_menu.add_command(label="Save project", accelerator="Ctrl+S", command=self.save_project)
         file_menu.add_command(label="Save project as...", accelerator="Ctrl+Shift+S", command=self.save_project_as)
         file_menu.add_separator()
@@ -9337,6 +9346,7 @@ class RainwaterTkApp(tk.Tk):
         self.destroy()
 
     def _set_active_project(self, project_name: str | None) -> None:
+        self.active_example_id = None
         self.active_project_name = project_name.strip() if project_name and project_name.strip() else None
         self._update_project_state_display()
 
@@ -9385,6 +9395,55 @@ class RainwaterTkApp(tk.Tk):
         self._accept_current_project_state()
         self.status_var.set("Started a new project")
         self.execution_log.info("Project", "New project ready")
+
+    def load_example_project(self, example_id: str) -> None:
+        """Open a fresh built-in example with a completed analysis."""
+        if self.analysis_running:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Wait for the active analysis or optimization to finish before loading an example.",
+            )
+            return
+        if not self._confirm_project_replacement("loading an example project"):
+            return
+        label = EXAMPLE_PROJECT_LABELS.get(example_id, example_id)
+        try:
+            self._set_progress(
+                15,
+                f"Loading example: {label}",
+                "OpenProject.Horizontal.TProgressbar",
+            )
+            example = build_completed_example(example_id)
+            self.config_model = example.config
+            self.rainfall_df = example.rainfall
+            self.curve_df = example.outcome.curve
+            self.results_df = example.outcome.selected_tank
+            self.hourly_results_df = example.outcome.hourly_selected_tank
+            self.comparison_results = example.outcome.comparison_tanks
+            self.rainfall_source_label = self.config_model.rainfall_source_label
+            self._clear_results()
+            self._populate_from_model()
+            self._reset_weather_selection()
+            self._set_active_project(None)
+            self.active_example_id = example_id
+            reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+            self._set_selected_tank_reliability(reliability)
+            self._populate_results()
+            self.after_idle(self._draw_saved_analysis_charts)
+            self._accept_current_project_state()
+            self._set_progress(
+                100,
+                f"Loaded example '{label}' with completed simulation",
+                "OpenProject.Horizontal.TProgressbar",
+            )
+            self.execution_log.info(
+                "Project", f"Loaded built-in example '{label}' with completed simulation"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.analysis_progress_var.set(0)
+            self.status_var.set("Could not load example")
+            self.execution_log.error("Project", "Could not load example", exception=exc)
+            messagebox.showerror(APP_TITLE, f"Could not load the example project:\n{exc}")
 
     def close_project(self) -> None:
         if self.analysis_running:
@@ -9563,6 +9622,8 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showerror(APP_TITLE, f"Could not open project file:\n{exc}")
 
     def save_project(self) -> bool:
+        if self.active_example_id is not None:
+            return self.save_project_as()
         self._apply_form_to_model()
         return self._save_current_project()
 
@@ -9943,10 +10004,13 @@ class RainwaterTkApp(tk.Tk):
                 "Climate normals", f"Installed NOAA bulk archive at {result[1]}."
             )
             self._refresh_climate_normal_archive_status()
+            self.climate_normal_catalog = []
+            self.climate_normal_search_results = []
+            self._start_climate_normal_catalog_load()
             messagebox.showinfo(
                 APP_TITLE,
                 "The NOAA 1991-2020 Climate Normals archive is installed. "
-                "New station lookups will use the local archive.",
+                "The station list is being refreshed from the local archive.",
                 parent=self,
             )
         else:
