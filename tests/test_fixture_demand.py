@@ -5,7 +5,11 @@ import pytest
 
 from rainwater_app.defaults import default_project_config
 from rainwater_app.engine import demand_object_daily_value_for_date, simulate_hourly_tank
-from rainwater_app.models import DemandObject, fixture_daily_demand_gallons
+from rainwater_app.models import (
+    OCCUPANCY_SCHEDULE_TYPE,
+    DemandObject,
+    fixture_daily_demand_gallons,
+)
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.ui_logic import (
     common_demand_object_templates,
@@ -30,12 +34,14 @@ def test_fixture_daily_demand_multiplies_people_uses_and_volume() -> None:
     assert fixture_daily_demand_gallons(_fixture_object()) == pytest.approx(38.4)
 
 
-def test_fixture_demand_respects_operating_weekdays() -> None:
+def test_fixture_demand_uses_schedule_as_the_active_day_authority() -> None:
     config = default_project_config()
     config.demand.hourly_schedule_library["Always on"] = {
-        day: [1.0] * 24 for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        day: ([1.0] * 24 if day in {"mon", "tue", "wed", "thu", "fri"} else [0.0] * 24)
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     }
     demand_object = _fixture_object()
+    demand_object.operating_weekdays = [5, 6]
 
     assert demand_object_daily_value_for_date(
         config.demand, demand_object, pd.Timestamp("2025-01-06")
@@ -43,6 +49,22 @@ def test_fixture_demand_respects_operating_weekdays() -> None:
     assert demand_object_daily_value_for_date(
         config.demand, demand_object, pd.Timestamp("2025-01-11")
     ) == 0.0
+
+
+def test_hourly_fixture_demand_is_zero_on_an_all_zero_schedule_day() -> None:
+    config = default_project_config()
+    config.demand.hourly_schedule_library["Always on"] = {
+        day: [0.0] * 24
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config.demand.demand_objects = [_fixture_object()]
+    rainfall = pd.DataFrame(
+        {"Date": [pd.Timestamp("2025-01-06")], "Precipitation": [0.0]}
+    )
+
+    results = simulate_hourly_tank(config, rainfall, tank_size_gallons=100.0)
+
+    assert results["DemandGallons"].sum() == 0.0
 
 
 def test_hourly_fixture_demand_distributes_the_calculated_daily_volume() -> None:
@@ -58,6 +80,32 @@ def test_hourly_fixture_demand_distributes_the_calculated_daily_volume() -> None
     results = simulate_hourly_tank(config, rainfall, tank_size_gallons=100.0)
 
     assert results["DemandGallons"].sum() == pytest.approx(38.4)
+
+
+def test_hourly_fixture_demand_is_evenly_divided_across_occupied_hours() -> None:
+    config = default_project_config()
+    config.demand.hourly_schedule_library["Two occupied hours"] = {
+        day: [0.0] * 8 + [1.0, 1.0] + [0.0] * 14
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config.demand.hourly_schedule_types["Two occupied hours"] = (
+        OCCUPANCY_SCHEDULE_TYPE
+    )
+    fixture = _fixture_object()
+    fixture.schedule_name = "Two occupied hours"
+    fixture.fixture_people = 1.0
+    fixture.fixture_uses_per_person_per_day = 1.0
+    fixture.fixture_volume_gallons_per_use = 2.0
+    config.demand.demand_objects = [fixture]
+    rainfall = pd.DataFrame(
+        {"Date": [pd.Timestamp("2025-01-06")], "Precipitation": [0.0]}
+    )
+
+    results = simulate_hourly_tank(config, rainfall, tank_size_gallons=100.0)
+
+    assert results["DemandGallons"].iloc[8] == pytest.approx(1.0)
+    assert results["DemandGallons"].iloc[9] == pytest.approx(1.0)
+    assert results["DemandGallons"].sum() == pytest.approx(2.0)
 
 
 def test_monthly_volume_without_schedule_is_uniform_across_24_hours() -> None:

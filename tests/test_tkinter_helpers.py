@@ -33,7 +33,215 @@ from rainwater_app.ui_logic import (
     validated_demand_object_library as _validated_demand_object_library,
     validated_schedule_library as _validated_schedule_library,
 )
-from tkinter_app import RainwaterTkApp
+from tkinter_app import RainwaterTkApp, _normalize_text_scale_percent
+from tkinter_app import DemandObjectDialog
+
+
+class _VariableStub:
+    def __init__(self, value=None) -> None:
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value) -> None:
+        self.value = value
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, 100), (True, 100), ("invalid", 100), (80, 80), ("110", 110), (119, 125), (999, 150)],
+)
+def test_text_scale_preference_uses_the_closest_supported_percentage(value, expected) -> None:
+    assert _normalize_text_scale_percent(value) == expected
+
+
+class _WidgetStateStub:
+    def __init__(self) -> None:
+        self.last_state = None
+
+    def state(self, state) -> None:
+        self.last_state = state
+
+
+class _AnalysisCanvasStub:
+    def __init__(self) -> None:
+        self.scroll_calls = []
+        self.item_configuration = None
+        self.configuration = None
+
+    def winfo_rootx(self) -> int:
+        return 10
+
+    def winfo_rooty(self) -> int:
+        return 20
+
+    def winfo_width(self) -> int:
+        return 500
+
+    def winfo_height(self) -> int:
+        return 400
+
+    def yview_scroll(self, direction, unit) -> None:
+        self.scroll_calls.append((direction, unit))
+
+    def itemconfigure(self, window, **configuration) -> None:
+        self.item_configuration = (window, configuration)
+
+    def bbox(self, _tag):
+        return (0, 0, 500, 900)
+
+    def configure(self, **configuration) -> None:
+        self.configuration = configuration
+
+
+def test_analysis_scroll_helpers_resize_track_and_scroll_visible_content() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.analysis_tab = "analysis-tab"
+    app.notebook = type("Notebook", (), {"select": lambda self: "analysis-tab"})()
+    app.analysis_scroll_canvas = _AnalysisCanvasStub()
+    app.analysis_scroll_window = "content-window"
+    app.winfo_pointerxy = lambda: (100, 100)
+    resize_event = type("ResizeEvent", (), {"width": 720})()
+    wheel_event = type("WheelEvent", (), {"num": None, "delta": -120})()
+
+    app._resize_analysis_scroll_content(resize_event)
+    app._update_analysis_scroll_region()
+    handled = app._scroll_analysis_mousewheel(wheel_event)
+
+    assert app.analysis_scroll_canvas.item_configuration == (
+        "content-window",
+        {"width": 720},
+    )
+    assert app.analysis_scroll_canvas.configuration == {
+        "scrollregion": (0, 0, 500, 900)
+    }
+    assert app.analysis_scroll_canvas.scroll_calls == [(1, "units")]
+    assert handled == "break"
+
+
+def test_occupational_modes_only_list_binary_occupancy_schedules() -> None:
+    dialog = object.__new__(DemandObjectDialog)
+    dialog.project_schedule_names = ["Fractional", "Occupied"]
+    dialog.config_model = default_project_config()
+    dialog.config_model.demand.hourly_schedule_library = {
+        "Fractional": {},
+        "Occupied": {},
+    }
+    dialog.config_model.demand.hourly_schedule_types = {
+        "Fractional": "fractional",
+        "Occupied": "occupancy",
+    }
+
+    for mode in ("fixture_usage", "recurring_daily", "monthly_volume"):
+        assert dialog._compatible_schedule_names(mode) == ["Occupied"]
+    assert dialog._compatible_schedule_names("scheduled_flow") == [
+        "Fractional",
+        "Occupied",
+    ]
+
+
+def test_occupational_demand_modes_have_clear_visible_prefix() -> None:
+    assert DemandObjectDialog.MODE_LABELS[
+        "Occupational - Fixture use (people x uses)"
+    ] == "fixture_usage"
+    assert DemandObjectDialog.MODE_LABELS[
+        "Occupational - Recurring daily volume"
+    ] == "recurring_daily"
+    assert DemandObjectDialog.MODE_LABELS[
+        "Occupational - Monthly volume"
+    ] == "monthly_volume"
+
+
+def test_custom_schedule_library_preserves_schedule_types(tmp_path) -> None:
+    schedule = {
+        day: [1.0] * 24
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    path = tmp_path / "schedule_library.json"
+    app = object.__new__(RainwaterTkApp)
+    app.custom_schedule_library_path = path
+    app.custom_schedule_templates = {"Office occupied": schedule}
+    app.custom_schedule_template_types = {"Office occupied": "occupancy"}
+
+    app._save_custom_schedule_templates()
+
+    loaded_app = object.__new__(RainwaterTkApp)
+    loaded_app.custom_schedule_library_path = path
+    loaded_app.custom_schedule_template_types = {}
+    loaded = loaded_app._load_custom_schedule_templates()
+    assert loaded == {"Office occupied": schedule}
+    assert loaded_app.custom_schedule_template_types == {
+        "Office occupied": "occupancy"
+    }
+
+
+def _analysis_settings_app(*, hourly: bool, synthetic: bool, generated: bool):
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.demand.active_hourly_schedule_name = "Office week"
+    app.hourly_schedule_enabled_var = _VariableStub(hourly)
+    app.use_synthetic_hourly_rainfall_var = _VariableStub(synthetic)
+    app.applied_analysis_resolution_var = _VariableStub()
+    app.applied_rainfall_source_var = _VariableStub()
+    app.applied_demand_timing_var = _VariableStub()
+    app.applied_rainfall_timing_var = _VariableStub()
+    app.hourly_schedule_change_button = _WidgetStateStub()
+    app.daily_rainfall_timing_radio = _WidgetStateStub()
+    app.synthetic_hourly_rainfall_radio = _WidgetStateStub()
+    app.analysis_generate_hourly_rainfall_button = _WidgetStateStub()
+    app.rainfall_df = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [1.0]})
+    if generated:
+        for hour in range(24):
+            app.rainfall_df[f"HourlyPrecipitation{hour:02d}"] = 1.0 / 24.0
+    return app
+
+
+def test_applied_analysis_settings_describe_daily_only_mode() -> None:
+    app = _analysis_settings_app(hourly=False, synthetic=True, generated=True)
+
+    app._refresh_applied_analysis_settings()
+
+    assert app.applied_analysis_resolution_var.get() == "Daily only"
+    assert app.applied_rainfall_source_var.get() == "Loaded daily rainfall record"
+    assert app.applied_demand_timing_var.get() == "Daily totals (hourly simulation is off)"
+    assert app.applied_rainfall_timing_var.get() == "Daily totals"
+    assert app.synthetic_hourly_rainfall_radio.last_state == ["disabled"]
+    assert app.analysis_generate_hourly_rainfall_button.last_state == ["disabled"]
+
+
+@pytest.mark.parametrize(
+    ("synthetic", "generated", "expected_rainfall_timing"),
+    [
+        (False, False, "Each daily rainfall total is applied at 23:00"),
+        (True, True, "Synthetic hourly profile derived from each daily rainfall total"),
+        (
+            True,
+            False,
+            "Synthetic hourly timing selected, but no profile has been generated",
+        ),
+    ],
+)
+def test_applied_analysis_settings_describe_hourly_timing(
+    synthetic: bool, generated: bool, expected_rainfall_timing: str
+) -> None:
+    app = _analysis_settings_app(
+        hourly=True, synthetic=synthetic, generated=generated
+    )
+
+    app._refresh_applied_analysis_settings()
+
+    assert app.applied_analysis_resolution_var.get() == (
+        "Daily + hourly (the daily analysis is always included)"
+    )
+    assert app.applied_demand_timing_var.get() == (
+        "Hourly schedules (project default: Office week)"
+    )
+    assert app.applied_rainfall_timing_var.get() == expected_rainfall_timing
+    assert app.synthetic_hourly_rainfall_radio.last_state == (
+        ["!disabled"] if generated else ["disabled"]
+    )
+    assert app.analysis_generate_hourly_rainfall_button.last_state == ["!disabled"]
 
 
 def test_antecedent_dry_period_converts_between_days_and_hours() -> None:

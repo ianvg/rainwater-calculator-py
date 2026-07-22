@@ -11,6 +11,7 @@ from rainwater_app.rainfall import (
     disaggregate_daily_rainfall_hyetos,
     has_hourly_rainfall,
 )
+from rainwater_app.models import OCCUPANCY_SCHEDULE_TYPE
 from rainwater_app.storage import (
     PROJECT_SCHEMA_VERSION,
     STORAGE_SCHEMA_VERSION,
@@ -372,6 +373,118 @@ def test_demand_object_operating_weekdays_are_loaded() -> None:
     demand_object = config.demand.demand_objects[0]
     assert demand_object.operating_weekdays == [5, 6]
     assert demand_object.operating_days_per_week == 2
+
+
+def test_legacy_fixture_weekdays_are_migrated_into_a_dedicated_schedule() -> None:
+    always_on = {
+        day: [1.0] * 24
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Legacy fixture weekdays",
+            "demand": {
+                "hourly_schedule_library": {"Always on": always_on},
+                "demand_objects": [
+                    {
+                        "name": "Office toilets",
+                        "object_type": "Toilet",
+                        "schedule_name": "Always on",
+                        "demand_mode": "fixture_usage",
+                        "fixture_people": 10.0,
+                        "fixture_uses_per_person_per_day": 3.0,
+                        "fixture_volume_gallons_per_use": 1.28,
+                        "operating_weekdays": [0, 1, 2, 3, 4],
+                    }
+                ],
+            },
+        },
+        project_schema_version=5,
+    )
+
+    fixture = config.demand.demand_objects[0]
+    assert fixture.schedule_name != "Always on"
+    migrated = config.demand.hourly_schedule_library[fixture.schedule_name]
+    assert (
+        config.demand.hourly_schedule_types[fixture.schedule_name]
+        == OCCUPANCY_SCHEDULE_TYPE
+    )
+    assert migrated["mon"] == [1.0] * 24
+    assert migrated["sat"] == [0.0] * 24
+    assert fixture.operating_weekdays == [0, 1, 2, 3, 4]
+
+
+def test_legacy_recurring_and_monthly_modes_migrate_to_occupancy_schedules() -> None:
+    fractional = {
+        day: [0.0] * 8 + [0.5] * 9 + [0.0] * 7
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Legacy occupational schedules",
+            "demand": {
+                "legacy_inputs_migrated": True,
+                "hourly_schedule_library": {"Fractional": fractional},
+                "hourly_schedule_types": {"Fractional": "fractional"},
+                "demand_objects": [
+                    {
+                        "name": "Daily",
+                        "schedule_name": "Fractional",
+                        "demand_mode": "recurring_daily",
+                        "recurring_daily_gallons": 50.0,
+                        "operating_weekdays": [0, 2],
+                    },
+                    {
+                        "name": "Monthly",
+                        "schedule_name": "Fractional",
+                        "demand_mode": "monthly_volume",
+                        "monthly_demand_gallons": {"jan": 310.0},
+                    },
+                    {
+                        "name": "Monthly without schedule",
+                        "schedule_name": "",
+                        "demand_mode": "monthly_volume",
+                        "monthly_demand_gallons": {"jan": 310.0},
+                    },
+                ],
+            },
+        },
+        project_schema_version=7,
+    )
+
+    daily, monthly, monthly_without_schedule = config.demand.demand_objects
+    assert daily.schedule_name != monthly.schedule_name
+    assert daily.operating_weekdays == [0, 2]
+    assert daily.schedule_name != "Fractional"
+    assert (
+        config.demand.hourly_schedule_types[daily.schedule_name]
+        == OCCUPANCY_SCHEDULE_TYPE
+    )
+    assert config.demand.hourly_schedule_library[daily.schedule_name]["mon"] == (
+        [0.0] * 8 + [1.0] * 9 + [0.0] * 7
+    )
+    assert config.demand.hourly_schedule_library[daily.schedule_name]["tue"] == [0.0] * 24
+    assert monthly_without_schedule.schedule_name == "Always occupied"
+    assert (
+        config.demand.hourly_schedule_types["Always occupied"]
+        == OCCUPANCY_SCHEDULE_TYPE
+    )
+
+
+def test_schedule_type_metadata_round_trips_with_project(tmp_path) -> None:
+    store = SQLiteStore(str(tmp_path / "schedule-types.db"))
+    config = default_project_config()
+    config.name = "Typed schedules"
+    config.demand.hourly_schedule_library["Occupied"] = {
+        day: [1.0] * 24
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    config.demand.hourly_schedule_types["Occupied"] = OCCUPANCY_SCHEDULE_TYPE
+
+    store.save_project(config)
+    loaded, _rainfall = store.load_project(config.name)
+
+    assert loaded.demand.hourly_schedule_types["Occupied"] == OCCUPANCY_SCHEDULE_TYPE
 
 
 def test_system_builder_layout_is_loaded() -> None:

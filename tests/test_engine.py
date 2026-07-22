@@ -12,7 +12,12 @@ from rainwater_app.engine import (
     simulate_tank,
 )
 from rainwater_app.models import (
-    DemandObject, Surface, common_hourly_schedule_templates, migrate_legacy_demand_inputs,
+    OCCUPANCY_SCHEDULE_TYPE,
+    DemandObject,
+    Surface,
+    common_hourly_schedule_template_types,
+    common_hourly_schedule_templates,
+    migrate_legacy_demand_inputs,
 )
 from rainwater_app.rainfall import HOURLY_PRECIPITATION_COLUMNS
 from rainwater_app.storage import SQLiteStore
@@ -27,6 +32,12 @@ def test_common_hourly_schedule_templates() -> None:
     assert business_hours["mon"][8:17] == [1.0] * 9
     assert sum(business_hours["mon"]) == pytest.approx(9.0)
     assert sum(business_hours["sat"]) == 0.0
+    schedule_types = common_hourly_schedule_template_types()
+    assert schedule_types["Always occupied"] == OCCUPANCY_SCHEDULE_TYPE
+    assert (
+        schedule_types["Occupied 8 AM to 5 PM weekdays"]
+        == OCCUPANCY_SCHEDULE_TYPE
+    )
 
 
 def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
@@ -512,14 +523,18 @@ def test_migrated_demand_object_uses_legacy_sewer_percentage() -> None:
     assert result.loc[0, "SewerEligibleRainwaterSuppliedGallons"] == pytest.approx(35.0)
 
 
-def test_recurring_demand_uses_explicit_operating_weekdays() -> None:
+def test_recurring_demand_uses_occupancy_schedule_as_active_day_authority() -> None:
     cfg = default_project_config()
-    schedule_name = "Always on"
-    cfg.demand.hourly_schedule_library[schedule_name] = common_hourly_schedule_templates()[schedule_name]
+    schedule_name = "Weekend occupancy"
+    cfg.demand.hourly_schedule_library[schedule_name] = {
+        day: ([1.0] * 24 if day in {"sat", "sun"} else [0.0] * 24)
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    cfg.demand.hourly_schedule_types[schedule_name] = OCCUPANCY_SCHEDULE_TYPE
     cfg.demand.demand_objects = [DemandObject(
         "Weekend demand", "Other", schedule_name=schedule_name,
         demand_mode="recurring_daily", recurring_daily_gallons=25.0,
-        operating_weekdays=[5, 6],
+        operating_weekdays=[0, 1, 2, 3, 4],
     )]
     rainfall = pd.DataFrame({
         "Date": pd.date_range("2025-01-03", periods=4, freq="D"),
@@ -527,6 +542,30 @@ def test_recurring_demand_uses_explicit_operating_weekdays() -> None:
     })
 
     assert demand_series(cfg, rainfall).tolist() == pytest.approx([0.0, 25.0, 25.0, 0.0])
+
+
+def test_hourly_recurring_demand_is_evenly_distributed_over_occupied_hours() -> None:
+    cfg = default_project_config()
+    schedule_name = "Office occupancy"
+    cfg.demand.hourly_schedule_library[schedule_name] = {
+        day: ([0.0] * 8 + [1.0] * 9 + [0.0] * 7 if day == "mon" else [0.0] * 24)
+        for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+    }
+    cfg.demand.hourly_schedule_types[schedule_name] = OCCUPANCY_SCHEDULE_TYPE
+    cfg.demand.demand_objects = [DemandObject(
+        "Office demand", "Other", schedule_name=schedule_name,
+        demand_mode="recurring_daily", recurring_daily_gallons=18.0,
+    )]
+    rainfall = pd.DataFrame({
+        "Date": [pd.Timestamp("2025-01-06")],
+        "Precipitation": [0.0],
+    })
+
+    result = simulate_hourly_tank(cfg, rainfall, tank_size_gallons=100.0)
+
+    assert result["DemandGallons"].iloc[:8].sum() == 0.0
+    assert result["DemandGallons"].iloc[8:17].tolist() == pytest.approx([2.0] * 9)
+    assert result["DemandGallons"].iloc[17:].sum() == 0.0
 
 
 def test_minimum_operating_level_protects_primary_tank_storage() -> None:
@@ -603,6 +642,13 @@ def test_legacy_aggregate_demand_migrates_without_changing_daily_totals() -> Non
     after = demand_series(cfg, rainfall)
 
     assert created
+    assert all(
+        cfg.demand.hourly_schedule_types[
+            cfg.demand.demand_objects[index].schedule_name
+        ]
+        == OCCUPANCY_SCHEDULE_TYPE
+        for index in created
+    )
     assert after.tolist() == pytest.approx(before.tolist())
     hourly = simulate_hourly_tank(cfg, rainfall, tank_size_gallons=1000.0)
     assert hourly["DemandGallons"].sum() == pytest.approx(before.sum())

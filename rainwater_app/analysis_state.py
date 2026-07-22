@@ -9,7 +9,7 @@ import pandas as pd
 from .models import ProjectConfig
 from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
 
-ANALYSIS_ALGORITHM_VERSION = 15
+ANALYSIS_ALGORITHM_VERSION = 18
 
 
 def analysis_input_signature(config: ProjectConfig, rainfall_df: pd.DataFrame) -> str:

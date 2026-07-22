@@ -19,19 +19,23 @@ from .system_model import ensure_primary_overflow_paths
 from .models import (
     DemandObject,
     DemandProfile,
+    FRACTIONAL_SCHEDULE_TYPE,
     FinancialParameters,
+    OCCUPANCY_SCHEDULE_TYPE,
     normalize_unit_system,
     OptimizationParameters,
     ProjectConfig,
     Surface,
     SystemComponentParameters,
     TankParameters,
+    WEEKDAY_KEYS,
     migrate_legacy_demand_inputs,
+    normalize_schedule_type,
 )
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 5
+PROJECT_SCHEMA_VERSION = 9
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -442,7 +446,9 @@ class SQLiteStore:
                 (row["id"],),
             ).fetchall()
 
-        config = self._config_from_dict(config_dict)
+        config = self._config_from_dict(
+            config_dict, project_schema_version=project_schema_version
+        )
         rainfall_df = pd.DataFrame(
             {
                 "Date": [pd.to_datetime(r["date"]) for r in rainfall_rows],
@@ -495,7 +501,9 @@ class SQLiteStore:
         return df
 
     @staticmethod
-    def _config_from_dict(payload: dict[str, Any]) -> ProjectConfig:
+    def _config_from_dict(
+        payload: dict[str, Any], *, project_schema_version: int = 0
+    ) -> ProjectConfig:
         surfaces = [Surface(**s) for s in payload.get("surfaces", [])]
         demand_payload = {
             "simple_daily_demand_gallons": 0.0,
@@ -526,6 +534,10 @@ class SQLiteStore:
             demand_objects.append(DemandObject(**object_payload))
         demand_payload["demand_objects"] = demand_objects
         demand = DemandProfile(**demand_payload)
+        demand.hourly_schedule_types = {
+            name: normalize_schedule_type(demand.hourly_schedule_types.get(name))
+            for name in demand.hourly_schedule_library
+        }
         if demand.hourly_schedule_enabled and not demand.hourly_schedule_library:
             demand.hourly_schedule_library[demand.active_hourly_schedule_name] = {
                 day: list(values) for day, values in demand.hourly_weekly_fractions.items()
@@ -533,6 +545,12 @@ class SQLiteStore:
         if demand.hourly_schedule_library and demand.active_hourly_schedule_name not in demand.hourly_schedule_library:
             demand.active_hourly_schedule_name = next(iter(demand.hourly_schedule_library))
         migrated_indices = migrate_legacy_demand_inputs(demand)
+        if project_schema_version < 6:
+            _migrate_fixture_operating_days_to_schedules(demand)
+        if project_schema_version < 8:
+            _migrate_occupational_schedules_to_occupancy(demand)
+        if project_schema_version < 9:
+            _migrate_recurring_operating_days_to_schedules(demand)
         system_layout = [
             dict(item) for item in payload.get("system_layout", []) if isinstance(item, dict)
         ]
@@ -660,6 +678,165 @@ class SQLiteStore:
             report_include_multitank_charts=bool(
                 payload.get("report_include_multitank_charts", False)
             ),
+        )
+
+
+def _migrate_fixture_operating_days_to_schedules(demand: DemandProfile) -> None:
+    """Preserve legacy fixture weekdays while making schedules authoritative."""
+    for demand_object in demand.demand_objects:
+        if demand_object.demand_mode != "fixture_usage":
+            continue
+        source_name = demand_object.schedule_name
+        source = demand.hourly_schedule_library.get(source_name)
+        if source is None:
+            continue
+        legacy_days = set(demand_object.operating_weekdays or [])
+        migrated: dict[str, list[float]] = {}
+        for day_index, day_key in enumerate(WEEKDAY_KEYS):
+            values = [
+                min(max(float(value), 0.0), 1.0)
+                for value in source.get(day_key, [])[:24]
+            ]
+            values.extend([0.0] * (24 - len(values)))
+            if day_index not in legacy_days:
+                values = [0.0] * 24
+            elif not any(values):
+                # The legacy hourly engine spread a fixed daily volume evenly when
+                # its selected schedule had no active hours on an operating day.
+                values = [1.0] * 24
+            migrated[day_key] = values
+
+        source_normalized = {
+            day_key: (
+                [
+                    min(max(float(value), 0.0), 1.0)
+                    for value in source.get(day_key, [])[:24]
+                ]
+                + [0.0] * max(24 - len(source.get(day_key, [])[:24]), 0)
+            )[:24]
+            for day_key in WEEKDAY_KEYS
+        }
+        if migrated != source_normalized:
+            base_name = f"{source_name} ({demand_object.name} fixture days)"
+            migrated_name = base_name
+            suffix = 2
+            while migrated_name in demand.hourly_schedule_library:
+                migrated_name = f"{base_name} {suffix}"
+                suffix += 1
+            demand.hourly_schedule_library[migrated_name] = migrated
+            demand.hourly_schedule_types[migrated_name] = FRACTIONAL_SCHEDULE_TYPE
+            demand_object.schedule_name = migrated_name
+        demand_object.operating_weekdays = [
+            index
+            for index, day_key in enumerate(WEEKDAY_KEYS)
+            if any(migrated[day_key])
+        ]
+        demand_object.operating_days_per_week = len(
+            demand_object.operating_weekdays
+        )
+
+
+def _migrate_occupational_schedules_to_occupancy(demand: DemandProfile) -> None:
+    """Convert legacy occupational timing profiles to binary occupancy schedules."""
+    converted_names: dict[str, str] = {}
+    for demand_object in demand.demand_objects:
+        if demand_object.demand_mode not in {
+            "fixture_usage",
+            "recurring_daily",
+            "monthly_volume",
+        }:
+            continue
+        source_name = demand_object.schedule_name
+        source = demand.hourly_schedule_library.get(source_name)
+        if source is None and demand_object.demand_mode == "monthly_volume" and not source_name:
+            source_name = "Always occupied"
+            source = {day: [1.0] * 24 for day in WEEKDAY_KEYS}
+            demand.hourly_schedule_library.setdefault(source_name, source)
+            demand.hourly_schedule_types[source_name] = OCCUPANCY_SCHEDULE_TYPE
+            demand_object.schedule_name = source_name
+        if source is None:
+            continue
+        if demand.hourly_schedule_types.get(source_name) == OCCUPANCY_SCHEDULE_TYPE:
+            continue
+        converted_name = converted_names.get(source_name)
+        if converted_name is None:
+            binary = {
+                day: [
+                    1.0 if float(value) > 0.0 else 0.0
+                    for value in source.get(day, [])[:24]
+                ]
+                + [0.0] * max(24 - len(source.get(day, [])[:24]), 0)
+                for day in WEEKDAY_KEYS
+            }
+            base_name = f"{source_name} occupancy"
+            converted_name = base_name
+            suffix = 2
+            while converted_name in demand.hourly_schedule_library:
+                converted_name = f"{base_name} {suffix}"
+                suffix += 1
+            demand.hourly_schedule_library[converted_name] = binary
+            demand.hourly_schedule_types[converted_name] = OCCUPANCY_SCHEDULE_TYPE
+            converted_names[source_name] = converted_name
+        demand_object.schedule_name = converted_name
+        if demand_object.demand_mode == "fixture_usage":
+            occupancy = demand.hourly_schedule_library[converted_name]
+            demand_object.operating_weekdays = [
+                index
+                for index, day in enumerate(WEEKDAY_KEYS)
+                if any(occupancy[day])
+            ]
+            demand_object.operating_days_per_week = len(
+                demand_object.operating_weekdays
+            )
+
+
+def _migrate_recurring_operating_days_to_schedules(demand: DemandProfile) -> None:
+    """Preserve legacy recurring weekdays in the now-authoritative schedule."""
+    for demand_object in demand.demand_objects:
+        if demand_object.demand_mode != "recurring_daily":
+            continue
+        source_name = demand_object.schedule_name
+        source = demand.hourly_schedule_library.get(source_name)
+        if source is None:
+            continue
+        legacy_days = set(demand_object.operating_weekdays or [])
+        masked = {
+            day: (
+                [
+                    1.0 if float(value) > 0.0 else 0.0
+                    for value in source.get(day, [])[:24]
+                ]
+                + [0.0] * max(24 - len(source.get(day, [])[:24]), 0)
+                if index in legacy_days
+                else [0.0] * 24
+            )
+            for index, day in enumerate(WEEKDAY_KEYS)
+        }
+        source_binary = {
+            day: [
+                1.0 if float(value) > 0.0 else 0.0
+                for value in source.get(day, [])[:24]
+            ]
+            + [0.0] * max(24 - len(source.get(day, [])[:24]), 0)
+            for day in WEEKDAY_KEYS
+        }
+        if masked != source_binary:
+            base_name = f"{source_name} ({demand_object.name} recurring days)"
+            migrated_name = base_name
+            suffix = 2
+            while migrated_name in demand.hourly_schedule_library:
+                migrated_name = f"{base_name} {suffix}"
+                suffix += 1
+            demand.hourly_schedule_library[migrated_name] = masked
+            demand.hourly_schedule_types[migrated_name] = OCCUPANCY_SCHEDULE_TYPE
+            demand_object.schedule_name = migrated_name
+        demand_object.operating_weekdays = [
+            index
+            for index, day in enumerate(WEEKDAY_KEYS)
+            if any(masked[day])
+        ]
+        demand_object.operating_days_per_week = len(
+            demand_object.operating_weekdays
         )
 
 

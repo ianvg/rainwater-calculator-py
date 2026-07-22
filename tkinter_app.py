@@ -79,6 +79,8 @@ from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.models import (
     DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
     DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
+    FRACTIONAL_SCHEDULE_TYPE,
+    OCCUPANCY_SCHEDULE_TYPE,
     UNIT_SYSTEMS,
     DemandObject,
     MONTH_KEYS,
@@ -88,10 +90,12 @@ from rainwater_app.models import (
     TankParameters,
     WEEKDAY_KEYS,
     common_hourly_schedule_templates,
+    common_hourly_schedule_template_types,
     default_sewer_eligible_for_object_type,
     default_hourly_weekly_fractions,
     fixture_daily_demand_gallons,
     migrate_legacy_demand_inputs,
+    normalize_schedule_type,
     normalize_unit_system,
     purge_unused_hourly_schedules,
     unused_hourly_schedule_names,
@@ -187,6 +191,8 @@ DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 680
 MINIMUM_WINDOW_WIDTH = 1000
 MAX_RECENT_PROJECTS = 8
+TEXT_SCALE_PERCENTAGES = (80, 90, 100, 110, 125, 150)
+DEFAULT_TEXT_SCALE_PERCENT = 100
 PROJECT_STATE_POLL_MS = 1_000
 WORKING_DRAFT_SAVE_MS = 10_000
 ONLINE_HELP_URL = "https://ianvg.github.io/rainwater-calculator-py/"
@@ -200,6 +206,24 @@ RAINFALL_RESOLUTION_LABELS = {
     "monthly": "Monthly",
     "unknown": "Unknown",
 }
+SCHEDULE_TYPE_LABELS = {
+    FRACTIONAL_SCHEDULE_TYPE: "Fractional multiplier",
+    OCCUPANCY_SCHEDULE_TYPE: "Occupancy (binary)",
+}
+SCHEDULE_TYPE_BY_LABEL = {
+    label: schedule_type for schedule_type, label in SCHEDULE_TYPE_LABELS.items()
+}
+
+
+def _normalize_text_scale_percent(value: object) -> int:
+    """Return the closest supported application text scale."""
+    if isinstance(value, bool):
+        return DEFAULT_TEXT_SCALE_PERCENT
+    try:
+        requested = int(value)
+    except (TypeError, ValueError):
+        return DEFAULT_TEXT_SCALE_PERCENT
+    return min(TEXT_SCALE_PERCENTAGES, key=lambda option: abs(option - requested))
 
 PROJECT_FORM_VARIABLES = (
     "project_name_var", "author_name_var", "street_address_var", "city_var",
@@ -688,11 +712,7 @@ class RainwaterTkApp(tk.Tk):
         self.active_project_name: str | None = None
         self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
         self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
-        self.progress_style = ttk.Style(self)
-        self.progress_style.configure("Analysis.Horizontal.TProgressbar")
-        self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
-        self.progress_style.configure("SaveProject.Horizontal.TProgressbar", background="#2e8b57")
-        self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
+        self._default_tk_scaling = float(self.tk.call("tk", "scaling"))
 
         self.application_data_dir = user_data_dir()
         try:
@@ -718,6 +738,17 @@ class RainwaterTkApp(tk.Tk):
         application_state_dir = self.application_data_dir
         self.app_preferences_path = application_state_dir / "app_preferences.json"
         self.app_preferences = self._load_app_preferences()
+        self.text_scale_var = tk.IntVar(
+            value=_normalize_text_scale_percent(
+                self.app_preferences.get("text_scale_percent", DEFAULT_TEXT_SCALE_PERCENT)
+            )
+        )
+        self._apply_tk_text_scale(self.text_scale_var.get())
+        self.progress_style = ttk.Style(self)
+        self.progress_style.configure("Analysis.Horizontal.TProgressbar")
+        self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
+        self.progress_style.configure("SaveProject.Horizontal.TProgressbar", background="#2e8b57")
+        self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
         try:
             self.execution_log = ExecutionLogger(application_state_dir / "logs")
         except OSError:
@@ -734,6 +765,7 @@ class RainwaterTkApp(tk.Tk):
             value=normalize_log_detail(self.app_preferences.get("execution_log_detail", "Normal"))
         )
         self.custom_schedule_library_path = application_state_dir / "schedule_library.json"
+        self.custom_schedule_template_types: dict[str, str] = {}
         self.custom_schedule_templates = self._load_custom_schedule_templates()
         self.custom_demand_object_library_path = application_state_dir / "demand_object_library.json"
         self.custom_demand_object_templates = self._load_custom_demand_object_templates()
@@ -837,8 +869,13 @@ class RainwaterTkApp(tk.Tk):
             value=self.config_model.use_synthetic_hourly_rainfall
         )
         self.synthetic_hourly_rainfall_status_var = tk.StringVar()
+        self.applied_analysis_resolution_var = tk.StringVar()
+        self.applied_rainfall_source_var = tk.StringVar()
+        self.applied_demand_timing_var = tk.StringVar()
+        self.applied_rainfall_timing_var = tk.StringVar()
+        self.hourly_demand_schedule_selection_var = tk.StringVar()
         self.hourly_profile_reference_var = tk.StringVar(
-            value="Hourly profile: Not generated - manage in Hourly data."
+            value="Hourly profile: Not generated - manage in Synthetic hourly rainfall."
         )
         self.hourly_profile_preview_var = tk.StringVar(
             value="Generate a profile to preview its distribution by hour."
@@ -1204,6 +1241,16 @@ class RainwaterTkApp(tk.Tk):
         menubar.add_cascade(label="View", menu=view_menu)
 
         settings_menu = tk.Menu(menubar, tearoff=False)
+        text_size_menu = tk.Menu(settings_menu, tearoff=False)
+        for percentage in TEXT_SCALE_PERCENTAGES:
+            text_size_menu.add_radiobutton(
+                label=f"{percentage}%",
+                value=percentage,
+                variable=self.text_scale_var,
+                command=self._text_scale_changed,
+            )
+        settings_menu.add_cascade(label="Text size", menu=text_size_menu)
+        settings_menu.add_separator()
         settings_menu.add_checkbutton(
             label="Show execution log",
             variable=self.execution_log_visible_var,
@@ -1366,6 +1413,7 @@ class RainwaterTkApp(tk.Tk):
         self.app_preferences.update({
             "show_execution_log": bool(self.execution_log_visible_var.get()),
             "execution_log_detail": normalize_log_detail(self.execution_log_detail_var.get()),
+            "text_scale_percent": _normalize_text_scale_percent(self.text_scale_var.get()),
         })
         try:
             self.app_preferences_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1376,6 +1424,41 @@ class RainwaterTkApp(tk.Tk):
             self.execution_log.warning(
                 "Settings", "Could not save application preferences", details=str(exc)
             )
+
+    def _apply_tk_text_scale(self, percentage: int) -> None:
+        self.tk.call(
+            "tk", "scaling", self._default_tk_scaling * percentage / 100.0
+        )
+
+    def _refresh_scaled_widget_fonts(self, widget: tk.Misc) -> None:
+        """Notify existing widgets that point-sized fonts have new pixel metrics."""
+        try:
+            if "font" in widget.keys():
+                current_font = widget.cget("font")
+                if current_font:
+                    widget.configure(font=current_font)
+        except (AttributeError, tk.TclError):
+            pass
+        if isinstance(widget, tk.Canvas):
+            for item in widget.find_all():
+                if widget.type(item) == "text":
+                    current_font = widget.itemcget(item, "font")
+                    if current_font:
+                        widget.itemconfigure(item, font=current_font)
+        for child in widget.winfo_children():
+            self._refresh_scaled_widget_fonts(child)
+
+    def _text_scale_changed(self) -> None:
+        percentage = _normalize_text_scale_percent(self.text_scale_var.get())
+        self.text_scale_var.set(percentage)
+        self._apply_tk_text_scale(percentage)
+        for font_name in tkfont.names(self):
+            named_font = tkfont.nametofont(font_name, root=self)
+            named_font.configure(size=named_font.cget("size"))
+        self._refresh_scaled_widget_fonts(self)
+        self.update_idletasks()
+        self._save_app_preferences()
+        self.execution_log.info("Settings", f"Text size set to {percentage}%")
 
     def _save_recent_project_paths(self) -> None:
         try:
@@ -1391,12 +1474,42 @@ class RainwaterTkApp(tk.Tk):
             payload = json.loads(self.custom_schedule_library_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return {}
-        return _validated_schedule_library(payload)
+        schedule_payload: dict[str, object] = {}
+        for raw_name, raw_value in payload.items() if isinstance(payload, dict) else ():
+            name = str(raw_name)
+            if (
+                isinstance(raw_value, dict)
+                and isinstance(raw_value.get("values"), dict)
+            ):
+                schedule_payload[name] = raw_value["values"]
+                self.custom_schedule_template_types[name] = normalize_schedule_type(
+                    raw_value.get("schedule_type")
+                )
+            else:
+                schedule_payload[name] = raw_value
+                self.custom_schedule_template_types[name] = FRACTIONAL_SCHEDULE_TYPE
+        schedules = _validated_schedule_library(schedule_payload)
+        self.custom_schedule_template_types = {
+            name: self.custom_schedule_template_types.get(
+                name, FRACTIONAL_SCHEDULE_TYPE
+            )
+            for name in schedules
+        }
+        return schedules
 
     def _save_custom_schedule_templates(self) -> None:
+        payload = {
+            name: {
+                "schedule_type": self.custom_schedule_template_types.get(
+                    name, FRACTIONAL_SCHEDULE_TYPE
+                ),
+                "values": schedule,
+            }
+            for name, schedule in self.custom_schedule_templates.items()
+        }
         atomic_write_text(
             self.custom_schedule_library_path,
-            json.dumps(self.custom_schedule_templates, indent=2),
+            json.dumps(payload, indent=2),
         )
 
     def _load_custom_demand_object_templates(self) -> dict[str, DemandObject]:
@@ -5433,7 +5546,9 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
         self.multi_site_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
         self.rainwater_data_notebook.add(self.daily_rainwater_tab, text="Daily data")
-        self.rainwater_data_notebook.add(self.hourly_rainwater_tab, text="Hourly data")
+        self.rainwater_data_notebook.add(
+            self.hourly_rainwater_tab, text="Synthetic hourly rainfall"
+        )
         if not hasattr(self, "info_icon_image"):
             self.info_icon_image = self._create_info_icon()
         self.rainwater_data_notebook.add(
@@ -6107,7 +6222,17 @@ class RainwaterTkApp(tk.Tk):
             for name, schedule in self.custom_schedule_templates.items()
             if name.casefold() not in built_in_names
         }
+        self.custom_schedule_template_types = {
+            name: self.custom_schedule_template_types.get(
+                name, FRACTIONAL_SCHEDULE_TYPE
+            )
+            for name in self.custom_schedule_templates
+        }
         self.common_schedule_templates = {**built_in_templates, **self.custom_schedule_templates}
+        self.common_schedule_template_types = {
+            **common_hourly_schedule_template_types(),
+            **self.custom_schedule_template_types,
+        }
 
         hourly_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule properties", padding=12)
         hourly_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, 10))
@@ -6121,18 +6246,34 @@ class RainwaterTkApp(tk.Tk):
             hourly_frame, text="Rename", command=self.rename_hourly_demand_schedule
         )
         self.rename_schedule_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(hourly_frame, text="Schedule type").grid(
+            row=1, column=0, sticky="w", padx=(0, 8), pady=(10, 0)
+        )
+        self.schedule_type_var = tk.StringVar()
+        self.schedule_type_combo = ttk.Combobox(
+            hourly_frame,
+            textvariable=self.schedule_type_var,
+            values=tuple(SCHEDULE_TYPE_BY_LABEL),
+            state="readonly",
+        )
+        self.schedule_type_combo.grid(
+            row=1, column=1, columnspan=2, sticky="ew", pady=(10, 0)
+        )
+        self.schedule_type_combo.bind(
+            "<<ComboboxSelected>>", self._schedule_type_changed
+        )
         self.edit_schedule_button = ttk.Button(
             hourly_frame, text="Edit typical week...", command=self.edit_hourly_demand_schedule
         )
-        self.edit_schedule_button.grid(row=1, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.edit_schedule_button.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.save_schedule_to_library_button = ttk.Button(
             hourly_frame,
             text="Save selected to library",
             command=self.save_selected_schedule_to_library,
         )
-        self.save_schedule_to_library_button.grid(row=2, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.save_schedule_to_library_button.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Label(hourly_frame, textvariable=self.hourly_schedule_summary_var, foreground="#667278").grid(
-            row=3, column=0, columnspan=3, sticky="w", pady=(6, 0)
+            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         library_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule library", padding=10)
@@ -6409,38 +6550,212 @@ class RainwaterTkApp(tk.Tk):
         setattr(self, f"{prefix}_demand_library_delete_button", demand_library_delete_button)
         setattr(self, f"{prefix}_add_demand_library_to_project_button", add_library_button)
 
+    def _scroll_analysis_mousewheel(self, event: tk.Event) -> str | None:
+        if not hasattr(self, "analysis_scroll_canvas"):
+            return None
+        if self.notebook.select() != str(self.analysis_tab):
+            return None
+        pointer_x, pointer_y = self.winfo_pointerxy()
+        canvas = self.analysis_scroll_canvas
+        canvas_x, canvas_y = canvas.winfo_rootx(), canvas.winfo_rooty()
+        if not (
+            canvas_x <= pointer_x < canvas_x + canvas.winfo_width()
+            and canvas_y <= pointer_y < canvas_y + canvas.winfo_height()
+        ):
+            return None
+        if getattr(event, "num", None) == 4:
+            direction = -1
+        elif getattr(event, "num", None) == 5:
+            direction = 1
+        else:
+            direction = -1 if event.delta > 0 else 1
+        canvas.yview_scroll(direction, "units")
+        return "break"
+
+    def _resize_analysis_scroll_content(self, event: tk.Event) -> None:
+        self.analysis_scroll_canvas.itemconfigure(
+            self.analysis_scroll_window, width=event.width
+        )
+
+    def _update_analysis_scroll_region(self, _event: tk.Event | None = None) -> None:
+        self.analysis_scroll_canvas.configure(
+            scrollregion=self.analysis_scroll_canvas.bbox("all")
+        )
+
     def _build_analysis_tab(self) -> None:
         self.analysis_tab.columnconfigure(0, weight=1)
-        self.analysis_tab.rowconfigure(1, weight=1)
+        self.analysis_tab.rowconfigure(0, weight=1)
+        self.analysis_scroll_canvas = tk.Canvas(
+            self.analysis_tab, highlightthickness=0, borderwidth=0
+        )
+        self.analysis_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        self.analysis_scrollbar = ttk.Scrollbar(
+            self.analysis_tab,
+            orient="vertical",
+            command=self.analysis_scroll_canvas.yview,
+        )
+        self.analysis_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.analysis_scroll_canvas.configure(
+            yscrollcommand=self.analysis_scrollbar.set
+        )
+        analysis_content = ttk.Frame(self.analysis_scroll_canvas, padding=(0, 0, 8, 0))
+        self.analysis_scroll_content = analysis_content
+        self.analysis_scroll_window = self.analysis_scroll_canvas.create_window(
+            (0, 0), window=analysis_content, anchor="nw"
+        )
+        analysis_content.columnconfigure(0, weight=1)
+        analysis_content.rowconfigure(3, weight=1)
+        analysis_content.bind("<Configure>", self._update_analysis_scroll_region)
+        self.analysis_scroll_canvas.bind(
+            "<Configure>", self._resize_analysis_scroll_content
+        )
+        self.bind_all("<MouseWheel>", self._scroll_analysis_mousewheel, add="+")
+        self.bind_all("<Button-4>", self._scroll_analysis_mousewheel, add="+")
+        self.bind_all("<Button-5>", self._scroll_analysis_mousewheel, add="+")
 
-        hourly_analysis_frame = ttk.LabelFrame(self.analysis_tab, text="Hourly analysis", padding=10)
-        hourly_analysis_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        hourly_analysis_frame.columnconfigure(0, weight=1)
-        self.hourly_schedule_enabled_check = ttk.Checkbutton(
-            hourly_analysis_frame,
-            text="Enable hourly demand schedule",
+        resolution_frame = ttk.LabelFrame(
+            analysis_content, text="Analysis resolution", padding=10
+        )
+        resolution_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        resolution_frame.columnconfigure(1, weight=1)
+        self.daily_analysis_resolution_radio = ttk.Radiobutton(
+            resolution_frame,
+            text="Daily only",
             variable=self.hourly_schedule_enabled_var,
+            value=False,
             command=self._hourly_schedule_enabled_changed,
         )
-        self.hourly_schedule_enabled_check.grid(row=0, column=0, sticky="w")
-        self.synthetic_hourly_rainfall_check = ttk.Checkbutton(
-            hourly_analysis_frame,
-            text="Use generated synthetic hourly rainfall",
+        self.daily_analysis_resolution_radio.grid(row=0, column=0, sticky="nw")
+        ttk.Label(
+            resolution_frame,
+            text="Uses daily rainfall and daily demand totals.",
+            foreground="#667278",
+        ).grid(row=0, column=1, sticky="nw", padx=(16, 0))
+        self.hourly_analysis_resolution_radio = ttk.Radiobutton(
+            resolution_frame,
+            text="Daily + hourly",
+            variable=self.hourly_schedule_enabled_var,
+            value=True,
+            command=self._hourly_schedule_enabled_changed,
+        )
+        self.hourly_analysis_resolution_radio.grid(row=1, column=0, sticky="nw", pady=(7, 0))
+        ttk.Label(
+            resolution_frame,
+            text="Adds an hourly simulation using the demand and rainfall timing below.",
+            foreground="#667278",
+        ).grid(row=1, column=1, sticky="nw", padx=(16, 0), pady=(7, 0))
+
+        hourly_analysis_frame = ttk.LabelFrame(
+            analysis_content, text="Hourly assumptions", padding=10
+        )
+        hourly_analysis_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        hourly_analysis_frame.columnconfigure(0, weight=1)
+
+        demand_timing_frame = ttk.LabelFrame(
+            hourly_analysis_frame, text="Demand timing", padding=8
+        )
+        demand_timing_frame.grid(row=0, column=0, sticky="ew")
+        demand_timing_frame.columnconfigure(1, weight=1)
+        ttk.Label(demand_timing_frame, text="Schedule:").grid(
+            row=0, column=0, sticky="w", padx=(0, 8)
+        )
+        ttk.Label(
+            demand_timing_frame,
+            textvariable=self.hourly_demand_schedule_selection_var,
+        ).grid(row=0, column=1, sticky="w")
+        self.hourly_schedule_change_button = ttk.Button(
+            demand_timing_frame,
+            text="Change...",
+            command=lambda: self.notebook.select(self.schedules_tab),
+        )
+        self.hourly_schedule_change_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
+        ttk.Label(
+            demand_timing_frame,
+            text="Demand is calculated and applied hour by hour in the hourly simulation.",
+            foreground="#667278",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 0))
+
+        rainfall_timing_frame = ttk.LabelFrame(
+            hourly_analysis_frame, text="Rainfall timing", padding=8
+        )
+        rainfall_timing_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        rainfall_timing_frame.columnconfigure(1, weight=1)
+        self.daily_rainfall_timing_radio = ttk.Radiobutton(
+            rainfall_timing_frame,
+            text="Daily total at end of day",
             variable=self.use_synthetic_hourly_rainfall_var,
+            value=False,
             command=self._synthetic_hourly_rainfall_setting_changed,
         )
-        self.synthetic_hourly_rainfall_check.grid(row=1, column=0, sticky="w", pady=(6, 0))
+        self.daily_rainfall_timing_radio.grid(row=0, column=0, sticky="nw")
         ttk.Label(
-            hourly_analysis_frame,
+            rainfall_timing_frame,
+            text="Uses the source daily totals; rainfall is applied at 23:00.",
+            foreground="#667278",
+        ).grid(row=0, column=1, columnspan=2, sticky="nw", padx=(16, 0))
+        self.synthetic_hourly_rainfall_radio = ttk.Radiobutton(
+            rainfall_timing_frame,
+            text="Synthetic hourly timing",
+            variable=self.use_synthetic_hourly_rainfall_var,
+            value=True,
+            command=self._synthetic_hourly_rainfall_setting_changed,
+        )
+        self.synthetic_hourly_rainfall_radio.grid(row=1, column=0, sticky="nw", pady=(7, 0))
+        ttk.Label(
+            rainfall_timing_frame,
+            text=(
+                "Distributes each daily total using a generated profile. The timing is "
+                "synthetic, not observed hourly rainfall."
+            ),
+            foreground="#667278",
+            wraplength=610,
+            justify="left",
+        ).grid(row=1, column=1, sticky="nw", padx=(16, 0), pady=(7, 0))
+        self.analysis_generate_hourly_rainfall_button = ttk.Button(
+            rainfall_timing_frame,
+            text="Generate hourly profile...",
+            command=self.generate_hourly_rainfall,
+        )
+        self.analysis_generate_hourly_rainfall_button.grid(
+            row=1, column=2, sticky="ne", padx=(12, 0), pady=(7, 0)
+        )
+        ttk.Label(
+            rainfall_timing_frame,
             textvariable=self.synthetic_hourly_rainfall_status_var,
             foreground="#667278",
-            wraplength=950,
+            wraplength=930,
             justify="left",
-        ).grid(row=2, column=0, sticky="ew", pady=(3, 0))
+        ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+
+        applied_settings_frame = ttk.LabelFrame(
+            analysis_content, text="Applied analysis settings (read-only)", padding=10
+        )
+        applied_settings_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        applied_settings_frame.columnconfigure(1, weight=1)
+        applied_settings = (
+            ("Analysis resolution", self.applied_analysis_resolution_var),
+            ("Rainfall source", self.applied_rainfall_source_var),
+            ("Rainfall timing", self.applied_rainfall_timing_var),
+            ("Demand timing", self.applied_demand_timing_var),
+        )
+        for row, (label, variable) in enumerate(applied_settings):
+            ttk.Label(applied_settings_frame, text=label).grid(
+                row=row, column=0, sticky="nw", padx=(0, 16), pady=2
+            )
+            ttk.Label(
+                applied_settings_frame,
+                textvariable=variable,
+                foreground="#33444c",
+                wraplength=780,
+                justify="left",
+            ).grid(row=row, column=1, sticky="ew", pady=2)
+
         self._refresh_synthetic_hourly_rainfall_status()
 
-        comparison_frame = ttk.LabelFrame(self.analysis_tab, text="Tank size comparison", padding=10)
-        comparison_frame.grid(row=1, column=0, sticky="nsew")
+        comparison_frame = ttk.LabelFrame(
+            analysis_content, text="Tank size comparison", padding=10
+        )
+        comparison_frame.grid(row=3, column=0, sticky="nsew")
         self.comparison_frame = comparison_frame
         comparison_frame.columnconfigure(0, weight=1)
         comparison_frame.rowconfigure(2, weight=1)
@@ -8414,13 +8729,14 @@ class RainwaterTkApp(tk.Tk):
         if demand_object.demand_mode == "fixture_usage":
             daily = fixture_daily_demand_gallons(demand_object)
             return (
-                f"{volume_to_display(daily, self.config_model):.2f} {unit}/day "
+                f"{volume_to_display(daily, self.config_model):.2f} {unit}/active day "
                 f"({demand_object.fixture_people:g} people)"
             )
         if demand_object.demand_mode == "recurring_daily":
-            values = demand_object.monthly_daily_demand_gallons.values()
-            value = max(values, default=demand_object.recurring_daily_gallons)
-            return f"up to {volume_to_display(value, self.config_model):.2f} {unit}/day"
+            return (
+                f"{volume_to_display(demand_object.recurring_daily_gallons, self.config_model):.2f} "
+                f"{unit}/occupied day"
+            )
         if demand_object.demand_mode == "monthly_volume":
             value = max(demand_object.monthly_demand_gallons.values(), default=0.0)
             return f"up to {volume_to_display(value, self.config_model):.2f} {unit}/month"
@@ -10933,7 +11249,12 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(
             self.config_model.demand.hourly_schedule_library[selected_name]
         )
-        dialog = HourlyDemandScheduleDialog(self, self.config_model)
+        schedule_type = self.config_model.demand.hourly_schedule_types.get(
+            selected_name, FRACTIONAL_SCHEDULE_TYPE
+        )
+        dialog = HourlyDemandScheduleDialog(
+            self, self.config_model, schedule_type=schedule_type
+        )
         self.wait_window(dialog)
         if dialog.saved:
             self.hourly_schedule_enabled_var.set(True)
@@ -10947,6 +11268,9 @@ class RainwaterTkApp(tk.Tk):
         library = self.config_model.demand.hourly_schedule_library
         name = self._unique_schedule_name("Typical week demand")
         library[name] = default_hourly_weekly_fractions()
+        self.config_model.demand.hourly_schedule_types[name] = (
+            FRACTIONAL_SCHEDULE_TYPE
+        )
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = True
         self.hourly_schedule_enabled_var.set(True)
@@ -10961,6 +11285,11 @@ class RainwaterTkApp(tk.Tk):
         name = self._unique_schedule_name(f"{source_name} copy")
         self.config_model.demand.hourly_schedule_library[name] = copy.deepcopy(
             self.config_model.demand.hourly_schedule_library[source_name]
+        )
+        self.config_model.demand.hourly_schedule_types[name] = (
+            self.config_model.demand.hourly_schedule_types.get(
+                source_name, FRACTIONAL_SCHEDULE_TYPE
+            )
         )
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = True
@@ -10992,6 +11321,11 @@ class RainwaterTkApp(tk.Tk):
         ]
         library.clear()
         library.update(renamed_items)
+        schedule_types = self.config_model.demand.hourly_schedule_types
+        selected_type = schedule_types.pop(
+            selected_name, FRACTIONAL_SCHEDULE_TYPE
+        )
+        schedule_types[new_name] = selected_type
         for demand_object in self.config_model.demand.demand_objects:
             if demand_object.schedule_name == selected_name:
                 demand_object.schedule_name = new_name
@@ -10999,6 +11333,50 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.demand.active_hourly_schedule_name = new_name
         self.hourly_schedule_summary_var.set(f"Renamed schedule to: {new_name}")
         self._refresh_schedule_management(select_name=new_name)
+
+    def _schedule_type_changed(self, _event: tk.Event | None = None) -> None:
+        selected_name = self._selected_schedule_name()
+        if selected_name is None:
+            return
+        schedule_type = SCHEDULE_TYPE_BY_LABEL.get(
+            self.schedule_type_var.get(), FRACTIONAL_SCHEDULE_TYPE
+        )
+        fixture_users = [
+            demand_object.name
+            for demand_object in self.config_model.demand.demand_objects
+            if demand_object.demand_mode == "fixture_usage"
+            and demand_object.schedule_name == selected_name
+        ]
+        if schedule_type != OCCUPANCY_SCHEDULE_TYPE and fixture_users:
+            messagebox.showwarning(
+                APP_TITLE,
+                f"Schedule '{selected_name}' is used by fixture demand object(s): "
+                f"{', '.join(fixture_users)}. Assign an occupancy schedule before changing its type.",
+                parent=self,
+            )
+            self.schedule_type_var.set(
+                SCHEDULE_TYPE_LABELS[OCCUPANCY_SCHEDULE_TYPE]
+            )
+            return
+        self.config_model.demand.hourly_schedule_types[selected_name] = schedule_type
+        if schedule_type == OCCUPANCY_SCHEDULE_TYPE:
+            schedule = self.config_model.demand.hourly_schedule_library[selected_name]
+            for day in WEEKDAY_KEYS:
+                schedule[day] = [
+                    1.0 if float(value) > 0.0 else 0.0
+                    for value in schedule.get(day, [])[:24]
+                ]
+                schedule[day].extend([0.0] * (24 - len(schedule[day])))
+            if (
+                self.config_model.demand.active_hourly_schedule_name
+                == selected_name
+            ):
+                self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(
+                    schedule
+                )
+        self.hourly_schedule_summary_var.set(
+            f"Schedule type: {SCHEDULE_TYPE_LABELS[schedule_type]}"
+        )
 
     def _rename_schedule_from_event(self, _event: tk.Event) -> str:
         self.rename_hourly_demand_schedule()
@@ -11051,20 +11429,34 @@ class RainwaterTkApp(tk.Tk):
             suffix += 1
         return f"{base_name} {suffix}"
 
-    def _save_library_changes(self, previous: dict[str, dict[str, list[float]]]) -> bool:
+    def _save_library_changes(
+        self,
+        previous: dict[str, dict[str, list[float]]],
+        previous_types: dict[str, str] | None = None,
+    ) -> bool:
         try:
             self._save_custom_schedule_templates()
         except OSError as exc:
             self.custom_schedule_templates = previous
+            if previous_types is not None:
+                self.custom_schedule_template_types = previous_types
             self.common_schedule_templates = {
                 **common_hourly_schedule_templates(),
                 **self.custom_schedule_templates,
+            }
+            self.common_schedule_template_types = {
+                **common_hourly_schedule_template_types(),
+                **self.custom_schedule_template_types,
             }
             messagebox.showerror(APP_TITLE, f"Could not save the custom schedule library:\n{exc}", parent=self)
             return False
         self.common_schedule_templates = {
             **common_hourly_schedule_templates(),
             **self.custom_schedule_templates,
+        }
+        self.common_schedule_template_types = {
+            **common_hourly_schedule_template_types(),
+            **self.custom_schedule_template_types,
         }
         return True
 
@@ -11087,13 +11479,17 @@ class RainwaterTkApp(tk.Tk):
             return
         temporary_config = default_project_config("Schedule library")
         temporary_config.demand.hourly_weekly_fractions = default_hourly_weekly_fractions()
-        dialog = HourlyDemandScheduleDialog(self, temporary_config)
+        dialog = HourlyDemandScheduleDialog(
+            self, temporary_config, schedule_type=FRACTIONAL_SCHEDULE_TYPE
+        )
         self.wait_window(dialog)
         if not dialog.saved:
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
+        previous_types = dict(self.custom_schedule_template_types)
         self.custom_schedule_templates[name] = copy.deepcopy(temporary_config.demand.hourly_weekly_fractions)
-        if self._save_library_changes(previous):
+        self.custom_schedule_template_types[name] = FRACTIONAL_SCHEDULE_TYPE
+        if self._save_library_changes(previous, previous_types):
             self._refresh_schedule_library(select_name=name)
             self.status_var.set(f"Added '{name}' to the custom schedule library")
 
@@ -11105,8 +11501,14 @@ class RainwaterTkApp(tk.Tk):
         source = self.common_schedule_templates[source_name]
         name = self._unique_library_name(f"{source_name} copy")
         previous = copy.deepcopy(self.custom_schedule_templates)
+        previous_types = dict(self.custom_schedule_template_types)
         self.custom_schedule_templates[name] = copy.deepcopy(source)
-        if self._save_library_changes(previous):
+        self.custom_schedule_template_types[name] = (
+            self.common_schedule_template_types.get(
+                source_name, FRACTIONAL_SCHEDULE_TYPE
+            )
+        )
+        if self._save_library_changes(previous, previous_types):
             self._refresh_schedule_library(select_name=name)
             self.status_var.set(f"Duplicated '{source_name}' in the custom schedule library")
 
@@ -11122,8 +11524,10 @@ class RainwaterTkApp(tk.Tk):
         ):
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
+        previous_types = dict(self.custom_schedule_template_types)
         del self.custom_schedule_templates[name]
-        if self._save_library_changes(previous):
+        self.custom_schedule_template_types.pop(name, None)
+        if self._save_library_changes(previous, previous_types):
             self._refresh_schedule_library()
             self.status_var.set(f"Deleted '{name}' from the custom schedule library")
 
@@ -11151,6 +11555,11 @@ class RainwaterTkApp(tk.Tk):
             return
         name = self._unique_schedule_name(template_name)
         self.config_model.demand.hourly_schedule_library[name] = copy.deepcopy(template)
+        self.config_model.demand.hourly_schedule_types[name] = (
+            self.common_schedule_template_types.get(
+                template_name, FRACTIONAL_SCHEDULE_TYPE
+            )
+        )
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(template)
         self.config_model.demand.hourly_schedule_enabled = True
@@ -11191,11 +11600,18 @@ class RainwaterTkApp(tk.Tk):
         ):
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
+        previous_types = dict(self.custom_schedule_template_types)
         if existing_name is not None and existing_name != selected_name:
             del self.custom_schedule_templates[existing_name]
+            self.custom_schedule_template_types.pop(existing_name, None)
         schedule = copy.deepcopy(self.config_model.demand.hourly_schedule_library[selected_name])
         self.custom_schedule_templates[selected_name] = schedule
-        if not self._save_library_changes(previous):
+        self.custom_schedule_template_types[selected_name] = (
+            self.config_model.demand.hourly_schedule_types.get(
+                selected_name, FRACTIONAL_SCHEDULE_TYPE
+            )
+        )
+        if not self._save_library_changes(previous, previous_types):
             return
         self._refresh_schedule_library(select_name=selected_name)
         self.hourly_schedule_summary_var.set(f"Saved to common schedule library: {selected_name}")
@@ -11225,6 +11641,7 @@ class RainwaterTkApp(tk.Tk):
         ):
             return
         del self.config_model.demand.hourly_schedule_library[selected_name]
+        self.config_model.demand.hourly_schedule_types.pop(selected_name, None)
         library = self.config_model.demand.hourly_schedule_library
         if library:
             active_name = next(iter(library))
@@ -11242,6 +11659,9 @@ class RainwaterTkApp(tk.Tk):
             name = "Typical week demand"
             self.config_model.demand.hourly_schedule_library[name] = copy.deepcopy(
                 self.config_model.demand.hourly_weekly_fractions
+            )
+            self.config_model.demand.hourly_schedule_types[name] = (
+                FRACTIONAL_SCHEDULE_TYPE
             )
             self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
@@ -11291,7 +11711,13 @@ class RainwaterTkApp(tk.Tk):
             return
         enabled = bool(self.use_synthetic_hourly_rainfall_var.get())
         available = has_hourly_rainfall(self.rainfall_df)
-        if enabled and available:
+        hourly_enabled = bool(self.hourly_schedule_enabled_var.get())
+        if not hourly_enabled:
+            message = (
+                "Hourly assumptions are not applied while Daily only is selected."
+                + (" A synthetic hourly profile is available." if available else "")
+            )
+        elif enabled and available:
             message = (
                 "Synthetic hourly profiles will be used for hourly collection and first-flush timing. "
                 "Daily analyses continue to use the observed daily totals."
@@ -11299,12 +11725,12 @@ class RainwaterTkApp(tk.Tk):
         elif enabled:
             message = (
                 "Synthetic hourly rainfall is selected, but no generated profiles are available. "
-                "Generate them under Rainwater Data > Hourly data before running analysis."
+                "Generate them under Rainwater Data > Synthetic hourly rainfall before running analysis."
             )
         elif available:
             message = (
-                "Synthetic profiles are available but will be ignored. Hourly rainfall uses the "
-                "legacy assumption that each daily total arrives at 23:00."
+                "A synthetic hourly profile is available but not selected. The hourly simulation "
+                "applies each daily rainfall total at 23:00."
             )
         else:
             message = (
@@ -11314,9 +11740,9 @@ class RainwaterTkApp(tk.Tk):
         self.synthetic_hourly_rainfall_status_var.set(message)
         if hasattr(self, "hourly_profile_reference_var"):
             reference = (
-                "Hourly profile: Synthetic profile generated - manage in Hourly data."
+                "Hourly profile: Synthetic profile generated - manage in Synthetic hourly rainfall."
                 if available
-                else "Hourly profile: Not generated - manage in Hourly data."
+                else "Hourly profile: Not generated - manage in Synthetic hourly rainfall."
             )
             self.hourly_profile_reference_var.set(reference)
         if hasattr(self, "generate_hourly_rainfall_button"):
@@ -11332,16 +11758,110 @@ class RainwaterTkApp(tk.Tk):
             self.remove_hourly_rainfall_button.configure(
                 state="normal" if available else "disabled"
             )
+        if hasattr(self, "analysis_generate_hourly_rainfall_button"):
+            self.analysis_generate_hourly_rainfall_button.configure(
+                text=(
+                    "Regenerate hourly profile..."
+                    if available
+                    else "Generate hourly profile..."
+                )
+            )
+        self._refresh_applied_analysis_settings()
         self._refresh_hourly_profile_preview()
+
+    def _refresh_applied_analysis_settings(self) -> None:
+        """Summarize the timing assumptions currently applied by analysis."""
+        required_variables = (
+            "applied_analysis_resolution_var",
+            "applied_rainfall_source_var",
+            "applied_demand_timing_var",
+            "applied_rainfall_timing_var",
+        )
+        if not all(hasattr(self, name) for name in required_variables):
+            return
+
+        hourly_enabled = bool(self.hourly_schedule_enabled_var.get())
+        available = has_hourly_rainfall(self.rainfall_df)
+        active_name = self.config_model.demand.active_hourly_schedule_name
+        schedule_selection_var = self.__dict__.get(
+            "hourly_demand_schedule_selection_var"
+        )
+        if schedule_selection_var is not None:
+            schedule_selection_var.set(active_name)
+        if hourly_enabled:
+            resolution = "Daily + hourly (the daily analysis is always included)"
+            demand_timing = f"Hourly schedules (project default: {active_name})"
+            if bool(self.use_synthetic_hourly_rainfall_var.get()):
+                if available:
+                    seed_match = re.search(
+                        r"\(seed (\d+)\)", self.config_model.rainfall_timing_type
+                    )
+                    seed_suffix = f" (seed {seed_match.group(1)})" if seed_match else ""
+                    rainfall_timing = (
+                        "Synthetic hourly profile derived from each daily rainfall total"
+                        + seed_suffix
+                    )
+                else:
+                    rainfall_timing = (
+                        "Synthetic hourly timing selected, but no profile has been generated"
+                    )
+            else:
+                rainfall_timing = "Each daily rainfall total is applied at 23:00"
+        else:
+            resolution = "Daily only"
+            demand_timing = "Daily totals (hourly simulation is off)"
+            rainfall_timing = "Daily totals"
+
+        self.applied_analysis_resolution_var.set(resolution)
+        rainfall_source = (
+            "Not loaded"
+            if self.rainfall_df.empty
+            else self.config_model.rainfall_source_label or "Loaded daily rainfall record"
+        )
+        self.applied_rainfall_source_var.set(rainfall_source)
+        self.applied_demand_timing_var.set(demand_timing)
+        self.applied_rainfall_timing_var.set(rainfall_timing)
+
+        enabled_state = ["!disabled"] if hourly_enabled else ["disabled"]
+        hourly_schedule_change_button = self.__dict__.get(
+            "hourly_schedule_change_button"
+        )
+        if hourly_schedule_change_button is not None:
+            hourly_schedule_change_button.state(enabled_state)
+        daily_rainfall_timing_radio = self.__dict__.get(
+            "daily_rainfall_timing_radio"
+        )
+        if daily_rainfall_timing_radio is not None:
+            daily_rainfall_timing_radio.state(enabled_state)
+        synthetic_hourly_rainfall_radio = self.__dict__.get(
+            "synthetic_hourly_rainfall_radio"
+        )
+        if synthetic_hourly_rainfall_radio is not None:
+            synthetic_hourly_rainfall_radio.state(
+                ["!disabled"] if hourly_enabled and available else ["disabled"]
+            )
+        analysis_generate_hourly_rainfall_button = self.__dict__.get(
+            "analysis_generate_hourly_rainfall_button"
+        )
+        if analysis_generate_hourly_rainfall_button is not None:
+            analysis_generate_hourly_rainfall_button.state(
+                ["!disabled"]
+                if hourly_enabled and not self.rainfall_df.empty
+                else ["disabled"]
+            )
 
     def _refresh_schedule_management(self, select_name: str | None = None) -> None:
         if not hasattr(self, "schedule_list"):
+            self._refresh_applied_analysis_settings()
             return
         self.schedule_list.delete(0, tk.END)
         library = self.config_model.demand.hourly_schedule_library
         if self.hourly_schedule_enabled_var.get() and not library:
             active_name = self.config_model.demand.active_hourly_schedule_name
             library[active_name] = copy.deepcopy(self.config_model.demand.hourly_weekly_fractions)
+            self.config_model.demand.hourly_schedule_types[active_name] = (
+                FRACTIONAL_SCHEDULE_TYPE
+            )
         names = list(library)
         for name in names:
             self.schedule_list.insert(tk.END, name)
@@ -11351,9 +11871,18 @@ class RainwaterTkApp(tk.Tk):
             self.schedule_list.selection_set(index)
             self.schedule_list.see(index)
             self.schedule_name_var.set(target)
+            self.schedule_type_var.set(
+                SCHEDULE_TYPE_LABELS[
+                    self.config_model.demand.hourly_schedule_types.get(
+                        target, FRACTIONAL_SCHEDULE_TYPE
+                    )
+                ]
+            )
         else:
             self.schedule_name_var.set("")
+            self.schedule_type_var.set("")
         self._update_schedule_management_state()
+        self._refresh_applied_analysis_settings()
 
     def _selected_schedule_name(self) -> str | None:
         selected = self.schedule_list.curselection() if hasattr(self, "schedule_list") else ()
@@ -11372,12 +11901,20 @@ class RainwaterTkApp(tk.Tk):
         selected_name = self._selected_schedule_name()
         if selected_name is not None:
             self.schedule_name_var.set(selected_name)
+            self.schedule_type_var.set(
+                SCHEDULE_TYPE_LABELS[
+                    self.config_model.demand.hourly_schedule_types.get(
+                        selected_name, FRACTIONAL_SCHEDULE_TYPE
+                    )
+                ]
+            )
             self.config_model.demand.active_hourly_schedule_name = selected_name
             self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(
                 self.config_model.demand.hourly_schedule_library[selected_name]
             )
             self.hourly_schedule_summary_var.set(f"Selected schedule: {selected_name}")
         self._update_schedule_management_state()
+        self._refresh_applied_analysis_settings()
 
     def _update_schedule_management_state(self) -> None:
         has_schedule = bool(self.schedule_list.curselection()) if hasattr(self, "schedule_list") else False
@@ -11393,6 +11930,10 @@ class RainwaterTkApp(tk.Tk):
             self.schedule_name_entry.state(["!disabled"] if has_schedule else ["disabled"])
         if hasattr(self, "save_schedule_to_library_button"):
             self.save_schedule_to_library_button.state(["!disabled"] if has_schedule else ["disabled"])
+        if hasattr(self, "schedule_type_combo"):
+            self.schedule_type_combo.configure(
+                state="readonly" if has_schedule else "disabled"
+            )
 
     def _edit_demand_month_from_event(self, event: tk.Event) -> str:
         row_id = self.demand_tree.identify_row(event.y)
@@ -11903,8 +12444,18 @@ class RainwaterTkApp(tk.Tk):
             if mode == "monthly_volume":
                 schedule = "Monthly volume profile"
             elif mode in {"recurring_daily", "fixture_usage"}:
-                days = getattr(demand_object, "operating_weekdays", None) or []
                 labels = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+                occupancy_schedule = cfg.demand.hourly_schedule_library.get(
+                    demand_object.schedule_name, {}
+                )
+                days = [
+                    index
+                    for index, day in enumerate(WEEKDAY_KEYS)
+                    if any(
+                        float(value) > 0.0
+                        for value in occupancy_schedule.get(day, [])[:24]
+                    )
+                ]
                 schedule = ", ".join(labels[int(day)] for day in days if 0 <= int(day) <= 6) or "No operating days"
                 if mode == "fixture_usage":
                     fixture_volume = volume_to_display(
@@ -13554,19 +14105,30 @@ class ReportDialog(tk.Toplevel):
 class HourlyDemandScheduleDialog(tk.Toplevel):
     DAY_LABELS = dict(zip(WEEKDAY_KEYS, ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")))
 
-    def __init__(self, parent: RainwaterTkApp, config: ProjectConfig) -> None:
+    def __init__(
+        self,
+        parent: RainwaterTkApp,
+        config: ProjectConfig,
+        *,
+        schedule_type: str = FRACTIONAL_SCHEDULE_TYPE,
+    ) -> None:
         super().__init__(parent)
         self.title("Edit Typical Week Demand Schedule")
         self.transient(parent)
         self.grab_set()
         self.saved = False
         self.config_model = config
+        self.schedule_type = normalize_schedule_type(schedule_type)
         self.vars: dict[tuple[str, int], tk.StringVar] = {}
         body = ttk.Frame(self, padding=10)
         body.grid(sticky="nsew")
         ttk.Label(
             body,
-            text="Hourly multipliers range from 0 (off) to 1 (100% on). Active values distribute the daily demand.",
+            text=(
+                "Binary occupancy schedule: choose 1 when occupied and 0 when unoccupied."
+                if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
+                else "Fractional schedule: values from 0 to 1 multiply flow or weight fixed demand."
+            ),
             foreground="#5f6b70",
         ).grid(row=0, column=0, columnspan=8, sticky="w", pady=(0, 8))
         ttk.Label(body, text="Hour").grid(row=1, column=0, padx=3)
@@ -13579,11 +14141,28 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
             for column, day in enumerate(WEEKDAY_KEYS, start=1):
                 fractions = config.demand.hourly_weekly_fractions.get(day, [1.0] * 24)
                 value = fractions[hour] if hour < len(fractions) else 0.0
-                variable = tk.StringVar(value=f"{min(max(float(value), 0.0), 1.0):.3f}")
-                self.vars[(day, hour)] = variable
-                ttk.Entry(body, textvariable=variable, width=8, justify="right").grid(
-                    row=hour + 2, column=column, padx=2, pady=1
+                normalized_value = min(max(float(value), 0.0), 1.0)
+                variable = tk.StringVar(
+                    value=(
+                        str(int(normalized_value > 0.0))
+                        if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
+                        else f"{normalized_value:.3f}"
+                    )
                 )
+                self.vars[(day, hour)] = variable
+                if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE:
+                    ttk.Combobox(
+                        body,
+                        textvariable=variable,
+                        values=("0", "1"),
+                        state="readonly",
+                        width=6,
+                        justify="right",
+                    ).grid(row=hour + 2, column=column, padx=2, pady=1)
+                else:
+                    ttk.Entry(
+                        body, textvariable=variable, width=8, justify="right"
+                    ).grid(row=hour + 2, column=column, padx=2, pady=1)
         actions = ttk.Frame(body)
         actions.grid(row=26, column=0, columnspan=8, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Set all on", command=self._set_even).grid(row=0, column=0)
@@ -13605,7 +14184,11 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
 
     def _set_even(self) -> None:
         for variable in self.vars.values():
-            variable.set("1.000")
+            variable.set(
+                "1"
+                if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
+                else "1.000"
+            )
 
     def _copy_day(self, source: str, targets: list[str]) -> None:
         for target in targets:
@@ -13633,6 +14216,16 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
                     parent=self,
                 )
                 return
+            if (
+                self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
+                and any(value not in {0.0, 1.0} for value in multipliers)
+            ):
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"Occupancy values for {self.DAY_LABELS[day]} must be 0 or 1.",
+                    parent=self,
+                )
+                return
             schedule[day] = multipliers
         self.config_model.demand.hourly_weekly_fractions = schedule
         self.config_model.demand.hourly_schedule_enabled = True
@@ -13647,12 +14240,12 @@ class DemandObjectDialog(tk.Toplevel):
     )
     MODE_LABELS = {
         "Scheduled flow": "scheduled_flow",
-        "Fixture use (people x uses)": "fixture_usage",
-        "Recurring daily volume": "recurring_daily",
-        "Monthly volume": "monthly_volume",
+        "Occupational - Fixture use (people x uses)": "fixture_usage",
+        "Occupational - Recurring daily volume": "recurring_daily",
+        "Occupational - Monthly volume": "monthly_volume",
     }
+    OCCUPATIONAL_MODES = {"fixture_usage", "recurring_daily", "monthly_volume"}
     DAY_LABELS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-    NO_SCHEDULE_LABEL = "-- No schedule --"
 
     def __init__(self, parent: RainwaterTkApp, config: ProjectConfig, demand_object: DemandObject) -> None:
         super().__init__(parent)
@@ -13674,22 +14267,19 @@ class DemandObjectDialog(tk.Toplevel):
         self.instantaneous_demand_var = tk.StringVar(
             value=f"{_demand_flow_from_gallons_per_minute(demand_object.instantaneous_demand_gallons_per_minute, initial_flow_unit):.8g}"
         )
-        schedule_names = list(config.demand.hourly_schedule_library)
-        self.project_schedule_names = schedule_names
-        selected_schedule = (
-            demand_object.schedule_name
-            if demand_object.schedule_name in schedule_names
-            else (
-                self.NO_SCHEDULE_LABEL
-                if demand_object.demand_mode == "monthly_volume"
-                else (schedule_names[0] if schedule_names else "")
-            )
-        )
-        self.schedule_var = tk.StringVar(value=selected_schedule)
+        self.project_schedule_names = list(config.demand.hourly_schedule_library)
         mode_label = next(
             (label for label, value in self.MODE_LABELS.items() if value == demand_object.demand_mode),
             "Scheduled flow",
         )
+        initial_mode = self.MODE_LABELS[mode_label]
+        schedule_names = self._compatible_schedule_names(initial_mode)
+        selected_schedule = (
+            demand_object.schedule_name
+            if demand_object.schedule_name in schedule_names
+            else (schedule_names[0] if schedule_names else "")
+        )
+        self.schedule_var = tk.StringVar(value=selected_schedule)
         self.mode_var = tk.StringVar(value=mode_label)
         self.daily_volume_var = tk.StringVar(value=f"{volume_to_display(demand_object.recurring_daily_gallons, config):.8g}")
         default_fixture_uses = (
@@ -13718,19 +14308,10 @@ class DemandObjectDialog(tk.Toplevel):
         self.fixture_uses_label_var = tk.StringVar()
         self.fixture_volume_label_var = tk.StringVar()
         self.fixture_guidance_var = tk.StringVar()
-        selected_weekdays = set(
-            demand_object.operating_weekdays
-            if demand_object.operating_weekdays is not None
-            else range(min(max(demand_object.operating_days_per_week, 0), 7))
-        )
-        self.weekday_vars = [tk.BooleanVar(value=index in selected_weekdays) for index in range(7)]
         existing_monthly_values = dict(
-            demand_object.monthly_daily_demand_gallons
-            if demand_object.demand_mode == "recurring_daily"
-            else demand_object.monthly_demand_gallons
-        )
-        self.use_monthly_overrides_var = tk.BooleanVar(
-            value=bool(demand_object.monthly_daily_demand_gallons)
+            demand_object.monthly_demand_gallons
+            if demand_object.demand_mode == "monthly_volume"
+            else {}
         )
         self.monthly_vars = {
             month: tk.StringVar(
@@ -13778,11 +14359,7 @@ class DemandObjectDialog(tk.Toplevel):
         demand.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         demand.columnconfigure(1, weight=1)
         ttk.Label(demand, text="Schedule").grid(row=0, column=0, sticky="w", pady=3, padx=(0, 8))
-        schedule_values = (
-            [self.NO_SCHEDULE_LABEL, *schedule_names]
-            if demand_object.demand_mode == "monthly_volume"
-            else schedule_names
-        )
+        schedule_values = schedule_names
         self.schedule_combo = ttk.Combobox(
             demand, textvariable=self.schedule_var, values=schedule_values,
             state="readonly" if schedule_values else "disabled", width=39,
@@ -13848,19 +14425,6 @@ class DemandObjectDialog(tk.Toplevel):
             wraplength=560,
             justify="left",
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=(4, 7))
-        ttk.Label(self.fixture_frame, text="Operating weekdays").grid(
-            row=4, column=0, sticky="nw", pady=3, padx=(0, 8)
-        )
-        fixture_weekdays = ttk.Frame(self.fixture_frame)
-        fixture_weekdays.grid(row=4, column=1, sticky="w", pady=3)
-        for index, label in enumerate(self.DAY_LABELS):
-            ttk.Checkbutton(
-                fixture_weekdays,
-                text=label,
-                variable=self.weekday_vars[index],
-                command=self._refresh_dialog_state,
-            ).grid(row=0, column=index, padx=(0 if index == 0 else 5, 0))
-
         self.recurring_frame = ttk.Frame(demand)
         self.recurring_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
         self.recurring_frame.columnconfigure(1, weight=1)
@@ -13870,20 +14434,6 @@ class DemandObjectDialog(tk.Toplevel):
         ttk.Entry(self.recurring_frame, textvariable=self.daily_volume_var).grid(
             row=0, column=1, sticky="ew", pady=3
         )
-        ttk.Label(self.recurring_frame, text="Operating weekdays").grid(
-            row=1, column=0, sticky="nw", pady=3, padx=(0, 8)
-        )
-        weekdays = ttk.Frame(self.recurring_frame)
-        weekdays.grid(row=1, column=1, sticky="w", pady=3)
-        for index, label in enumerate(self.DAY_LABELS):
-            ttk.Checkbutton(
-                weekdays, text=label, variable=self.weekday_vars[index],
-                command=self._refresh_dialog_state,
-            ).grid(row=0, column=index, padx=(0 if index == 0 else 5, 0))
-        ttk.Checkbutton(
-            self.recurring_frame, text="Use January-December daily-volume overrides",
-            variable=self.use_monthly_overrides_var, command=self._refresh_dialog_state,
-        ).grid(row=2, column=1, sticky="w", pady=(5, 3))
 
         self.monthly_mode_frame = ttk.Frame(demand)
         self.monthly_mode_frame.grid(row=2, column=0, columnspan=2, sticky="ew")
@@ -13939,7 +14489,7 @@ class DemandObjectDialog(tk.Toplevel):
         for variable in (
             self.name_var, self.mode_var, self.schedule_var, self.instantaneous_demand_var,
             self.daily_volume_var, self.fixture_people_var, self.fixture_uses_var,
-            self.fixture_volume_var, self.sewer_eligible_var, self.use_monthly_overrides_var,
+            self.fixture_volume_var, self.sewer_eligible_var,
             *self.monthly_vars.values(),
         ):
             variable.trace_add("write", lambda *_args: self._refresh_dialog_state())
@@ -13966,28 +14516,33 @@ class DemandObjectDialog(tk.Toplevel):
             and self.original.name == "New demand object"
             and self.MODE_LABELS.get(self.mode_var.get()) == "scheduled_flow"
         ):
-            self.mode_var.set("Fixture use (people x uses)")
+            self.mode_var.set("Occupational - Fixture use (people x uses)")
             if self.name_var.get().strip() == "New demand object":
                 self.name_var.set(self.type_var.get())
-        self._refresh_dialog_state()
+        self._mode_changed()
 
     def _mode_changed(self, _event: tk.Event | None = None) -> None:
         mode = self.MODE_LABELS.get(self.mode_var.get(), "scheduled_flow")
-        if mode == "monthly_volume":
-            self.schedule_combo.configure(
-                values=[self.NO_SCHEDULE_LABEL, *self.project_schedule_names],
-                state="readonly",
-            )
-        else:
-            self.schedule_combo.configure(
-                values=self.project_schedule_names,
-                state="readonly" if self.project_schedule_names else "disabled",
-            )
-            if self.schedule_var.get() == self.NO_SCHEDULE_LABEL:
-                self.schedule_var.set(
-                    self.project_schedule_names[0] if self.project_schedule_names else ""
-                )
+        compatible_names = self._compatible_schedule_names(mode)
+        self.schedule_combo.configure(
+            values=compatible_names,
+            state="readonly" if compatible_names else "disabled",
+        )
+        if self.schedule_var.get() not in compatible_names:
+            self.schedule_var.set(compatible_names[0] if compatible_names else "")
         self._refresh_dialog_state()
+
+    def _compatible_schedule_names(self, mode: str) -> list[str]:
+        if mode not in self.OCCUPATIONAL_MODES:
+            return list(self.project_schedule_names)
+        return [
+            name
+            for name in self.project_schedule_names
+            if self.config_model.demand.hourly_schedule_types.get(
+                name, FRACTIONAL_SCHEDULE_TYPE
+            )
+            == OCCUPANCY_SCHEDULE_TYPE
+        ]
 
     def _parsed_nonnegative(self, variable: tk.StringVar) -> float | None:
         try:
@@ -14045,20 +14600,17 @@ class DemandObjectDialog(tk.Toplevel):
                 )
             )
             self.schedule_help_var.set(
-                "The calculated daily fixture volume is distributed across the schedule's "
-                "active hours on checked weekdays."
+                "The schedule controls both active days and hourly timing. On each day with "
+                "occupied hours, the calculated daily fixture volume is distributed evenly "
+                "across those hours; an all-zero day has no fixture demand."
             )
         elif mode == "recurring_daily":
             self.recurring_frame.grid()
-            if self.use_monthly_overrides_var.get():
-                self.monthly_table_frame.grid()
-            else:
-                self.monthly_table_frame.grid_remove()
-            self.monthly_table_frame.configure(
-                text=f"January-December daily-volume overrides ({volume_unit(self.config_model)}/day)"
-            )
+            self.monthly_table_frame.grid_remove()
             self.schedule_help_var.set(
-                "The selected daily volume is distributed across the schedule's active hours on checked weekdays."
+                "The daily volume is applied on each day with occupied hours and distributed "
+                "evenly across those hours. The occupancy schedule controls both active days "
+                "and hourly timing."
             )
         else:
             self.monthly_mode_frame.grid()
@@ -14066,16 +14618,10 @@ class DemandObjectDialog(tk.Toplevel):
             self.monthly_table_frame.configure(
                 text=f"January-December monthly volumes ({volume_unit(self.config_model)}/month)"
             )
-            if self.schedule_var.get() == self.NO_SCHEDULE_LABEL:
-                self.schedule_help_var.set(
-                    "If no schedule is selected, each monthly total is divided across calendar "
-                    "days, then distributed equally over 24 hours."
-                )
-            else:
-                self.schedule_help_var.set(
-                    "Each monthly total is divided across calendar days, then distributed "
-                    "across the selected schedule's active hours."
-                )
+            self.schedule_help_var.set(
+                "Each monthly total is divided across calendar days, then distributed "
+                "across the selected occupancy schedule's occupied hours."
+            )
 
         self.billing_help_var.set(
             "This type normally avoids both water and sewer charges. Confirm the local utility tariff."
@@ -14083,23 +14629,25 @@ class DemandObjectDialog(tk.Toplevel):
             else "This type normally avoids water charges only. Irrigation defaults to sewer-exempt; confirm the local utility tariff."
         )
         identity_error = "" if self.name_var.get().strip() else "Enter a demand object name."
-        no_schedule = self.schedule_var.get() == self.NO_SCHEDULE_LABEL
-        if (
-            mode != "monthly_volume"
-            and (
-                not self.schedule_var.get()
-                or self.schedule_var.get()
-                not in self.config_model.demand.hourly_schedule_library
+        if mode in self.OCCUPATIONAL_MODES and not self._compatible_schedule_names(mode):
+            demand_error = (
+                "Add an Occupancy (binary) schedule to the project before saving."
             )
-        ):
-            demand_error = "Add or select a project schedule before saving."
         elif (
-            mode == "monthly_volume"
-            and not no_schedule
-            and self.schedule_var.get()
+            mode in self.OCCUPATIONAL_MODES
+            and self.schedule_var.get() not in self._compatible_schedule_names(mode)
+        ):
+            demand_error = "Select an Occupancy (binary) schedule."
+        elif (
+            not self.schedule_var.get()
+            or self.schedule_var.get()
             not in self.config_model.demand.hourly_schedule_library
         ):
-            demand_error = "Select a project schedule or -- No schedule --."
+            demand_error = (
+                "Select an Occupancy (binary) schedule."
+                if mode in self.OCCUPATIONAL_MODES
+                else "Add or select a project schedule before saving."
+            )
         elif mode == "scheduled_flow":
             flow = self._parsed_nonnegative(self.instantaneous_demand_var)
             demand_error = (
@@ -14110,10 +14658,17 @@ class DemandObjectDialog(tk.Toplevel):
             people = self._parsed_nonnegative(self.fixture_people_var)
             uses = self._parsed_nonnegative(self.fixture_uses_var)
             volume = self._parsed_nonnegative(self.fixture_volume_var)
+            fixture_schedule = self.config_model.demand.hourly_schedule_library.get(
+                self.schedule_var.get(), {}
+            )
+            schedule_has_active_day = any(
+                any(float(value) > 0.0 for value in fixture_schedule.get(day, [])[:24])
+                for day in WEEKDAY_KEYS
+            )
             if people is None or uses is None or volume is None:
                 demand_error = "People, uses, and volume per use must be non-negative numbers."
-            elif not any(variable.get() for variable in self.weekday_vars):
-                demand_error = "Select at least one operating weekday."
+            elif not schedule_has_active_day:
+                demand_error = "Select a schedule with at least one active day."
             elif people == 0.0:
                 demand_error = "Enter at least one person."
             elif uses == 0.0:
@@ -14128,14 +14683,18 @@ class DemandObjectDialog(tk.Toplevel):
                 demand_error = ""
         elif mode == "recurring_daily":
             daily = self._parsed_nonnegative(self.daily_volume_var)
-            monthly = self._monthly_display_values() if self.use_monthly_overrides_var.get() else {}
-            if daily is None or monthly is None:
-                demand_error = "Recurring and monthly override values must be non-negative numbers."
-            elif not any(variable.get() for variable in self.weekday_vars):
-                demand_error = "Select at least one operating weekday."
-            elif self.use_monthly_overrides_var.get() and not any(monthly.values()):
-                demand_error = "Enter at least one monthly daily-volume override greater than zero."
-            elif not self.use_monthly_overrides_var.get() and daily == 0.0:
+            recurring_schedule = self.config_model.demand.hourly_schedule_library.get(
+                self.schedule_var.get(), {}
+            )
+            schedule_has_active_day = any(
+                any(float(value) > 0.0 for value in recurring_schedule.get(day, [])[:24])
+                for day in WEEKDAY_KEYS
+            )
+            if daily is None:
+                demand_error = "Recurring volume must be a non-negative number."
+            elif not schedule_has_active_day:
+                demand_error = "Select a schedule with at least one occupied day."
+            elif daily == 0.0:
                 demand_error = "Enter a recurring volume greater than zero."
             else:
                 demand_error = ""
@@ -14158,6 +14717,7 @@ class DemandObjectDialog(tk.Toplevel):
         typical_day = 0.0
         typical_week = 0.0
         january = 0.0
+        daily_summary_label = "Typical weekday"
         if mode == "scheduled_flow":
             display_flow = self._parsed_nonnegative(self.instantaneous_demand_var) or 0.0
             flow = _demand_flow_to_gallons_per_minute(
@@ -14171,13 +14731,17 @@ class DemandObjectDialog(tk.Toplevel):
             typical_week = sum(daily_values)
             january = typical_week * 31.0 / 7.0
         elif mode == "fixture_usage":
+            daily_summary_label = "Active-day demand"
             people = self._parsed_nonnegative(self.fixture_people_var) or 0.0
             uses = self._parsed_nonnegative(self.fixture_uses_var) or 0.0
             volume = volume_to_internal(
                 self._parsed_nonnegative(self.fixture_volume_var) or 0.0,
                 self.config_model,
             )
-            selected_days = sum(variable.get() for variable in self.weekday_vars)
+            selected_days = sum(
+                any(float(value) > 0.0 for value in schedule.get(day, [])[:24])
+                for day in WEEKDAY_KEYS
+            )
             typical_day = people * uses * volume
             typical_week = typical_day * selected_days
             january = typical_week * 31.0 / 7.0
@@ -14185,15 +14749,13 @@ class DemandObjectDialog(tk.Toplevel):
             daily = volume_to_internal(
                 self._parsed_nonnegative(self.daily_volume_var) or 0.0, self.config_model
             )
-            selected_days = sum(variable.get() for variable in self.weekday_vars)
+            selected_days = sum(
+                any(float(value) > 0.0 for value in schedule.get(day, [])[:24])
+                for day in WEEKDAY_KEYS
+            )
             typical_day = daily
             typical_week = daily * selected_days
-            monthly = self._monthly_display_values() or {}
-            january_daily = (
-                volume_to_internal(monthly.get("jan", 0.0), self.config_model)
-                if self.use_monthly_overrides_var.get() else daily
-            )
-            january = january_daily * selected_days * 31.0 / 7.0
+            january = daily * selected_days * 31.0 / 7.0
         else:
             monthly = self._monthly_display_values() or {}
             january = volume_to_internal(monthly.get("jan", 0.0), self.config_model)
@@ -14202,7 +14764,7 @@ class DemandObjectDialog(tk.Toplevel):
         unit = volume_unit(self.config_model)
         eligibility = "Yes" if self.sewer_eligible_var.get() else "No"
         self.summary_var.set(
-            f"Typical weekday: {volume_to_display(typical_day, self.config_model):,.1f} {unit}    |    "
+            f"{daily_summary_label}: {volume_to_display(typical_day, self.config_model):,.1f} {unit}    |    "
             f"Typical week: {volume_to_display(typical_week, self.config_model):,.1f} {unit}\n"
             f"January estimate: {volume_to_display(january, self.config_model):,.1f} {unit}    |    "
             f"Sewer-charge eligible: {eligibility}"
@@ -14231,18 +14793,29 @@ class DemandObjectDialog(tk.Toplevel):
             self.bell()
             return
         name = self.name_var.get().strip()
-        schedule_name = (
-            "" if self.schedule_var.get() == self.NO_SCHEDULE_LABEL else self.schedule_var.get()
-        )
+        schedule_name = self.schedule_var.get()
         mode = self.MODE_LABELS[self.mode_var.get()]
         monthly_display = self._monthly_display_values() or {}
         monthly_internal = {
             month: volume_to_internal(value, self.config_model)
             for month, value in monthly_display.items()
         }
-        operating_weekdays = [
-            index for index, variable in enumerate(self.weekday_vars) if variable.get()
-        ]
+        operating_weekdays = (
+            [
+                index
+                for index, day in enumerate(WEEKDAY_KEYS)
+                if any(
+                    float(value) > 0.0
+                    for value in self.config_model.demand.hourly_schedule_library.get(
+                        schedule_name, {}
+                    ).get(day, [])[:24]
+                )
+            ]
+            if mode in self.OCCUPATIONAL_MODES
+            else [
+                index for index in range(7)
+            ]
+        )
         self.result = DemandObject(
             name=name,
             object_type=self.type_var.get() or "Other",
@@ -14264,10 +14837,7 @@ class DemandObjectDialog(tk.Toplevel):
             ),
             operating_days_per_week=len(operating_weekdays),
             operating_weekdays=operating_weekdays,
-            monthly_daily_demand_gallons=(
-                monthly_internal
-                if mode == "recurring_daily" and self.use_monthly_overrides_var.get() else {}
-            ),
+            monthly_daily_demand_gallons={},
             monthly_demand_gallons=(
                 monthly_internal if mode == "monthly_volume" else {}
             ),

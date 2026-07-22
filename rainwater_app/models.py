@@ -12,6 +12,9 @@ DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH = 1.28
 ENGLISH_UNIT_SYSTEM = "English (I-P)"
 METRIC_UNIT_SYSTEM = "Metric (SI)"
 UNIT_SYSTEMS = (ENGLISH_UNIT_SYSTEM, METRIC_UNIT_SYSTEM)
+FRACTIONAL_SCHEDULE_TYPE = "fractional"
+OCCUPANCY_SCHEDULE_TYPE = "occupancy"
+SCHEDULE_TYPES = (FRACTIONAL_SCHEDULE_TYPE, OCCUPANCY_SCHEDULE_TYPE)
 
 
 def normalize_unit_system(value: object) -> str:
@@ -35,7 +38,28 @@ def common_hourly_schedule_templates() -> Dict[str, Dict[str, List[float]]]:
         "Always on": default_hourly_weekly_fractions(),
         "Always off": {day: [0.0] * 24 for day in WEEKDAY_KEYS},
         "8 AM to 5 PM weekdays": weekday_business_hours,
+        "Always occupied": default_hourly_weekly_fractions(),
+        "Occupied 8 AM to 5 PM weekdays": weekday_business_hours,
     }
+
+
+def common_hourly_schedule_template_types() -> Dict[str, str]:
+    """Return the declared type for each built-in schedule template."""
+    return {
+        "Always on": FRACTIONAL_SCHEDULE_TYPE,
+        "Always off": FRACTIONAL_SCHEDULE_TYPE,
+        "8 AM to 5 PM weekdays": FRACTIONAL_SCHEDULE_TYPE,
+        "Always occupied": OCCUPANCY_SCHEDULE_TYPE,
+        "Occupied 8 AM to 5 PM weekdays": OCCUPANCY_SCHEDULE_TYPE,
+    }
+
+
+def normalize_schedule_type(value: object) -> str:
+    return (
+        OCCUPANCY_SCHEDULE_TYPE
+        if str(value).strip().casefold() == OCCUPANCY_SCHEDULE_TYPE
+        else FRACTIONAL_SCHEDULE_TYPE
+    )
 
 
 @dataclass
@@ -113,6 +137,7 @@ class DemandProfile:
     hourly_schedule_enabled: bool = False
     hourly_weekly_fractions: Dict[str, List[float]] = field(default_factory=default_hourly_weekly_fractions)
     hourly_schedule_library: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
+    hourly_schedule_types: Dict[str, str] = field(default_factory=dict)
     active_hourly_schedule_name: str = "Typical week demand"
     demand_objects: List[DemandObject] = field(default_factory=list)
     legacy_inputs_migrated: bool = False
@@ -148,6 +173,7 @@ def purge_unused_hourly_schedules(demand: DemandProfile) -> List[str]:
     unused_names = unused_hourly_schedule_names(demand)
     for name in unused_names:
         del demand.hourly_schedule_library[name]
+        demand.hourly_schedule_types.pop(name, None)
     return unused_names
 
 
@@ -160,6 +186,63 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
         demand.hourly_schedule_library[schedule_name] = {
             day: list(values) for day, values in demand.hourly_weekly_fractions.items()
         }
+        demand.hourly_schedule_types[schedule_name] = FRACTIONAL_SCHEDULE_TYPE
+    else:
+        demand.hourly_schedule_types.setdefault(
+            schedule_name, FRACTIONAL_SCHEDULE_TYPE
+        )
+    occupational_schedule_name = schedule_name
+    if normalize_schedule_type(
+        demand.hourly_schedule_types.get(schedule_name)
+    ) != OCCUPANCY_SCHEDULE_TYPE:
+        binary_schedule = {
+            day: [
+                1.0 if float(value) > 0.0 else 0.0
+                for value in demand.hourly_schedule_library[schedule_name].get(day, [])[:24]
+            ]
+            + [0.0]
+            * max(
+                24
+                - len(
+                    demand.hourly_schedule_library[schedule_name].get(day, [])[:24]
+                ),
+                0,
+            )
+            for day in WEEKDAY_KEYS
+        }
+        base_name = f"{schedule_name} occupancy"
+        occupational_schedule_name = base_name
+        suffix = 2
+        while occupational_schedule_name in demand.hourly_schedule_library:
+            occupational_schedule_name = f"{base_name} {suffix}"
+            suffix += 1
+        demand.hourly_schedule_library[occupational_schedule_name] = binary_schedule
+        demand.hourly_schedule_types[
+            occupational_schedule_name
+        ] = OCCUPANCY_SCHEDULE_TYPE
+    recurring_schedule_name = occupational_schedule_name
+    legacy_operating_days = min(
+        max(int(demand.daily_demand_days_per_week), 0), 7
+    )
+    if legacy_operating_days < 7:
+        recurring_schedule = {
+            day: (
+                list(demand.hourly_schedule_library[occupational_schedule_name][day])
+                if index < legacy_operating_days
+                else [0.0] * 24
+            )
+            for index, day in enumerate(WEEKDAY_KEYS)
+        }
+        base_name = f"{occupational_schedule_name} recurring days"
+        recurring_schedule_name = base_name
+        suffix = 2
+        while recurring_schedule_name in demand.hourly_schedule_library:
+            recurring_schedule_name = f"{base_name} {suffix}"
+            suffix += 1
+        demand.hourly_schedule_library[recurring_schedule_name] = recurring_schedule
+        demand.hourly_schedule_types[
+            recurring_schedule_name
+        ] = OCCUPANCY_SCHEDULE_TYPE
     created: list[int] = []
 
     def add(item: DemandObject) -> None:
@@ -170,7 +253,7 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
     simple_daily = max(float(demand.simple_daily_demand_gallons), 0.0)
     if simple_daily > 0.0:
         add(DemandObject(
-            "Simple recurring demand", "Other", schedule_name=schedule_name,
+            "Simple recurring demand", "Other", schedule_name=recurring_schedule_name,
             demand_mode="recurring_daily", recurring_daily_gallons=simple_daily,
             operating_days_per_week=min(max(int(demand.daily_demand_days_per_week), 0), 7),
         ))
@@ -191,13 +274,13 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
     operating_days = min(max(int(demand.daily_demand_days_per_week), 0), 7)
     if any(value > 0.0 for value in toilet_daily.values()):
         add(DemandObject(
-            "Toilet demand", "Toilet", schedule_name=schedule_name,
+            "Toilet demand", "Toilet", schedule_name=recurring_schedule_name,
             demand_mode="recurring_daily", operating_days_per_week=operating_days,
             monthly_daily_demand_gallons=toilet_daily,
         ))
     if any(value > 0.0 for value in urinal_daily.values()):
         add(DemandObject(
-            "Urinal demand", "Urinal", schedule_name=schedule_name,
+            "Urinal demand", "Urinal", schedule_name=recurring_schedule_name,
             demand_mode="recurring_daily", operating_days_per_week=operating_days,
             monthly_daily_demand_gallons=urinal_daily,
         ))
@@ -219,7 +302,7 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
         }
         if any(value > 0.0 for value in values.values()):
             add(DemandObject(
-                name, object_type, schedule_name=schedule_name,
+                name, object_type, schedule_name=occupational_schedule_name,
                 demand_mode="monthly_volume", monthly_demand_gallons=values,
             ))
 

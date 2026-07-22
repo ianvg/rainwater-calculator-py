@@ -87,26 +87,27 @@ def _demand_object_daily_value_for_date(
     if schedule is None and mode != "monthly_volume":
         return 0.0
     if mode == "recurring_daily":
-        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
-        if operating_weekdays is None:
-            operating_weekdays = range(
-                min(max(int(demand_object.operating_days_per_week), 0), 7)
-            )
-        if date.weekday() not in operating_weekdays:
-            return 0.0
-        month_value = demand_object.monthly_daily_demand_gallons.get(
+        day_key = WEEKDAY_KEYS[date.weekday()]
+        occupied = any(
+            float(value) > 0.0 for value in schedule.get(day_key, [])[:24]
+        )
+        daily_volume = demand_object.monthly_daily_demand_gallons.get(
             _month_index_key(date), demand_object.recurring_daily_gallons
         )
-        return max(float(month_value), 0.0)
+        return (
+            max(float(daily_volume), 0.0)
+            if occupied
+            else 0.0
+        )
     if mode == "fixture_usage":
-        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
-        if operating_weekdays is None:
-            operating_weekdays = range(
-                min(max(int(demand_object.operating_days_per_week), 0), 7)
-            )
+        day_key = WEEKDAY_KEYS[date.weekday()]
+        day_weights = [
+            min(max(float(value), 0.0), 1.0)
+            for value in schedule.get(day_key, [])[:24]
+        ]
         return (
             fixture_daily_demand_gallons(demand_object)
-            if date.weekday() in operating_weekdays
+            if any(day_weights)
             else 0.0
         )
     if mode == "monthly_volume":
@@ -177,31 +178,32 @@ def _demand_object_hourly_for_date(
         return np.asarray(multipliers, dtype=np.float64) * flow * 60.0
     daily_volume = 0.0
     if mode == "recurring_daily":
-        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
-        if operating_weekdays is None:
-            operating_weekdays = range(
-                min(max(int(demand_object.operating_days_per_week), 0), 7)
-            )
-        if date.weekday() in operating_weekdays:
-            daily_volume = max(float(demand_object.monthly_daily_demand_gallons.get(
+        if any(multipliers):
+            daily_value = demand_object.monthly_daily_demand_gallons.get(
                 _month_index_key(date), demand_object.recurring_daily_gallons
-            )), 0.0)
-    elif mode == "fixture_usage":
-        operating_weekdays = getattr(demand_object, "operating_weekdays", None)
-        if operating_weekdays is None:
-            operating_weekdays = range(
-                min(max(int(demand_object.operating_days_per_week), 0), 7)
             )
-        if date.weekday() in operating_weekdays:
+            daily_volume = max(
+                float(daily_value), 0.0
+            )
+    elif mode == "fixture_usage":
+        if any(multipliers):
             daily_volume = fixture_daily_demand_gallons(demand_object)
     elif mode == "monthly_volume":
         monthly = max(float(demand_object.monthly_demand_gallons.get(_month_index_key(date), 0.0)), 0.0)
         daily_volume = monthly / monthrange(date.year, date.month)[1]
     total_multiplier = sum(multipliers)
-    fractions = (
-        np.asarray(multipliers, dtype=np.float64) / total_multiplier
-        if total_multiplier > 0.0 else np.full(24, 1.0 / 24.0)
-    )
+    if mode == "fixture_usage" and total_multiplier > 0.0:
+        occupied = np.asarray(
+            [1.0 if value > 0.0 else 0.0 for value in multipliers],
+            dtype=np.float64,
+        )
+        fractions = occupied / float(occupied.sum())
+    elif total_multiplier > 0.0:
+        fractions = np.asarray(multipliers, dtype=np.float64) / total_multiplier
+    elif mode == "fixture_usage":
+        fractions = np.zeros(24, dtype=np.float64)
+    else:
+        fractions = np.full(24, 1.0 / 24.0)
     return fractions * daily_volume
 
 
