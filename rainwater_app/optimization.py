@@ -13,6 +13,14 @@ from .analysis_state import analysis_input_signature
 from .engine import PreparedHourlyInputs, prepare_hourly_inputs, simulate_hourly_indirect_aggregates
 from .financial import calculate_financial_results_from_annual_supply
 from .models import ProjectConfig
+from .equipment_catalog import (
+    built_in_equipment_library,
+    default_project_candidates,
+    effective_candidate_product,
+    evaluate_combination_compatibility,
+    evaluate_product_eligibility,
+    migrate_legacy_catalog,
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +28,7 @@ class PrimaryTankProduct:
     name: str
     capacity_gallons: float
     installed_cost: float
+    product_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -28,6 +37,18 @@ class FiltrationPumpProduct:
     capacity_gallons_per_hour: float
     power_kw: float
     installed_cost: float
+    product_id: str = ""
+
+
+@dataclass(frozen=True)
+class FiltrationUnitProduct:
+    name: str
+    capacity_gallons_per_hour: float
+    installed_cost: float
+    minimum_flow_gpm: float | None = None
+    maximum_flow_gpm: float | None = None
+    recovery_percent: float | None = None
+    product_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -35,6 +56,7 @@ class BoosterTankProduct:
     name: str
     capacity_gallons: float
     installed_cost: float
+    product_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -43,6 +65,7 @@ class OptimizationResult:
     feasible: bool
     primary_tank: PrimaryTankProduct
     filtration_pump: FiltrationPumpProduct
+    filtration_unit: FiltrationUnitProduct
     booster_tank: BoosterTankProduct
     reliability_percent: float
     average_annual_supplied_gallons: float
@@ -74,6 +97,10 @@ BOOSTER_TANK_CATALOG = (
     BoosterTankProduct("BT-100", 100.0, 1_000.0),
     BoosterTankProduct("BT-250", 250.0, 1_600.0),
 )
+FILTRATION_UNIT_CATALOG = (
+    FiltrationUnitProduct("FU-5-15", 900.0, 1_100.0, 5.0, 15.0),
+    FiltrationUnitProduct("FU-10-25", 1_500.0, 1_650.0, 10.0, 25.0),
+)
 
 
 _PREPARED_INPUT_CACHE: OrderedDict[str, PreparedHourlyInputs] = OrderedDict()
@@ -99,31 +126,65 @@ def optimize_indirect_system(
     *,
     primary_tanks: Sequence[PrimaryTankProduct] | None = None,
     filtration_pumps: Sequence[FiltrationPumpProduct] | None = None,
+    filtration_units: Sequence[FiltrationUnitProduct] | None = None,
     booster_tanks: Sequence[BoosterTankProduct] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> list[OptimizationResult]:
     settings = config.optimization_parameters
-    if primary_tanks is None or filtration_pumps is None or booster_tanks is None:
-        catalog = settings.catalog
-        if catalog:
-            primary_tanks = tuple(
-                PrimaryTankProduct(str(row["name"]), float(row["capacity"]), float(row["cost"]))
-                for row in catalog if row.get("category") == "Primary tank"
-            )
-            filtration_pumps = tuple(
-                FiltrationPumpProduct(
-                    str(row["name"]), float(row["capacity"]), float(row.get("power_kw", 0.0)), float(row["cost"])
-                ) for row in catalog if row.get("category") == "Filtration pump"
-            )
-            booster_tanks = tuple(
-                BoosterTankProduct(str(row["name"]), float(row["capacity"]), float(row["cost"]))
-                for row in catalog
-                if row.get("category") in {"Buffer tank", "Booster tank"}
-            )
-        else:
-            primary_tanks = PRIMARY_TANK_CATALOG
-            filtration_pumps = FILTRATION_PUMP_CATALOG
-            booster_tanks = BOOSTER_TANK_CATALOG
+    explicit_legacy_products = (
+        primary_tanks is not None and filtration_pumps is not None and booster_tanks is not None
+    )
+    candidate_products: dict[str, list[dict[str, object]]] = {}
+    if not explicit_legacy_products:
+        candidates = list(settings.equipment_candidates)
+        if not candidates and settings.catalog:
+            candidates = migrate_legacy_catalog(settings.catalog)
+        if not candidates:
+            candidates = default_project_candidates(built_in_equipment_library())
+        for candidate in candidates:
+            if candidate.get("disposition", "Candidate") == "Excluded":
+                continue
+            product = effective_candidate_product(candidate)
+            eligible, _reasons = evaluate_product_eligibility(product, settings.equipment_constraints)
+            if eligible and product.get("active", True):
+                candidate_products.setdefault(str(product["category"]), []).append(product)
+        for category, products_in_category in list(candidate_products.items()):
+            fixed_ids = {
+                str(item.get("product_id")) for item in candidates
+                if item.get("disposition") == "Fixed"
+            }
+            fixed = [item for item in products_in_category if str(item["id"]) in fixed_ids]
+            if fixed:
+                candidate_products[category] = fixed
+
+        def prop(item: dict[str, object], key: str, default: object = 0.0) -> object:
+            return dict(item.get("properties") or {}).get(key, default)
+
+        primary_tanks = tuple(
+            PrimaryTankProduct(str(item["model"]), float(item["capacity"]), float(item["installed_cost"]), str(item["id"]))
+            for item in candidate_products.get("Primary tank", [])
+        )
+        filtration_pumps = tuple(
+            FiltrationPumpProduct(str(item["model"]), float(item["capacity"]),
+                                  float(prop(item, "power_kw")), float(item["installed_cost"]), str(item["id"]))
+            for item in candidate_products.get("Filtration pump", [])
+        )
+        filtration_units = tuple(
+            FiltrationUnitProduct(
+                str(item["model"]), float(item["capacity"]), float(item["installed_cost"]),
+                _optional_float(prop(item, "minimum_flow_gpm", None)),
+                _optional_float(prop(item, "maximum_flow_gpm", None)),
+                _optional_float(prop(item, "recovery_percent", None)),
+                str(item["id"]),
+            ) for item in candidate_products.get("Filtration unit", [])
+        )
+        booster_tanks = tuple(
+            BoosterTankProduct(str(item["model"]), float(item["capacity"]), float(item["installed_cost"]), str(item["id"]))
+            for item in candidate_products.get("Buffer tank", [])
+        )
+    elif filtration_units is None:
+        # Preserve the public three-sequence API while four-category project catalogs migrate.
+        filtration_units = (FiltrationUnitProduct("Existing filtration", 1e12, 0.0),)
     if not 0.0 <= settings.minimum_reliability_percent <= 100.0:
         raise ValueError("Minimum reliability must be between 0% and 100%.")
     if settings.electricity_rate_per_kwh < 0.0:
@@ -140,13 +201,29 @@ def optimize_indirect_system(
         raise ValueError("Select a supported optimization objective.")
     if rainfall_df.empty:
         raise ValueError("Import daily rainfall data before running optimization.")
-    products = list(itertools.product(primary_tanks, filtration_pumps, booster_tanks))
+    products = list(itertools.product(primary_tanks, filtration_pumps, filtration_units, booster_tanks))
+    if candidate_products:
+        source_by_key = {
+            str(item["id"]): item
+            for values in candidate_products.values() for item in values
+        }
+        products = [
+            combination for combination in products
+            if evaluate_combination_compatibility((
+                source_by_key[combination[0].product_id],
+                source_by_key[combination[1].product_id],
+                source_by_key[combination[2].product_id],
+                source_by_key[combination[3].product_id],
+            ), settings.equipment_constraints)[0]
+        ]
     if not products:
-        raise ValueError("The optimization catalog must contain all three product types.")
+        raise ValueError("The project needs an eligible product in all four categories and at least one compatible combination.")
     if any(item.capacity_gallons <= 0.0 or item.installed_cost < 0.0 for item in primary_tanks):
         raise ValueError("Primary tank catalog values must have positive capacity and non-negative cost.")
     if any(item.capacity_gallons_per_hour <= 0.0 or item.power_kw < 0.0 or item.installed_cost < 0.0 for item in filtration_pumps):
         raise ValueError("Filtration pump catalog values must have positive capacity and non-negative power and cost.")
+    if any(item.capacity_gallons_per_hour <= 0.0 or item.installed_cost < 0.0 for item in filtration_units):
+        raise ValueError("Filtration-unit catalog values must have positive capacity and non-negative cost.")
     if any(item.capacity_gallons <= 0.0 or item.installed_cost < 0.0 for item in booster_tanks):
         raise ValueError("Buffer tank catalog values must have positive capacity and non-negative cost.")
     financial = config.financial_parameters
@@ -160,10 +237,12 @@ def optimize_indirect_system(
         raise ValueError("Sewer-eligible supply must be between 0% and 100%.")
     raw: list[OptimizationResult] = []
     prepared = _cached_prepared_inputs(config, rainfall_df)
-    for index, (tank, pump, booster) in enumerate(products, start=1):
+    for index, (tank, pump, filtration, booster) in enumerate(products, start=1):
         candidate = copy.deepcopy(config)
         candidate.system_type = "Indirect system"
         candidate.system_parameters.filtration_pump_capacity_gallons_per_hour = pump.capacity_gallons_per_hour
+        if filtration.recovery_percent is not None:
+            candidate.system_parameters.filter_recovery_percent = filtration.recovery_percent
         candidate.system_parameters.booster_tank_size_gallons = booster.capacity_gallons
         aggregates = simulate_hourly_indirect_aggregates(candidate, prepared, tank.capacity_gallons)
         reliability = aggregates.reliability_percent
@@ -172,7 +251,8 @@ def optimize_indirect_system(
         municipal_makeup = aggregates.average_annual_municipal_makeup_gallons
         overflow = aggregates.average_annual_overflow_gallons
         annual_energy = aggregates.average_annual_pump_flow_gallons / pump.capacity_gallons_per_hour * pump.power_kw
-        installed = financial.installed_cost + tank.installed_cost + pump.installed_cost + booster.installed_cost
+        installed = (financial.installed_cost + tank.installed_cost + pump.installed_cost
+                     + filtration.installed_cost + booster.installed_cost)
         lifecycle = calculate_financial_results_from_annual_supply(
             supplied,
             average_annual_sewer_eligible_supplied_gallons=sewer_eligible_supplied,
@@ -211,7 +291,7 @@ def optimize_indirect_system(
             feasible = feasible and net_savings > 0.0
         raw.append(
             OptimizationResult(
-                None, feasible, tank, pump, booster, reliability, supplied,
+                None, feasible, tank, pump, filtration, booster, reliability, supplied,
                 annual_energy, installed, net_savings, payback, municipal_makeup,
                 overflow, period_benefit, lifecycle.lifecycle_net_present_value,
                 lifecycle.internal_rate_of_return_percent,
@@ -240,7 +320,7 @@ def optimize_indirect_system(
         ranked.append(
             OptimizationResult(
                 rank if item.feasible else None, item.feasible, item.primary_tank,
-                item.filtration_pump, item.booster_tank, item.reliability_percent,
+                item.filtration_pump, item.filtration_unit, item.booster_tank, item.reliability_percent,
                 item.average_annual_supplied_gallons, item.average_annual_energy_kwh,
                 item.total_installed_cost, item.net_annual_savings,
                 item.simple_payback_years,
@@ -253,3 +333,7 @@ def optimize_indirect_system(
             )
         )
     return ranked
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value in (None, "") else float(value)

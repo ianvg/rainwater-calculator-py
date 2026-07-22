@@ -369,6 +369,8 @@ class OptimizationParameters:
     maximum_installed_cost: float | None = None
     require_positive_net_savings: bool = False
     catalog: List[Dict[str, object]] = field(default_factory=list)
+    equipment_candidates: List[Dict[str, object]] = field(default_factory=list)
+    equipment_constraints: Dict[str, object] = field(default_factory=dict)
 
 
 @dataclass

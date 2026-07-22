@@ -7,6 +7,7 @@ from rainwater_app.rainfall import (
     disaggregate_daily_rainfall_hyetos,
     expand_hourly_rainfall,
     has_hourly_rainfall,
+    load_hourly_rainfall_csv,
     load_rainfall_csv,
     remove_hourly_rainfall,
 )
@@ -78,3 +79,22 @@ def test_csv_loader_retains_nonnumeric_precipitation_as_known_missing() -> None:
 
     assert rainfall["Precipitation"].tolist() == [0.2, 0.0]
     assert rainfall.attrs["known_missing_dates"] == ["2025-01-02"]
+
+
+def test_hourly_csv_loader_detects_subdaily_timestamps_and_preserves_totals() -> None:
+    rainfall = load_hourly_rainfall_csv(
+        b"Date,Precipitation\n"
+        b"2025-01-01 00:00,0.2\n"
+        b"2025-01-01 01:00,0.3\n"
+        b"2025-01-02 00:00,0.1\n"
+    )
+
+    assert rainfall.attrs["temporal_resolution"] == "hourly"
+    assert rainfall["Precipitation"].tolist() == pytest.approx([0.5, 0.1])
+    assert rainfall.loc[0, "HourlyPrecipitation00"] == pytest.approx(0.2)
+    assert rainfall.loc[0, "HourlyPrecipitation01"] == pytest.approx(0.3)
+
+
+def test_hourly_csv_loader_rejects_daily_timestamps() -> None:
+    with pytest.raises(ValueError, match="subdaily timestamps"):
+        load_hourly_rainfall_csv(b"Date,Precipitation\n2025-01-01,0.2\n")

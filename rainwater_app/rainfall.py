@@ -189,3 +189,32 @@ def load_rainfall_csv(file_bytes: bytes) -> pd.DataFrame:
         value.date().isoformat() for value in missing_dates
     ]
     return result
+
+
+def load_hourly_rainfall_csv(file_bytes: bytes) -> pd.DataFrame:
+    """Load a CSV with one timestamped rainfall value per row.
+
+    The returned frame uses the application's daily-row representation and
+    includes 24 hourly precipitation columns for each calendar day.
+    """
+    rainfall = load_rainfall_csv(file_bytes)
+    timestamps = rainfall["Date"]
+    if not timestamps.dt.normalize().duplicated().any() and not (
+        timestamps.dt.hour.ne(0) | timestamps.dt.minute.ne(0) | timestamps.dt.second.ne(0)
+    ).any():
+        raise ValueError("Hourly rainfall CSV must contain subdaily timestamps.")
+
+    rainfall = rainfall.copy()
+    rainfall["Day"] = rainfall["Date"].dt.normalize()
+    rainfall["Hour"] = rainfall["Date"].dt.hour
+    hourly = rainfall.pivot_table(
+        index="Day", columns="Hour", values="Precipitation", aggfunc="sum", fill_value=0.0
+    )
+    result = pd.DataFrame({"Date": hourly.index})
+    for hour, column in enumerate(HOURLY_PRECIPITATION_COLUMNS):
+        result[column] = hourly.get(hour, pd.Series(0.0, index=hourly.index)).to_numpy()
+    result["Precipitation"] = result.loc[:, HOURLY_PRECIPITATION_COLUMNS].sum(axis=1)
+    result = result.reset_index(drop=True)
+    result.attrs.update(rainfall.attrs)
+    result.attrs["temporal_resolution"] = "hourly"
+    return result

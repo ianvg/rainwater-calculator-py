@@ -28,13 +28,20 @@ The **Optimization problem definition and assumptions** table shows the actual v
 
 ## Design variables
 
-The current optimizer leaves three discrete catalog selections open:
+The current optimizer leaves four discrete equipment selections open:
 
 - Primary tank product and capacity.
 - Filtration pump product, capacity, power, and cost.
+- Filtration unit product, compatible flow range, optional recovery, and cost.
 - Buffer tank product and capacity.
 
-Select **Edit sample catalog** to view or bulk-edit comma-separated catalog rows in a separate window. Each row contains category, product name, capacity, installed cost, and power. Primary- and buffer-tank capacities use gallons; filtration-pump capacity uses gallons per hour; power uses kW. The catalog requires at least one product in every category and is saved with the project.
+The equipment workspace is nested under **Optimization problem definition and assumptions**. **Equipment library** contains reusable products shared by projects. Applying a product creates a project snapshot, so later library edits never silently change an existing analysis. Select a project product and choose **Update from library** to accept current library values explicitly; any project overrides remain in effect. **Edit project copy** can change the effective name, capacity, cost, or power without changing the shared library.
+
+**Project candidates** classifies applied products as **Candidate**, **Fixed**, or **Excluded**. A fixed product is the only product considered in its category. The eligibility column distinguishes products accepted by the project constraints, accepted with warnings, and excluded as ineligible. The optimizer requires an eligible primary tank, filtration pump, filtration unit, and buffer tank.
+
+**Project constraints** supports approved vendors, required tags and standards, voltage, phase, pressure class, connection size, optional dimensional limits, access clearance, and project notes. Missing product values pass with a warning by default. Enable **Require values for active constraints** to make missing values ineligible. Dimensions in the shared library and project constraints use inches and square inches.
+
+Pump-to-filtration-unit flow checking is optional. When enabled, the pump rated flow must fall within the filtration unit's minimum and maximum compatible flow. Products may also declare required companion equipment categories. **Compatibility review** explains product warnings and rejected combinations before an optimization run.
 
 The supplied catalog is illustrative. Its product identifiers, capacities, power, and prices are development assumptions, not vendor data, quotations, or engineering recommendations.
 
@@ -86,7 +93,7 @@ Current model assumptions that materially affect interpretation are:
 
 ## Candidate evaluation
 
-For every primary-tank, filtration-pump, and buffer-tank combination, the application:
+For every eligible and compatible primary-tank, filtration-pump, filtration-unit, and buffer-tank combination, the application:
 
 1. Creates an indirect-system candidate.
 2. Runs the same hourly mass-balance rules in aggregate-only mode, without constructing a full timestep table.

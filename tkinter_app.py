@@ -5,6 +5,7 @@ import copy
 import datetime as dt
 import http.server
 import importlib.metadata as importlib_metadata
+import itertools
 import json
 import math
 import os
@@ -66,6 +67,21 @@ from rainwater_app.engine import (
     demand_object_sewer_eligible_fraction,
     simulate_hourly_tank,
 )
+from rainwater_app.equipment_catalog import (
+    CANDIDATE_DISPOSITIONS,
+    EQUIPMENT_CATEGORIES,
+    built_in_equipment_library,
+    candidate_from_product,
+    default_project_candidates,
+    effective_candidate_product,
+    evaluate_combination_compatibility,
+    evaluate_product_eligibility,
+    load_equipment_library,
+    normalize_product,
+    normalized_constraints,
+    save_equipment_library,
+    update_candidate_snapshot,
+)
 from rainwater_app.execution_log import (
     DETAIL_LEVELS,
     ExecutionLogEntry,
@@ -106,6 +122,7 @@ from rainwater_app.rainfall import (
     disaggregate_daily_rainfall_hyetos,
     has_hourly_rainfall,
     load_rainfall_csv,
+    load_hourly_rainfall_csv,
     remove_hourly_rainfall,
 )
 from rainwater_app.rainfall_quality import (
@@ -177,12 +194,7 @@ from rainwater_app.units import (
     volume_to_internal,
     volume_unit,
 )
-from rainwater_app.optimization import (
-    BOOSTER_TANK_CATALOG,
-    FILTRATION_PUMP_CATALOG,
-    PRIMARY_TANK_CATALOG,
-    optimize_indirect_system,
-)
+from rainwater_app.optimization import optimize_indirect_system
 
 APP_TITLE = "Rainwater Harvesting Calculator"
 SYSTEM_ANIMATION_FRAME_MS = 40
@@ -214,6 +226,14 @@ SCHEDULE_TYPE_LABELS = {
 SCHEDULE_TYPE_BY_LABEL = {
     label: schedule_type for schedule_type, label in SCHEDULE_TYPE_LABELS.items()
 }
+
+
+def _constraint_display_value(value: object) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(item) for item in value)
+    return str(value)
 
 
 def _normalize_text_scale_percent(value: object) -> int:
@@ -259,6 +279,30 @@ PROJECT_FORM_VARIABLES = (
 ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
 ECCC_SOURCE_URL = "https://climate.weather.gc.ca/"
 OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+OPTIMIZATION_SECTION_HELP = {
+    "Problem assumptions": (
+        "Design variables remain open to the optimizer. Fixed project inputs are read directly from their "
+        "source tabs so duplicate values cannot drift out of sync."
+    ),
+    "Objectives": (
+        "The objective defines what should be made best. It ranks the designs that satisfy every active "
+        "constraint. Only one objective is used for each optimization run."
+    ),
+    "Constraints": (
+        "Constraints define the limits that every feasible design must satisfy. Minimum rainwater reliability "
+        "is always active. Maximum annual municipal makeup, maximum installed cost, and positive net annual "
+        "savings are optional constraints."
+    ),
+    "Catalog": (
+        "The shared library supplies reusable primary tanks, filtration pumps, filtration units, and buffer "
+        "tanks. Applying a product creates a project snapshot. Project eligibility and compatibility determine "
+        "which combinations the optimizer may evaluate. Starter values are illustrative, not vendor quotations."
+    ),
+    "Results": (
+        "Results show the catalog combinations evaluated by the optimizer. Feasible designs are ranked by the "
+        "selected objective; designs that do not satisfy every active constraint remain unranked."
+    ),
+}
 ABOUT_TEXT = """RWH Calculator
 
 Copyright (c) 2026 RWH Calculator contributors
@@ -770,7 +814,12 @@ class RainwaterTkApp(tk.Tk):
         self.custom_schedule_templates = self._load_custom_schedule_templates()
         self.custom_demand_object_library_path = application_state_dir / "demand_object_library.json"
         self.custom_demand_object_templates = self._load_custom_demand_object_templates()
+        self.equipment_library_path = application_state_dir / "equipment_library.json"
+        self.equipment_library = load_equipment_library(self.equipment_library_path)
         self.config_model = default_project_config()
+        self.config_model.optimization_parameters.equipment_candidates = default_project_candidates(
+            self.equipment_library
+        )
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
         self.curve_df = pd.DataFrame()
         self.results_df = pd.DataFrame()
@@ -876,7 +925,7 @@ class RainwaterTkApp(tk.Tk):
         self.applied_rainfall_timing_var = tk.StringVar()
         self.hourly_demand_schedule_selection_var = tk.StringVar()
         self.hourly_profile_reference_var = tk.StringVar(
-            value="Hourly profile: Not generated - manage in Synthetic hourly rainfall."
+            value="Hourly profile: Not generated - manage in Hourly rainfall."
         )
         self.hourly_profile_preview_var = tk.StringVar(
             value="Generate a profile to preview its distribution by hour."
@@ -952,17 +1001,33 @@ class RainwaterTkApp(tk.Tk):
             value="" if optimization.maximum_installed_cost is None else str(optimization.maximum_installed_cost)
         )
         self.optimization_positive_savings_var = tk.BooleanVar(value=optimization.require_positive_net_savings)
+        equipment_constraints = normalized_constraints(optimization.equipment_constraints)
+        self.equipment_library_search_var = tk.StringVar()
+        self.equipment_library_category_var = tk.StringVar(value="All categories")
+        self.equipment_require_values_var = tk.BooleanVar(
+            value=bool(equipment_constraints["require_constraint_values"])
+        )
+        self.equipment_flow_compatibility_var = tk.BooleanVar(
+            value=bool(equipment_constraints["enforce_flow_compatibility"])
+        )
+        self.equipment_constraint_vars = {
+            key: tk.StringVar(value=_constraint_display_value(equipment_constraints.get(key)))
+            for key in (
+                "approved_vendors", "required_tags", "required_standards", "required_voltage", "required_phase",
+                "required_pressure_class", "required_connection_size", "maximum_length",
+                "maximum_width", "maximum_height", "maximum_footprint",
+                "minimum_access_clearance", "project_standards",
+            )
+        }
         self.optimization_status_var = tk.StringVar(
-            value="Uses 27 combinations from an illustrative built-in product catalog."
+            value="Review the project equipment candidates before running optimization."
         )
         self.rainfall_summary_var = tk.StringVar(value="No rainfall file loaded")
         self.rainfall_quality_var = tk.StringVar(value="Quality assessment unavailable")
-        self.rainfall_data_type_var = tk.StringVar(
-            value=rainfall_data_type_label(self.config_model.rainfall_data_type)
-        )
-        self.rainfall_resolution_var = tk.StringVar(value="Daily")
-        self.rainfall_timezone_var = tk.StringVar(value=self.config_model.rainfall_timezone)
-        self.rainfall_timing_var = tk.StringVar(value=self.config_model.rainfall_timing_type)
+        self.rainfall_data_type_var = tk.StringVar(value="--")
+        self.rainfall_resolution_var = tk.StringVar(value="--")
+        self.rainfall_timezone_var = tk.StringVar(value="--")
+        self.rainfall_timing_var = tk.StringVar(value="--")
         self.reliability_var = tk.StringVar(value="Reliability: --")
         self.average_annual_precipitation_var = tk.StringVar(value="Average annual precipitation: --")
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
@@ -3413,6 +3478,444 @@ class RainwaterTkApp(tk.Tk):
             return supplied > 1e-9
         return False
 
+    def _build_project_candidates_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        self.project_candidates_tree = ttk.Treeview(
+            parent, columns=("state", "category", "product", "eligibility", "reason"),
+            show="headings", height=5, selectmode="extended",
+        )
+        for column, label, width in (
+            ("state", "Use", 75), ("category", "Category", 120), ("product", "Product", 150),
+            ("eligibility", "Eligibility", 105), ("reason", "Reason / warning", 430),
+        ):
+            self.project_candidates_tree.heading(column, text=label)
+            self.project_candidates_tree.column(column, width=width, anchor="w")
+        self.project_candidates_tree.grid(row=0, column=0, sticky="ew")
+        scroll = ttk.Scrollbar(parent, orient="vertical", command=self.project_candidates_tree.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.project_candidates_tree.configure(yscrollcommand=scroll.set)
+        buttons = ttk.Frame(parent)
+        buttons.grid(row=1, column=0, sticky="ew", pady=(5, 0))
+        for label, state in (("Use as candidate", "Candidate"), ("Fix selection", "Fixed"), ("Exclude", "Excluded")):
+            ttk.Button(buttons, text=label, command=lambda value=state: self._set_candidate_disposition(value)).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Remove from project", command=self._remove_project_candidates).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Edit project copy", command=self._load_candidate_into_editor).pack(side="left", padx=(0, 6))
+        ttk.Button(buttons, text="Update from library", command=self._update_candidates_from_library).pack(side="left")
+        ttk.Label(buttons, text="Project overrides remain after a library update.", foreground="#667278").pack(side="right")
+        editor = ttk.Frame(parent)
+        editor.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        self.candidate_override_vars = {key: tk.StringVar() for key in ("model", "capacity", "installed_cost", "power_kw", "exclusion_reason")}
+        for index, (key, label) in enumerate((
+            ("model", "Project name"), ("capacity", "Capacity"),
+            ("installed_cost", "Installed cost"), ("power_kw", "Power kW"),
+        )):
+            ttk.Label(editor, text=label).grid(row=0, column=index * 2, sticky="w", padx=(0 if index == 0 else 8, 3))
+            ttk.Entry(editor, textvariable=self.candidate_override_vars[key], width=15).grid(row=0, column=index * 2 + 1, sticky="w")
+        ttk.Button(editor, text="Save project override", command=self._save_candidate_override).grid(row=0, column=8, padx=(10, 0))
+        ttk.Button(editor, text="Clear overrides", command=self._clear_candidate_overrides).grid(row=0, column=9, padx=(6, 0))
+        ttk.Label(editor, text="Exclusion reason").grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(editor, textvariable=self.candidate_override_vars["exclusion_reason"], width=55).grid(
+            row=1, column=1, columnspan=5, sticky="ew", pady=(4, 0)
+        )
+
+    def _build_equipment_library_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        toolbar = ttk.Frame(parent)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Label(toolbar, text="Search").pack(side="left")
+        search = ttk.Entry(toolbar, textvariable=self.equipment_library_search_var, width=24)
+        search.pack(side="left", padx=(5, 10))
+        search.bind("<KeyRelease>", lambda _event: self._refresh_equipment_library_tree())
+        category = ttk.Combobox(
+            toolbar, textvariable=self.equipment_library_category_var,
+            values=("All categories", *EQUIPMENT_CATEGORIES), state="readonly", width=18,
+        )
+        category.pack(side="left")
+        category.bind("<<ComboboxSelected>>", lambda _event: self._refresh_equipment_library_tree())
+        ttk.Button(toolbar, text="Apply selected to project", command=self._apply_library_selection).pack(side="right")
+        self.equipment_library_tree = ttk.Treeview(
+            parent, columns=("category", "manufacturer", "model", "capacity", "cost"),
+            show="headings", height=4, selectmode="extended",
+        )
+        for column, label, width in (
+            ("category", "Category", 125), ("manufacturer", "Manufacturer", 130),
+            ("model", "Model", 150), ("capacity", "Capacity", 100), ("cost", "Installed cost", 105),
+        ):
+            self.equipment_library_tree.heading(column, text=label)
+            self.equipment_library_tree.column(column, width=width, anchor="w")
+        self.equipment_library_tree.grid(row=1, column=0, sticky="ew")
+        self.equipment_library_tree.bind("<<TreeviewSelect>>", lambda _event: self._load_library_editor())
+        self.library_editor_vars = {key: tk.StringVar() for key in (
+            "id", "category", "manufacturer", "model", "capacity", "installed_cost", "power_kw",
+            "minimum_flow_gpm", "maximum_flow_gpm", "voltage", "phase", "pressure_class",
+            "connection_size", "length", "width", "height", "access_clearance", "tags",
+            "required_companion_categories", "standards",
+        )}
+        editor = ttk.Frame(parent)
+        editor.grid(row=2, column=0, sticky="ew", pady=(5, 0))
+        fields = (
+            ("id", "Stable ID"), ("category", "Category"), ("manufacturer", "Manufacturer"),
+            ("model", "Model"), ("capacity", "Capacity"), ("installed_cost", "Cost"),
+            ("power_kw", "Power kW"), ("minimum_flow_gpm", "Min flow GPM"),
+            ("maximum_flow_gpm", "Max flow GPM"), ("voltage", "Voltage"), ("phase", "Phase"),
+            ("pressure_class", "Pressure class"), ("connection_size", "Connection size"),
+            ("length", "Length (in)"), ("width", "Width (in)"), ("height", "Height (in)"),
+            ("access_clearance", "Access clearance (in)"), ("tags", "Tags"),
+            ("required_companion_categories", "Required companions"),
+            ("standards", "Standards"),
+        )
+        for index, (key, label) in enumerate(fields):
+            row, column = divmod(index, 7)
+            ttk.Label(editor, text=label).grid(row=row * 2, column=column, sticky="w", padx=(0, 6))
+            if key == "category":
+                widget = ttk.Combobox(editor, textvariable=self.library_editor_vars[key], values=EQUIPMENT_CATEGORIES, state="readonly", width=15)
+            else:
+                widget = ttk.Entry(editor, textvariable=self.library_editor_vars[key], width=16)
+            widget.grid(row=row * 2 + 1, column=column, sticky="w", padx=(0, 6))
+        actions = ttk.Frame(parent)
+        actions.grid(row=3, column=0, sticky="ew", pady=(5, 0))
+        ttk.Button(actions, text="New product", command=self._new_library_product).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Save product", command=self._save_library_product).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Delete product", command=self._delete_library_product).pack(side="left", padx=(0, 6))
+        ttk.Button(actions, text="Add/update starter products", command=self._update_shared_library).pack(side="left")
+
+    def _build_equipment_constraints_tab(self, parent: ttk.Frame) -> None:
+        ttk.Checkbutton(parent, text="Enforce pump-to-filtration-unit flow ranges",
+                        variable=self.equipment_flow_compatibility_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(
+            parent,
+            text="Require values for active constraints (otherwise missing values pass with a warning)",
+            variable=self.equipment_require_values_var,
+        ).grid(row=1, column=0, columnspan=4, sticky="w")
+        fields = (
+            ("approved_vendors", "Approved vendors (comma-separated)"),
+            ("required_tags", "Required tags (comma-separated)"),
+            ("required_standards", "Required standards (comma-separated)"),
+            ("required_voltage", "Voltage"), ("required_phase", "Phase"),
+            ("required_pressure_class", "Pressure class"),
+            ("required_connection_size", "Connection size"),
+            ("maximum_length", "Maximum length (in)"), ("maximum_width", "Maximum width (in)"),
+            ("maximum_height", "Maximum height (in)"), ("maximum_footprint", "Maximum footprint (in²)"),
+            ("minimum_access_clearance", "Minimum access clearance (in)"),
+            ("project_standards", "Project standards / notes"),
+        )
+        for index, (key, label) in enumerate(fields):
+            row, pair = divmod(index, 3)
+            column = pair * 2
+            ttk.Label(parent, text=label).grid(row=row + 2, column=column, sticky="w", padx=(0 if pair == 0 else 12, 4), pady=2)
+            ttk.Entry(parent, textvariable=self.equipment_constraint_vars[key], width=24).grid(row=row + 2, column=column + 1, sticky="w", pady=2)
+        ttk.Button(parent, text="Apply project constraints", command=self._apply_equipment_constraints).grid(
+            row=7, column=0, sticky="w", pady=(6, 0)
+        )
+
+    def _build_compatibility_review_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        self.compatibility_summary_var = tk.StringVar(value="Compatibility has not been reviewed.")
+        ttk.Label(parent, textvariable=self.compatibility_summary_var, foreground="#667278").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.compatibility_review_tree = ttk.Treeview(
+            parent, columns=("scope", "items", "status", "reason"), show="headings", height=6,
+        )
+        for column, label, width in (
+            ("scope", "Review", 100), ("items", "Equipment", 300),
+            ("status", "Status", 95), ("reason", "Reason / warning", 450),
+        ):
+            self.compatibility_review_tree.heading(column, text=label)
+            self.compatibility_review_tree.column(column, width=width, anchor="w")
+        self.compatibility_review_tree.grid(row=1, column=0, sticky="ew")
+        ttk.Button(parent, text="Refresh review", command=self._refresh_equipment_catalog_views).grid(row=2, column=0, sticky="w", pady=(5, 0))
+
+    def _show_equipment_candidates(self) -> None:
+        self.optimization_catalog_notebook.select(1)
+        self._refresh_equipment_catalog_views()
+
+    def _project_candidates(self) -> list[dict[str, object]]:
+        settings = self.config_model.optimization_parameters
+        if not settings.equipment_candidates:
+            if settings.catalog:
+                from rainwater_app.equipment_catalog import migrate_legacy_catalog
+                settings.equipment_candidates = migrate_legacy_catalog(settings.catalog)
+            else:
+                settings.equipment_candidates = default_project_candidates(self.equipment_library)
+        return settings.equipment_candidates
+
+    def _selected_candidate_indices(self) -> list[int]:
+        return [int(item) for item in self.project_candidates_tree.selection()]
+
+    def _set_candidate_disposition(self, disposition: str) -> None:
+        candidates = self._project_candidates()
+        for index in self._selected_candidate_indices():
+            if disposition == "Fixed":
+                category = effective_candidate_product(candidates[index])["category"]
+                for other_index, other in enumerate(candidates):
+                    if other_index != index and effective_candidate_product(other)["category"] == category and other.get("disposition") == "Fixed":
+                        other["disposition"] = "Candidate"
+            candidates[index]["disposition"] = disposition
+            if disposition != "Excluded":
+                candidates[index]["exclusion_reason"] = ""
+        self._refresh_equipment_catalog_views()
+
+    def _remove_project_candidates(self) -> None:
+        candidates = self._project_candidates()
+        for index in sorted(self._selected_candidate_indices(), reverse=True):
+            candidates.pop(index)
+        self._refresh_equipment_catalog_views()
+
+    def _load_candidate_into_editor(self) -> None:
+        selected = self._selected_candidate_indices()
+        if len(selected) != 1:
+            return
+        product = effective_candidate_product(self._project_candidates()[selected[0]])
+        for key in ("model", "capacity", "installed_cost"):
+            self.candidate_override_vars[key].set(str(product.get(key, "")))
+        self.candidate_override_vars["power_kw"].set(str(product["properties"].get("power_kw", "")))
+        self.candidate_override_vars["exclusion_reason"].set(
+            str(self._project_candidates()[selected[0]].get("exclusion_reason", ""))
+        )
+
+    def _save_candidate_override(self) -> None:
+        selected = self._selected_candidate_indices()
+        if len(selected) != 1:
+            messagebox.showinfo(APP_TITLE, "Select one project candidate to override.", parent=self)
+            return
+        try:
+            overrides = {
+                "model": self.candidate_override_vars["model"].get().strip(),
+                "capacity": float(self.candidate_override_vars["capacity"].get()),
+                "installed_cost": float(self.candidate_override_vars["installed_cost"].get()),
+                "properties": {"power_kw": float(self.candidate_override_vars["power_kw"].get() or 0)},
+            }
+            if not overrides["model"] or overrides["capacity"] <= 0 or overrides["installed_cost"] < 0:
+                raise ValueError
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Enter a name, positive capacity, non-negative cost and power.", parent=self)
+            return
+        self._project_candidates()[selected[0]]["project_overrides"] = overrides
+        self._project_candidates()[selected[0]]["exclusion_reason"] = (
+            self.candidate_override_vars["exclusion_reason"].get().strip()
+        )
+        self._refresh_equipment_catalog_views()
+
+    def _clear_candidate_overrides(self) -> None:
+        for index in self._selected_candidate_indices():
+            self._project_candidates()[index]["project_overrides"] = {}
+        self._refresh_equipment_catalog_views()
+
+    def _update_candidates_from_library(self) -> None:
+        by_id = {str(item["id"]): item for item in self.equipment_library}
+        updated = 0
+        for index in self._selected_candidate_indices():
+            candidate = self._project_candidates()[index]
+            product = by_id.get(str(candidate.get("product_id")))
+            if product:
+                self._project_candidates()[index] = update_candidate_snapshot(candidate, product)
+                updated += 1
+        self.optimization_status_var.set(f"Updated {updated} project snapshot(s); project overrides were preserved.")
+        self._refresh_equipment_catalog_views()
+
+    def _refresh_equipment_library_tree(self) -> None:
+        if not hasattr(self, "equipment_library_tree"):
+            return
+        query = self.equipment_library_search_var.get().strip().casefold()
+        category = self.equipment_library_category_var.get()
+        self.equipment_library_tree.delete(*self.equipment_library_tree.get_children())
+        for item in self.equipment_library:
+            haystack = " ".join((str(item["manufacturer"]), str(item["model"]), str(item["category"]))).casefold()
+            if query and query not in haystack:
+                continue
+            if category != "All categories" and item["category"] != category:
+                continue
+            self.equipment_library_tree.insert("", "end", iid=str(item["id"]), values=(
+                item["category"], item["manufacturer"], item["model"], f"{float(item['capacity']):g}",
+                f"{float(item['installed_cost']):,.2f}",
+            ))
+
+    def _load_library_editor(self) -> None:
+        selection = self.equipment_library_tree.selection()
+        if len(selection) != 1:
+            return
+        item = next(product for product in self.equipment_library if str(product["id"]) == selection[0])
+        props, dimensions = item["properties"], item["dimensions"]
+        values = {**item, **props, **dimensions}
+        values["tags"] = ", ".join(item["tags"])
+        values["standards"] = ", ".join(item["standards"])
+        values["required_companion_categories"] = ", ".join(props.get("required_companion_categories", []))
+        for key, variable in self.library_editor_vars.items():
+            variable.set(_constraint_display_value(values.get(key)))
+
+    def _new_library_product(self) -> None:
+        for variable in self.library_editor_vars.values():
+            variable.set("")
+        self.library_editor_vars["category"].set(EQUIPMENT_CATEGORIES[0])
+
+    @staticmethod
+    def _optional_editor_number(value: str) -> float | None:
+        return None if not value.strip() else float(value)
+
+    def _library_product_from_editor(self) -> dict[str, object]:
+        product_id = self.library_editor_vars["id"].get().strip()
+        if not product_id:
+            raise ValueError("Enter a stable product ID.")
+        properties = {
+            key: self._optional_editor_number(self.library_editor_vars[key].get())
+            for key in ("power_kw", "minimum_flow_gpm", "maximum_flow_gpm")
+        }
+        properties.update({key: self.library_editor_vars[key].get().strip() for key in (
+            "voltage", "phase", "pressure_class", "connection_size",
+        )})
+        properties["required_companion_categories"] = [
+            value.strip() for value in self.library_editor_vars["required_companion_categories"].get().split(",") if value.strip()
+        ]
+        dimensions = {
+            key: self._optional_editor_number(self.library_editor_vars[key].get())
+            for key in ("length", "width", "height", "access_clearance")
+        }
+        return normalize_product({
+            "id": product_id, "category": self.library_editor_vars["category"].get(),
+            "manufacturer": self.library_editor_vars["manufacturer"].get(),
+            "model": self.library_editor_vars["model"].get(),
+            "capacity": float(self.library_editor_vars["capacity"].get()),
+            "installed_cost": float(self.library_editor_vars["installed_cost"].get()),
+            "properties": {key: value for key, value in properties.items() if value not in (None, "")},
+            "dimensions": {key: value for key, value in dimensions.items() if value is not None},
+            "tags": [value.strip() for value in self.library_editor_vars["tags"].get().split(",") if value.strip()],
+            "standards": [value.strip() for value in self.library_editor_vars["standards"].get().split(",") if value.strip()],
+            "active": True,
+        })
+
+    def _save_library_product(self) -> None:
+        try:
+            product = self._library_product_from_editor()
+            existing = next((index for index, item in enumerate(self.equipment_library) if item["id"] == product["id"]), None)
+            proposed = list(self.equipment_library)
+            if existing is None:
+                proposed.append(product)
+            else:
+                proposed[existing] = product
+            save_equipment_library(self.equipment_library_path, proposed)
+        except (ValueError, OSError) as exc:
+            messagebox.showwarning(APP_TITLE, str(exc), parent=self)
+            return
+        self.equipment_library = proposed
+        self._refresh_equipment_library_tree()
+        self.optimization_status_var.set("Shared equipment library saved. Project snapshots were not changed.")
+
+    def _delete_library_product(self) -> None:
+        selected = set(self.equipment_library_tree.selection())
+        if not selected:
+            return
+        self.equipment_library = [item for item in self.equipment_library if str(item["id"]) not in selected]
+        save_equipment_library(self.equipment_library_path, self.equipment_library)
+        self._refresh_equipment_library_tree()
+        self.optimization_status_var.set("Library product removed; existing project snapshots were retained.")
+
+    def _update_shared_library(self) -> None:
+        by_id = {str(item["id"]): item for item in self.equipment_library}
+        added = 0
+        updated = 0
+        for product in built_in_equipment_library():
+            if str(product["id"]) in by_id:
+                index = self.equipment_library.index(by_id[str(product["id"])])
+                self.equipment_library[index] = product
+                updated += 1
+            else:
+                self.equipment_library.append(product)
+                added += 1
+        save_equipment_library(self.equipment_library_path, self.equipment_library)
+        self._refresh_equipment_library_tree()
+        self.optimization_status_var.set(f"Shared library updated: {added} added, {updated} starter products refreshed. Projects unchanged.")
+
+    def _apply_library_selection(self) -> None:
+        existing = {str(item.get("product_id")) for item in self._project_candidates()}
+        by_id = {str(item["id"]): item for item in self.equipment_library}
+        added = 0
+        for product_id in self.equipment_library_tree.selection():
+            if product_id not in existing:
+                self._project_candidates().append(candidate_from_product(by_id[product_id]))
+                added += 1
+        self.optimization_status_var.set(f"Applied {added} library product(s) to this project.")
+        self._refresh_equipment_catalog_views()
+
+    def _apply_equipment_constraints(self) -> None:
+        constraints = {
+            "enforce_flow_compatibility": self.equipment_flow_compatibility_var.get(),
+            "require_constraint_values": self.equipment_require_values_var.get(),
+            "approved_vendors": [value.strip() for value in self.equipment_constraint_vars["approved_vendors"].get().split(",") if value.strip()],
+            "required_tags": [value.strip() for value in self.equipment_constraint_vars["required_tags"].get().split(",") if value.strip()],
+            "required_standards": [value.strip() for value in self.equipment_constraint_vars["required_standards"].get().split(",") if value.strip()],
+        }
+        for key in ("required_voltage", "required_phase", "required_pressure_class", "required_connection_size", "project_standards"):
+            constraints[key] = self.equipment_constraint_vars[key].get().strip()
+        try:
+            for key in ("maximum_length", "maximum_width", "maximum_height", "maximum_footprint", "minimum_access_clearance"):
+                constraints[key] = self._optional_editor_number(self.equipment_constraint_vars[key].get())
+        except ValueError:
+            messagebox.showwarning(APP_TITLE, "Dimensional constraints must be numeric or blank.", parent=self)
+            return
+        self.config_model.optimization_parameters.equipment_constraints = normalized_constraints(constraints)
+        self._refresh_equipment_catalog_views()
+
+    def _refresh_equipment_catalog_views(self) -> None:
+        if not hasattr(self, "project_candidates_tree"):
+            return
+        candidates = self._project_candidates()
+        constraints = self.config_model.optimization_parameters.equipment_constraints
+        self.project_candidates_tree.delete(*self.project_candidates_tree.get_children())
+        self.compatibility_review_tree.delete(*self.compatibility_review_tree.get_children())
+        eligible_by_category: dict[str, list[dict[str, object]]] = {category: [] for category in EQUIPMENT_CATEGORIES}
+        warnings = 0
+        for index, candidate in enumerate(candidates):
+            product = effective_candidate_product(candidate)
+            disposition = str(candidate.get("disposition", "Candidate"))
+            eligible, reasons = evaluate_product_eligibility(product, constraints)
+            if disposition == "Excluded":
+                status = "Excluded"
+                reason = str(candidate.get("exclusion_reason") or "Excluded from this project")
+            else:
+                status = "Eligible" if eligible else "Ineligible"
+                reason = "; ".join(reasons)
+                if eligible:
+                    eligible_by_category.setdefault(str(product["category"]), []).append(product)
+            if reasons:
+                warnings += 1
+            self.project_candidates_tree.insert("", "end", iid=str(index), values=(
+                disposition, product["category"], product["model"], status, reason,
+            ))
+            if reasons or not eligible:
+                self.compatibility_review_tree.insert("", "end", values=(
+                    "Product", product["model"], "Pass with warning" if eligible else "Ineligible", reason,
+                ))
+        fixed_categories = {
+            str(effective_candidate_product(candidate)["category"])
+            for candidate in candidates if candidate.get("disposition") == "Fixed"
+        }
+        for category in fixed_categories:
+            fixed_ids = {
+                str(candidate.get("product_id")) for candidate in candidates
+                if candidate.get("disposition") == "Fixed"
+            }
+            eligible_by_category[category] = [
+                product for product in eligible_by_category.get(category, [])
+                if str(product["id"]) in fixed_ids
+            ]
+        combinations = list(itertools.product(*(eligible_by_category[category] for category in EQUIPMENT_CATEGORIES)))
+        compatible = 0
+        rejected = 0
+        for combination in combinations:
+            allowed, reasons = evaluate_combination_compatibility(combination, constraints)
+            if allowed:
+                compatible += 1
+            else:
+                rejected += 1
+                self.compatibility_review_tree.insert("", "end", values=(
+                    "Combination", " + ".join(str(item["model"]) for item in combination),
+                    "Rejected", "; ".join(reasons),
+                ))
+        self.compatibility_summary_var.set(
+            f"{len(candidates)} applied products · {compatible} compatible combinations · "
+            f"{rejected} rejected combinations · {warnings} product warnings"
+        )
+        self._refresh_equipment_library_tree()
+
     @staticmethod
     def _system_animation_connection_flow_gallons(
         source_type: str, target_type: str, row: pd.Series
@@ -5556,7 +6059,7 @@ class RainwaterTkApp(tk.Tk):
         self.multi_site_rainwater_tab = ttk.Frame(self.rainwater_data_notebook, padding=16)
         self.rainwater_data_notebook.add(self.daily_rainwater_tab, text="Daily data")
         self.rainwater_data_notebook.add(
-            self.hourly_rainwater_tab, text="Synthetic hourly rainfall"
+            self.hourly_rainwater_tab, text="Hourly rainfall"
         )
         if not hasattr(self, "info_icon_image"):
             self.info_icon_image = self._create_info_icon()
@@ -5577,8 +6080,8 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(
             self.hourly_rainwater_tab,
             text=(
-                "Generate and review derived hourly rainfall profiles. The imported daily "
-                "totals remain the source record and are not replaced."
+                "Load observed hourly rainfall or generate a derived hourly profile from "
+                "daily rainfall."
             ),
             foreground="#667278",
             wraplength=980,
@@ -5605,12 +6108,17 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 8))
         hourly_actions = ttk.Frame(hourly_profile_frame)
         hourly_actions.grid(row=2, column=0, columnspan=2, sticky="w")
+        ttk.Button(
+            hourly_actions,
+            text="Load Hourly Rainfall CSV",
+            command=self.load_hourly_rainfall_csv,
+        ).pack(side="left")
         self.generate_hourly_rainfall_button = ttk.Button(
             hourly_actions,
             text="Generate Synthetic Hourly Rainfall...",
             command=self.generate_hourly_rainfall,
         )
-        self.generate_hourly_rainfall_button.pack(side="left")
+        self.generate_hourly_rainfall_button.pack(side="left", padx=(8, 0))
         self.remove_hourly_rainfall_button = ttk.Button(
             hourly_actions,
             text="Remove Generated Profile",
@@ -5732,37 +6240,27 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(provenance_frame, text="Data classification").grid(
             row=1, column=0, sticky="w", pady=2
         )
-        rainfall_data_type_combo = ttk.Combobox(
+        ttk.Label(
             provenance_frame,
             textvariable=self.rainfall_data_type_var,
-            values=list(RAINFALL_DATA_TYPE_BY_LABEL),
-            state="readonly",
-        )
-        rainfall_data_type_combo.grid(row=1, column=1, sticky="ew", pady=2)
-        rainfall_data_type_combo.bind(
-            "<<ComboboxSelected>>", self._rainfall_provenance_changed
-        )
+            foreground="#5f6b70",
+        ).grid(row=1, column=1, sticky="ew", pady=2)
         ttk.Label(provenance_frame, text="Temporal resolution").grid(
             row=2, column=0, sticky="w", pady=2
         )
-        rainfall_resolution_combo = ttk.Combobox(
+        ttk.Label(
             provenance_frame,
             textvariable=self.rainfall_resolution_var,
-            values=list(RAINFALL_RESOLUTION_LABELS.values()),
-            state="readonly",
-        )
-        rainfall_resolution_combo.grid(row=2, column=1, sticky="ew", pady=2)
-        rainfall_resolution_combo.bind(
-            "<<ComboboxSelected>>", self._rainfall_provenance_changed
-        )
+            foreground="#5f6b70",
+        ).grid(row=2, column=1, sticky="ew", pady=2)
         ttk.Label(provenance_frame, text="Source timezone").grid(
             row=3, column=0, sticky="w", pady=2
         )
-        timezone_entry = ttk.Entry(
-            provenance_frame, textvariable=self.rainfall_timezone_var
-        )
-        timezone_entry.grid(row=3, column=1, sticky="ew", pady=2)
-        timezone_entry.bind("<FocusOut>", self._rainfall_provenance_changed)
+        ttk.Label(
+            provenance_frame,
+            textvariable=self.rainfall_timezone_var,
+            foreground="#5f6b70",
+        ).grid(row=3, column=1, sticky="ew", pady=2)
         ttk.Label(provenance_frame, text="Timing metadata").grid(
             row=4, column=0, sticky="nw", pady=2
         )
@@ -6816,18 +7314,38 @@ class RainwaterTkApp(tk.Tk):
         self._update_multitank_comparison_state()
 
         self.optimization_tab.columnconfigure(0, weight=1)
-        self.optimization_tab.rowconfigure(1, weight=1)
-        assumptions = ttk.LabelFrame(self.optimization_tab, text="Optimization problem definition and assumptions", padding=10)
-        assumptions.grid(row=0, column=0, sticky="ew", pady=(0, 10))
+        self.optimization_tab.rowconfigure(0, weight=1)
+        assumptions = ttk.Frame(self.optimization_tab)
+        assumptions.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
         assumptions.columnconfigure(0, weight=1)
-        ttk.Label(
+        assumptions.columnconfigure(1, weight=0)
+        assumptions.rowconfigure(0, weight=1)
+        self._info_button(
             assumptions,
-            text=("Design variables remain open to the optimizer. Fixed project inputs are read directly from "
-                  "their source tabs so duplicate values cannot drift out of sync."),
-            foreground="#667278", wraplength=1000,
-        ).grid(row=0, column=0, sticky="ew", pady=(0, 6))
+            lambda: messagebox.showinfo(
+                "Optimization problem definition and assumptions",
+                OPTIMIZATION_SECTION_HELP["Problem assumptions"],
+                parent=self,
+            ),
+        ).grid(row=0, column=1, sticky="ne", padx=(6, 0), pady=(1, 0))
+        self.optimization_catalog_notebook = ttk.Notebook(assumptions)
+        self.optimization_catalog_notebook.grid(row=0, column=0, sticky="nsew")
+        assumptions_tab = ttk.Frame(self.optimization_catalog_notebook, padding=6)
+        candidates_tab = ttk.Frame(self.optimization_catalog_notebook, padding=6)
+        library_tab = ttk.Frame(self.optimization_catalog_notebook, padding=6)
+        constraints_tab = ttk.Frame(self.optimization_catalog_notebook, padding=6)
+        compatibility_tab = ttk.Frame(self.optimization_catalog_notebook, padding=6)
+        self.optimization_catalog_notebook.add(assumptions_tab, text="Problem assumptions")
+        self.optimization_catalog_notebook.add(candidates_tab, text="Project candidates")
+        self.optimization_catalog_notebook.add(library_tab, text="Equipment library")
+        self.optimization_catalog_notebook.add(constraints_tab, text="Project constraints")
+        self.optimization_catalog_notebook.add(compatibility_tab, text="Compatibility review")
+        optimization_results_tab = ttk.Frame(self.optimization_catalog_notebook, padding=10)
+        self.optimization_catalog_notebook.add(optimization_results_tab, text="Optimization setup and results")
+        assumptions_tab.columnconfigure(0, weight=1)
+        assumptions_tab.rowconfigure(0, weight=1)
         self.optimization_assumptions_tree = ttk.Treeview(
-            assumptions, columns=("classification", "item", "value", "source"), show="headings", height=8
+            assumptions_tab, columns=("classification", "item", "value", "source"), show="headings", height=6
         )
         for column, heading, width in (
             ("classification", "Classification", 125), ("item", "Variable / assumption", 235),
@@ -6835,64 +7353,115 @@ class RainwaterTkApp(tk.Tk):
         ):
             self.optimization_assumptions_tree.heading(column, text=heading)
             self.optimization_assumptions_tree.column(column, width=width, anchor="w")
-        self.optimization_assumptions_tree.grid(row=1, column=0, sticky="ew")
-        assumptions_scroll = ttk.Scrollbar(assumptions, orient="vertical", command=self.optimization_assumptions_tree.yview)
-        assumptions_scroll.grid(row=1, column=1, sticky="ns")
+        self.optimization_assumptions_tree.grid(row=0, column=0, sticky="nsew")
+        assumptions_scroll = ttk.Scrollbar(assumptions_tab, orient="vertical", command=self.optimization_assumptions_tree.yview)
+        assumptions_scroll.grid(row=0, column=1, sticky="ns")
         self.optimization_assumptions_tree.configure(yscrollcommand=assumptions_scroll.set)
+        self._build_project_candidates_tab(candidates_tab)
+        self._build_equipment_library_tab(library_tab)
+        self._build_equipment_constraints_tab(constraints_tab)
+        self._build_compatibility_review_tab(compatibility_tab)
 
-        optimization_frame = ttk.LabelFrame(self.optimization_tab, text="Objectives, constraints, catalog, and results", padding=10)
-        optimization_frame.grid(row=1, column=0, sticky="nsew")
-        optimization_frame.columnconfigure(4, weight=1)
-        ttk.Label(optimization_frame, text="Minimum rainwater reliability").grid(row=0, column=0, sticky="w")
-        ttk.Entry(optimization_frame, textvariable=self.optimization_minimum_reliability_var, width=9).grid(
-            row=0, column=1, sticky="w", padx=(8, 3)
-        )
-        ttk.Label(optimization_frame, text="%").grid(row=0, column=2, sticky="w", padx=(0, 16))
-        ttk.Label(optimization_frame, text="Electricity price").grid(row=0, column=3, sticky="w")
-        ttk.Entry(optimization_frame, textvariable=self.optimization_electricity_rate_var, width=9).grid(
-            row=0, column=4, sticky="w", padx=(8, 3)
-        )
-        ttk.Label(optimization_frame, text="currency/kWh").grid(row=0, column=5, sticky="w", padx=(0, 16))
-        ttk.Label(optimization_frame, text="Optimize for").grid(row=0, column=6, sticky="w")
+        optimization_frame = optimization_results_tab
+        optimization_frame.columnconfigure(0, weight=1)
+        optimization_frame.rowconfigure(6, weight=1)
+
+        objective_row = ttk.Frame(optimization_frame)
+        objective_row.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        ttk.Label(objective_row, text="Objectives", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Button(
+            objective_row, text="ⓘ", width=2,
+            command=lambda: messagebox.showinfo(
+                "Objectives", OPTIMIZATION_SECTION_HELP["Objectives"], parent=self
+            ),
+        ).pack(side="left", padx=(5, 0))
+        ttk.Label(objective_row, text="Optimize for").pack(side="left", padx=(12, 0))
         ttk.Combobox(
-            optimization_frame, textvariable=self.optimization_objective_var,
+            objective_row, textvariable=self.optimization_objective_var,
             values=("Simple payback", "Net annual savings", "Rainwater reliability", "Analysis-period net benefit", "Lifecycle NPV"),
             state="readonly", width=23,
-        ).grid(row=0, column=7, sticky="w", padx=(8, 0))
-        ttk.Label(optimization_frame, text="Maximum annual municipal makeup").grid(row=1, column=0, sticky="w")
-        ttk.Entry(optimization_frame, textvariable=self.optimization_maximum_makeup_var, width=9).grid(
-            row=1, column=1, sticky="w", padx=(8, 3)
+        ).pack(side="left", padx=(8, 16))
+        ttk.Separator(objective_row, orient="vertical").pack(side="left", fill="y", padx=(0, 16))
+        ttk.Label(objective_row, text="Fixed assumption:", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Label(objective_row, text="Electricity price").pack(side="left", padx=(6, 0))
+        ttk.Entry(objective_row, textvariable=self.optimization_electricity_rate_var, width=9).pack(
+            side="left", padx=(8, 3)
         )
-        ttk.Label(optimization_frame, textvariable=self.tank_size_unit_var).grid(row=1, column=2, sticky="w", padx=(0, 16))
-        ttk.Label(optimization_frame, text="Maximum installed cost").grid(row=1, column=3, sticky="w")
-        ttk.Entry(optimization_frame, textvariable=self.optimization_maximum_cost_var, width=9).grid(
-            row=1, column=4, sticky="w", padx=(8, 3)
+        ttk.Label(objective_row, text="currency/kWh").pack(side="left")
+
+        constraints_heading = ttk.Frame(optimization_frame)
+        constraints_heading.grid(row=1, column=0, sticky="w", pady=(2, 4))
+        ttk.Label(constraints_heading, text="Constraints", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Button(
+            constraints_heading, text="ⓘ", width=2,
+            command=lambda: messagebox.showinfo(
+                "Constraints", OPTIMIZATION_SECTION_HELP["Constraints"], parent=self
+            ),
+        ).pack(side="left", padx=(5, 0))
+        constraint_fields = ttk.Frame(optimization_frame)
+        constraint_fields.grid(row=2, column=0, sticky="ew")
+        ttk.Label(constraint_fields, text="Minimum rainwater reliability").pack(side="left")
+        ttk.Entry(constraint_fields, textvariable=self.optimization_minimum_reliability_var, width=7).pack(
+            side="left", padx=(8, 3)
         )
-        ttk.Label(optimization_frame, textvariable=self.financial_currency_var).grid(row=1, column=5, sticky="w", padx=(0, 16))
+        ttk.Label(constraint_fields, text="%").pack(side="left", padx=(0, 14))
+        ttk.Label(constraint_fields, text="Maximum annual municipal makeup").pack(side="left")
+        ttk.Entry(constraint_fields, textvariable=self.optimization_maximum_makeup_var, width=7).pack(
+            side="left", padx=(8, 3)
+        )
+        ttk.Label(constraint_fields, textvariable=self.tank_size_unit_var).pack(side="left", padx=(0, 14))
+
+        secondary_constraint_fields = ttk.Frame(optimization_frame)
+        secondary_constraint_fields.grid(row=3, column=0, sticky="ew", pady=(4, 0))
+        ttk.Label(secondary_constraint_fields, text="Maximum installed cost").pack(side="left")
+        ttk.Entry(secondary_constraint_fields, textvariable=self.optimization_maximum_cost_var, width=7).pack(
+            side="left", padx=(8, 3)
+        )
+        ttk.Label(secondary_constraint_fields, textvariable=self.financial_currency_var).pack(
+            side="left", padx=(0, 14)
+        )
         ttk.Checkbutton(
-            optimization_frame, text="Require positive net annual savings",
+            secondary_constraint_fields, text="Require positive net annual savings",
             variable=self.optimization_positive_savings_var,
-        ).grid(row=1, column=6, columnspan=2, sticky="w")
-        button_row = ttk.Frame(optimization_frame)
-        button_row.grid(row=2, column=0, columnspan=8, sticky="ew", pady=(6, 0))
-        ttk.Button(button_row, text="Edit sample catalog...", command=self.open_optimization_catalog).pack(side="left")
-        ttk.Button(button_row, text="Run optimization", command=self.run_system_optimization).pack(side="right")
+        ).pack(side="left")
+
+        catalog_row = ttk.Frame(optimization_frame)
+        catalog_row.grid(row=4, column=0, sticky="ew", pady=(8, 6))
+        ttk.Label(catalog_row, text="Catalog", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Button(
+            catalog_row, text="ⓘ", width=2,
+            command=lambda: messagebox.showinfo(
+                "Catalog", OPTIMIZATION_SECTION_HELP["Catalog"], parent=self
+            ),
+        ).pack(side="left", padx=(5, 0))
+        ttk.Button(catalog_row, text="Equipment candidates...", command=self._show_equipment_candidates).pack(
+            side="left", padx=(12, 0)
+        )
         ttk.Label(
-            button_row, text="Leave maximum constraints blank for no limit.", foreground="#667278"
+            catalog_row,
+            text=("Shared library products are applied as project snapshots; eligibility and compatibility "
+                  "are reviewed before optimization."),
+            foreground="#667278",
         ).pack(side="left", padx=(12, 0))
-        ttk.Label(
-            optimization_frame,
-            text=("Evaluates the editable primary tank, filtration pump, and buffer tank catalog. "
-                  "Catalog values are illustrative planning inputs, not vendor quotations."),
-            foreground="#667278", wraplength=950,
-        ).grid(row=3, column=0, columnspan=8, sticky="ew", pady=(6, 6))
+        ttk.Button(catalog_row, text="Run optimization", command=self.run_system_optimization).pack(side="right")
+
+        results_heading = ttk.Frame(optimization_frame)
+        results_heading.grid(row=5, column=0, sticky="w", pady=(0, 4))
+        ttk.Label(results_heading, text="Results", font=("Segoe UI", 9, "bold")).pack(side="left")
+        ttk.Button(
+            results_heading, text="ⓘ", width=2,
+            command=lambda: messagebox.showinfo(
+                "Results", OPTIMIZATION_SECTION_HELP["Results"], parent=self
+            ),
+        ).pack(side="left", padx=(5, 0))
         self.optimization_tree = ttk.Treeview(
             optimization_frame,
-            columns=("rank", "tank", "pump", "booster", "reliability", "makeup", "energy", "cost", "savings", "payback", "npv"),
-            show="headings", height=6,
+            columns=("rank", "tank", "pump", "filter", "booster", "reliability", "makeup", "energy", "cost", "savings", "payback", "npv"),
+            show="headings", height=4,
         )
         headings = (
             ("rank", "Rank", 45), ("tank", "Primary tank", 100), ("pump", "Filter pump", 100),
+            ("filter", "Filtration unit", 105),
             ("booster", "Buffer tank", 100), ("reliability", "Reliability", 85),
             ("makeup", "Municipal/year", 100),
             ("energy", "Energy/year", 90), ("cost", "Installed cost", 105),
@@ -6901,41 +7470,14 @@ class RainwaterTkApp(tk.Tk):
         )
         for column, label, width in headings:
             self.optimization_tree.heading(column, text=label)
-            self.optimization_tree.column(column, width=width, anchor="e" if column not in {"tank", "pump", "booster"} else "w")
-        self.optimization_tree.grid(row=4, column=0, columnspan=7, sticky="ew")
+            self.optimization_tree.column(column, width=width, anchor="e" if column not in {"tank", "pump", "filter", "booster"} else "w")
+        self.optimization_tree.grid(row=6, column=0, sticky="nsew")
         optimization_scroll = ttk.Scrollbar(optimization_frame, orient="vertical", command=self.optimization_tree.yview)
-        optimization_scroll.grid(row=4, column=7, sticky="ns")
+        optimization_scroll.grid(row=6, column=1, sticky="ns")
         self.optimization_tree.configure(yscrollcommand=optimization_scroll.set)
         ttk.Label(optimization_frame, textvariable=self.optimization_status_var, foreground="#667278").grid(
-            row=5, column=0, columnspan=8, sticky="w", pady=(6, 0)
+            row=7, column=0, columnspan=2, sticky="w", pady=(6, 0)
         )
-
-    @staticmethod
-    def _default_optimization_catalog_rows() -> list[dict[str, object]]:
-        rows: list[dict[str, object]] = []
-        rows.extend(
-            {"category": "Primary tank", "name": item.name, "capacity": item.capacity_gallons,
-             "cost": item.installed_cost, "power_kw": 0.0}
-            for item in PRIMARY_TANK_CATALOG
-        )
-        rows.extend(
-            {"category": "Filtration pump", "name": item.name,
-             "capacity": item.capacity_gallons_per_hour, "cost": item.installed_cost,
-             "power_kw": item.power_kw}
-            for item in FILTRATION_PUMP_CATALOG
-        )
-        rows.extend(
-            {"category": "Buffer tank", "name": item.name, "capacity": item.capacity_gallons,
-             "cost": item.installed_cost, "power_kw": 0.0}
-            for item in BOOSTER_TANK_CATALOG
-        )
-        return rows
-
-    @staticmethod
-    def _optimization_catalog_category(row: dict[str, object]) -> object:
-        """Return the current display category while accepting saved legacy catalogs."""
-        category = row.get("category")
-        return "Buffer tank" if category == "Booster tank" else category
 
     def _refresh_optimization_assumptions(self) -> None:
         if not hasattr(self, "optimization_assumptions_tree"):
@@ -6945,10 +7487,13 @@ class RainwaterTkApp(tk.Tk):
         financial = cfg.financial_parameters
         system = cfg.system_parameters
         unit = volume_unit(cfg)
-        catalog = optimization.catalog or self._default_optimization_catalog_rows()
+        candidates = self._project_candidates()
         counts = {
-            category: sum(self._optimization_catalog_category(row) == category for row in catalog)
-            for category in ("Primary tank", "Filtration pump", "Buffer tank")
+            category: sum(
+                effective_candidate_product(row)["category"] == category
+                and row.get("disposition", "Candidate") != "Excluded"
+                for row in candidates
+            ) for category in EQUIPMENT_CATEGORIES
         }
         if self.rainfall_df.empty:
             rainfall_value = "Not loaded"
@@ -6970,6 +7515,7 @@ class RainwaterTkApp(tk.Tk):
         rows = [
             ("Design variable", "Primary tank product", f"{counts['Primary tank']} catalog choices", "Optimization catalog"),
             ("Design variable", "Filtration pump product", f"{counts['Filtration pump']} catalog choices", "Optimization catalog"),
+            ("Design variable", "Filtration unit product", f"{counts['Filtration unit']} catalog choices", "Optimization catalog"),
             ("Design variable", "Buffer tank product", f"{counts['Buffer tank']} catalog choices", "Optimization catalog"),
             ("Fixed input", "Rainfall record", rainfall_value, "Rainwater Data"),
             ("Fixed input", "Collection surfaces", f"{len(cfg.surfaces)} surfaces; {area_to_display(collection_area, cfg):,.0f} {area_unit(cfg)}", "Collection surfaces"),
@@ -6996,82 +7542,13 @@ class RainwaterTkApp(tk.Tk):
             ("Economic input", "Utility / maintenance escalation", f"{financial.utility_rate_escalation_percent:g}% / {financial.maintenance_escalation_percent:g}%", "Financial analysis"),
             ("Economic input", "Electricity / replacement escalation", f"{financial.electricity_escalation_percent:g}% / {financial.equipment_replacement_escalation_percent:g}%", "Financial analysis"),
             ("Economic input", "Recurring replacement", f"{financial.currency} {financial.equipment_replacement_cost:,.2f} every {financial.equipment_replacement_interval_years} year(s)", "Financial analysis"),
-            ("Search method", "Candidate enumeration", f"Exhaustive deterministic search; {math.prod(counts.values())} combinations", "Optimization backend"),
+            ("Search method", "Candidate enumeration", f"Up to {math.prod(counts.values())} combinations before compatibility filtering", "Optimization backend"),
             ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs cached for 4 unchanged runs", "Optimization backend"),
         ]
         self.optimization_assumptions_tree.delete(*self.optimization_assumptions_tree.get_children())
         for row in rows:
             self.optimization_assumptions_tree.insert("", "end", values=row)
-
-    def open_optimization_catalog(self) -> None:
-        dialog = tk.Toplevel(self)
-        dialog.title("Optimization equipment catalog")
-        dialog.transient(self)
-        dialog.geometry("820x480")
-        dialog.columnconfigure(0, weight=1)
-        dialog.rowconfigure(1, weight=1)
-        ttk.Label(
-            dialog,
-            text=("Edit or paste comma-separated rows. Tank capacity is gallons; filtration-pump capacity "
-                  "is gallons/hour. Power is used for filtration pumps. Prices use the selected currency."),
-            wraplength=780, foreground="#667278", padding=10,
-        ).grid(row=0, column=0, sticky="ew")
-        editor = tk.Text(dialog, wrap="none", font=("Consolas", 10), undo=True)
-        editor.grid(row=1, column=0, sticky="nsew", padx=10)
-        scroll_y = ttk.Scrollbar(dialog, orient="vertical", command=editor.yview)
-        scroll_y.grid(row=1, column=1, sticky="ns")
-        editor.configure(yscrollcommand=scroll_y.set)
-
-        def load_rows(rows: list[dict[str, object]]) -> None:
-            editor.delete("1.0", tk.END)
-            editor.insert("1.0", "Category,Name,Capacity,Installed cost,Power kW\n")
-            for row in rows:
-                editor.insert(
-                    tk.END,
-                    f"{self._optimization_catalog_category(row)},{row['name']},{float(row['capacity']):g},"
-                    f"{float(row['cost']):g},{float(row.get('power_kw', 0.0)):g}\n",
-                )
-
-        load_rows(self.config_model.optimization_parameters.catalog or self._default_optimization_catalog_rows())
-
-        def apply_catalog() -> None:
-            lines = editor.get("1.0", "end-1c").splitlines()
-            parsed: list[dict[str, object]] = []
-            allowed = {"Primary tank", "Filtration pump", "Buffer tank"}
-            try:
-                for row_number, values in enumerate(csv.reader(lines[1:]), start=2):
-                    if not values or not any(value.strip() for value in values):
-                        continue
-                    if len(values) != 5:
-                        raise ValueError(f"Row {row_number} must contain exactly five columns.")
-                    category, name = values[0].strip(), values[1].strip()
-                    capacity, cost, power = map(float, (values[2], values[3], values[4]))
-                    if category not in allowed:
-                        raise ValueError(f"Row {row_number} has an unsupported category.")
-                    if not name or capacity <= 0.0 or cost < 0.0 or power < 0.0:
-                        raise ValueError(f"Row {row_number} requires a name, positive capacity, and non-negative cost and power.")
-                    parsed.append({"category": category, "name": name, "capacity": capacity,
-                                   "cost": cost, "power_kw": power})
-                missing = allowed - {str(row["category"]) for row in parsed}
-                if missing:
-                    raise ValueError("Catalog requires at least one product in each category.")
-            except ValueError as exc:
-                messagebox.showwarning(APP_TITLE, str(exc), parent=dialog)
-                return
-            self.config_model.optimization_parameters.catalog = parsed
-            combinations = math.prod(
-                sum(row["category"] == category for row in parsed) for category in sorted(allowed)
-            )
-            self.optimization_status_var.set(
-                f"Catalog saved with {len(parsed)} products and {combinations} combinations."
-            )
-            dialog.destroy()
-
-        buttons = ttk.Frame(dialog, padding=10)
-        buttons.grid(row=2, column=0, columnspan=2, sticky="ew")
-        ttk.Button(buttons, text="Reset sample catalog", command=lambda: load_rows(self._default_optimization_catalog_rows())).pack(side="left")
-        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side="right")
-        ttk.Button(buttons, text="Apply catalog", command=apply_catalog).pack(side="right", padx=(0, 8))
+        self._refresh_equipment_catalog_views()
 
     def run_system_optimization(self) -> None:
         if self.analysis_running:
@@ -7080,19 +7557,22 @@ class RainwaterTkApp(tk.Tk):
         self._apply_form_to_model()
         self._refresh_optimization_assumptions()
         self.optimization_tree.delete(*self.optimization_tree.get_children())
-        catalog = self.config_model.optimization_parameters.catalog or self._default_optimization_catalog_rows()
+        candidates = self._project_candidates()
         category_counts = [
-            sum(self._optimization_catalog_category(row) == category for row in catalog)
-            for category in ("Primary tank", "Filtration pump", "Buffer tank")
+            sum(
+                effective_candidate_product(row)["category"] == category
+                and row.get("disposition", "Candidate") != "Excluded"
+                for row in candidates
+            ) for category in EQUIPMENT_CATEGORIES
         ]
         combination_count = math.prod(category_counts)
         self.execution_log.info(
-            "Optimization", f"System optimization started for {combination_count} combinations"
+            "Optimization", f"System optimization started for up to {combination_count} combinations"
         )
         self.execution_log.diagnostic(
             "Optimization", "Optimization catalog prepared", details=f"category_counts={category_counts}"
         )
-        self.optimization_status_var.set(f"Evaluating {combination_count} product combinations...")
+        self.optimization_status_var.set(f"Preparing up to {combination_count} eligible product combinations...")
         self.analysis_progress_var.set(0.0)
         self.status_var.set("Optimization running: evaluating product combinations")
         self.config(cursor="watch")
@@ -7167,6 +7647,7 @@ class RainwaterTkApp(tk.Tk):
                     result.rank if result.rank is not None else "Infeasible",
                     result.primary_tank.name,
                     result.filtration_pump.name,
+                    result.filtration_unit.name,
                     result.booster_tank.name,
                     f"{result.reliability_percent:.1f}%",
                     f"{volume_to_display(result.average_annual_municipal_makeup_gallons, run_config):,.0f}",
@@ -7193,7 +7674,7 @@ class RainwaterTkApp(tk.Tk):
             self.optimization_status_var.set(
                 f"{feasible_count} of {len(results)} combinations meet all constraints. "
                 f"Best: {best.primary_tank.name} + {best.filtration_pump.name} + "
-                f"{best.booster_tank.name}; {objective.lower()} {best_value}."
+                f"{best.filtration_unit.name} + {best.booster_tank.name}; {objective.lower()} {best_value}."
             )
         else:
             self.optimization_status_var.set(
@@ -8424,6 +8905,11 @@ class RainwaterTkApp(tk.Tk):
             "" if optimization.maximum_installed_cost is None else f"{optimization.maximum_installed_cost:g}"
         )
         self.optimization_positive_savings_var.set(optimization.require_positive_net_savings)
+        equipment_constraints = normalized_constraints(optimization.equipment_constraints)
+        self.equipment_require_values_var.set(bool(equipment_constraints["require_constraint_values"]))
+        self.equipment_flow_compatibility_var.set(bool(equipment_constraints["enforce_flow_compatibility"]))
+        for key, variable in self.equipment_constraint_vars.items():
+            variable.set(_constraint_display_value(equipment_constraints.get(key)))
         self._render_system_builder()
         self.country_var.set(COUNTRY_LABEL_BY_CODE.get(cfg.country_code, COUNTRY_LABEL_BY_CODE["USA"]))
         precipitation_field = (
@@ -8440,12 +8926,18 @@ class RainwaterTkApp(tk.Tk):
         self.use_synthetic_hourly_rainfall_var.set(
             bool(cfg.use_synthetic_hourly_rainfall)
         )
-        self.rainfall_data_type_var.set(rainfall_data_type_label(cfg.rainfall_data_type))
-        self.rainfall_resolution_var.set(
-            RAINFALL_RESOLUTION_LABELS.get(cfg.rainfall_temporal_resolution, "Unknown")
-        )
-        self.rainfall_timezone_var.set(cfg.rainfall_timezone or "Unspecified")
-        self.rainfall_timing_var.set(cfg.rainfall_timing_type)
+        if self.rainfall_df.empty:
+            self.rainfall_data_type_var.set("--")
+            self.rainfall_resolution_var.set("--")
+            self.rainfall_timezone_var.set("--")
+            self.rainfall_timing_var.set("--")
+        else:
+            self.rainfall_data_type_var.set(rainfall_data_type_label(cfg.rainfall_data_type))
+            self.rainfall_resolution_var.set(
+                RAINFALL_RESOLUTION_LABELS.get(cfg.rainfall_temporal_resolution, "Unknown")
+            )
+            self.rainfall_timezone_var.set(cfg.rainfall_timezone or "Unspecified")
+            self.rainfall_timing_var.set(cfg.rainfall_timing_type)
         self.hourly_schedule_summary_var.set(
             "Custom typical-week hourly profile" if cfg.demand.hourly_schedule_enabled else "Even 24-hour demand profile"
         )
@@ -8592,6 +9084,24 @@ class RainwaterTkApp(tk.Tk):
         cfg.optimization_parameters.require_positive_net_savings = bool(
             self.optimization_positive_savings_var.get()
         )
+        current_constraints = normalized_constraints(cfg.optimization_parameters.equipment_constraints)
+        current_constraints["require_constraint_values"] = self.equipment_require_values_var.get()
+        current_constraints["enforce_flow_compatibility"] = self.equipment_flow_compatibility_var.get()
+        current_constraints["approved_vendors"] = [
+            value.strip() for value in self.equipment_constraint_vars["approved_vendors"].get().split(",") if value.strip()
+        ]
+        current_constraints["required_tags"] = [
+            value.strip() for value in self.equipment_constraint_vars["required_tags"].get().split(",") if value.strip()
+        ]
+        current_constraints["required_standards"] = [
+            value.strip() for value in self.equipment_constraint_vars["required_standards"].get().split(",") if value.strip()
+        ]
+        for key in ("required_voltage", "required_phase", "required_pressure_class", "required_connection_size", "project_standards"):
+            current_constraints[key] = self.equipment_constraint_vars[key].get().strip()
+        for key in ("maximum_length", "maximum_width", "maximum_height", "maximum_footprint", "minimum_access_clearance"):
+            raw_value = self.equipment_constraint_vars[key].get().strip()
+            current_constraints[key] = _float(raw_value) if raw_value else None
+        cfg.optimization_parameters.equipment_constraints = current_constraints
         cfg.demand.avg_flush_per_person = _float(self.flushes_var.get())
         cfg.demand.gallons_per_flush_toilet = volume_to_internal(_float(self.toilet_flush_var.get()), cfg)
         cfg.demand.gallons_per_flush_urinal = volume_to_internal(_float(self.urinal_flush_var.get()), cfg)
@@ -9795,6 +10305,53 @@ class RainwaterTkApp(tk.Tk):
         except Exception as exc:  # noqa: BLE001
             self.execution_log.error("Rainfall", "Could not load rainfall CSV", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not load rainfall CSV:\n{exc}")
+
+    def load_hourly_rainfall_csv(self) -> None:
+        """Load observed hourly rainfall and retain its within-day timing."""
+        self._apply_form_to_model()
+        path = filedialog.askopenfilename(
+            title="Load hourly rainfall CSV",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            self.execution_log.info("Rainfall", f"Loading hourly rainfall CSV {Path(path).name}")
+            rainfall = load_hourly_rainfall_csv(Path(path).read_bytes())
+            rainfall["Precipitation"] = rainfall["Precipitation"].map(
+                lambda value: precip_to_internal(float(value), self.config_model)
+            )
+            for column in HOURLY_PRECIPITATION_COLUMNS:
+                rainfall[column] = rainfall[column].map(
+                    lambda value: precip_to_internal(float(value), self.config_model)
+                )
+            self.rainfall_df = rainfall
+            self.use_synthetic_hourly_rainfall_var.set(False)
+            self.config_model.use_synthetic_hourly_rainfall = False
+            self.rainfall_source_label = f"Hourly CSV file: {Path(path).name}"
+            self.config_model.rainfall_source_label = self.rainfall_source_label
+            self._set_rainfall_provenance(
+                data_type="unclassified",
+                temporal_resolution="hourly",
+                timezone="Unspecified",
+                timing_type="Observed hourly rainfall",
+                known_missing_dates=rainfall.attrs.get("known_missing_dates", []),
+            )
+            self.config_model.weather_station_latitude = None
+            self.config_model.weather_station_longitude = None
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
+            self._reset_weather_selection()
+            self._update_rainfall_summary()
+            self.status_var.set(f"Loaded hourly rainfall CSV: {Path(path).name}")
+            self.execution_log.info(
+                "Rainfall", f"Loaded {len(self.rainfall_df):,} daily rainfall rows from hourly CSV"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Rainfall", "Could not load hourly rainfall CSV", exception=exc)
+            messagebox.showerror(APP_TITLE, f"Could not load hourly rainfall CSV:\n{exc}")
 
     def generate_hourly_rainfall(self) -> None:
         """Generate reproducible hourly hyetographs from the loaded daily record."""
@@ -11789,7 +12346,7 @@ class RainwaterTkApp(tk.Tk):
         elif enabled:
             message = (
                 "Synthetic hourly rainfall is selected, but no generated profiles are available. "
-                "Generate them under Rainwater Data > Synthetic hourly rainfall before running analysis."
+                "Generate them under Rainwater Data > Hourly rainfall before running analysis."
             )
         elif available:
             message = (
@@ -11804,9 +12361,9 @@ class RainwaterTkApp(tk.Tk):
         self.synthetic_hourly_rainfall_status_var.set(message)
         if hasattr(self, "hourly_profile_reference_var"):
             reference = (
-                "Hourly profile: Synthetic profile generated - manage in Synthetic hourly rainfall."
+                "Hourly profile: Synthetic profile generated - manage in Hourly rainfall."
                 if available
-                else "Hourly profile: Not generated - manage in Synthetic hourly rainfall."
+                else "Hourly profile: Not generated - manage in Hourly rainfall."
             )
             self.hourly_profile_reference_var.set(reference)
         if hasattr(self, "generate_hourly_rainfall_button"):

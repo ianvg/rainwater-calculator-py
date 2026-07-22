@@ -15,6 +15,7 @@ from typing import Any, Iterator
 import pandas as pd
 
 from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
+from .equipment_catalog import migrate_legacy_catalog, normalized_constraints
 from .system_model import ensure_primary_overflow_paths
 from .models import (
     DemandObject,
@@ -35,7 +36,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 9
+PROJECT_SCHEMA_VERSION = 10
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -579,7 +580,15 @@ class SQLiteStore:
         )
         system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
         financial_params = FinancialParameters(**payload.get("financial_parameters", {}))
-        optimization_params = OptimizationParameters(**payload.get("optimization_parameters", {}))
+        optimization_payload = dict(payload.get("optimization_parameters", {}))
+        if not optimization_payload.get("equipment_candidates") and optimization_payload.get("catalog"):
+            optimization_payload["equipment_candidates"] = migrate_legacy_catalog(
+                optimization_payload["catalog"]
+            )
+        optimization_payload["equipment_constraints"] = normalized_constraints(
+            optimization_payload.get("equipment_constraints")
+        )
+        optimization_params = OptimizationParameters(**optimization_payload)
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
