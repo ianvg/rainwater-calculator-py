@@ -4,6 +4,7 @@ import csv
 import copy
 import datetime as dt
 import http.server
+import io
 import importlib.metadata as importlib_metadata
 import itertools
 import json
@@ -20,6 +21,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from functools import partial
@@ -29,6 +31,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 import pycountry
+from PIL import Image, ImageTk
 from tkintermapview import TkinterMapView, decimal_to_osm
 
 from rainwater_app.acis import (
@@ -96,6 +99,7 @@ from rainwater_app.financial import tariff_rate_per_gallon
 from rainwater_app.financial_service import FinancialAnalysisService
 from rainwater_app.candidate_service import CandidateAnalysisService
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
+from rainwater_app.map_tiles import TileLoadTask, shared_tile_loader
 from rainwater_app.models import (
     DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
     DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
@@ -583,11 +587,197 @@ document.getElementById('use').addEventListener('click',async()=>{if(!selected)r
 
 
 class _StationMapView(TkinterMapView):
-    """TkinterMapView variant that owns and cancels its recurring Tk callbacks."""
+    """TkinterMapView with retained zoom tiles and a shared, cached loader."""
 
     def __init__(self, *args: object, **kwargs: object) -> None:
         self._map_after_ids: set[str] = set()
+        self._tile_generation = 0
+        self._tile_result_queue: queue.Queue[
+            tuple[int, int, int, int, object, bytes | None]
+        ] = queue.Queue()
+        self._pending_tile_requests: set[tuple[int, int, int, int, int]] = set()
+        self._pil_tile_cache: dict[tuple[int, int, int], Image.Image] = {}
+        self._tile_loader = shared_tile_loader()
         super().__init__(*args, **kwargs)
+
+    @staticmethod
+    def _tile_cache_key(zoom: int, x: int, y: int) -> str:
+        return f"{zoom}:{x}:{y}"
+
+    def get_tile_image_from_cache(self, zoom: int, x: int, y: int) -> object:  # type: ignore[override]
+        return self.tile_image_cache.get(self._tile_cache_key(zoom, x, y), False)
+
+    def pre_cache(self) -> None:
+        """Disable tkintermapview's radius-8 speculative download loop."""
+
+    def load_images_background(self) -> None:
+        """Disable tkintermapview's per-widget pool; the shared pool is used instead."""
+
+    def set_tile_server(
+        self, tile_server: str, tile_size: int = 256, max_zoom: int = 19
+    ) -> None:
+        self._tile_generation += 1
+        self._pending_tile_requests.clear()
+        self._pil_tile_cache.clear()
+        super().set_tile_server(tile_server, tile_size=tile_size, max_zoom=max_zoom)
+
+    def _fallback_tile_image(self, zoom: int, x: int, y: int) -> Image.Image | None:
+        tile_size = self.tile_size
+        for difference in range(1, 4):
+            ancestor_zoom = zoom - difference
+            if ancestor_zoom < 0:
+                break
+            divisor = 2**difference
+            ancestor = self._pil_tile_cache.get(
+                (ancestor_zoom, x // divisor, y // divisor)
+            )
+            if ancestor is None:
+                continue
+            source_width, source_height = ancestor.size
+            left = (x % divisor) * source_width // divisor
+            top = (y % divisor) * source_height // divisor
+            right = ((x % divisor) + 1) * source_width // divisor
+            bottom = ((y % divisor) + 1) * source_height // divisor
+            return ancestor.crop((left, top, right, bottom)).resize(
+                (tile_size, tile_size), Image.Resampling.BILINEAR
+            )
+
+        children = [
+            self._pil_tile_cache.get((zoom + 1, x * 2 + child_x, y * 2 + child_y))
+            for child_y in range(2)
+            for child_x in range(2)
+        ]
+        if any(child is None for child in children):
+            return None
+        composite = Image.new("RGB", (tile_size * 2, tile_size * 2))
+        for index, child in enumerate(children):
+            assert child is not None
+            child_image = child.convert("RGB").resize(
+                (tile_size, tile_size), Image.Resampling.BILINEAR
+            )
+            composite.paste(child_image, ((index % 2) * tile_size, (index // 2) * tile_size))
+        return composite.resize((tile_size, tile_size), Image.Resampling.BILINEAR)
+
+    def _display_fallback(self, canvas_tile: object, zoom: int, x: int, y: int) -> None:
+        fallback = self._fallback_tile_image(zoom, x, y)
+        if fallback is not None:
+            canvas_tile.set_image(ImageTk.PhotoImage(fallback))  # type: ignore[attr-defined]
+
+    def draw_zoom(self) -> None:
+        if not self.canvas_tile_array:
+            return
+        self._tile_generation += 1
+        self._pending_tile_requests.clear()
+        self.image_load_queue_tasks = []
+        upper_left_x = math.floor(self.upper_left_tile_pos[0])
+        upper_left_y = math.floor(self.upper_left_tile_pos[1])
+        zoom = round(self.zoom)
+
+        for x_position, column in enumerate(self.canvas_tile_array):
+            for y_position, canvas_tile in enumerate(column):
+                tile_position = (upper_left_x + x_position, upper_left_y + y_position)
+                image = self.get_tile_image_from_cache(zoom, *tile_position)
+                if image is False:
+                    fallback = self._fallback_tile_image(zoom, *tile_position)
+                    image = ImageTk.PhotoImage(fallback) if fallback is not None else self.not_loaded_tile_image
+                    self.image_load_queue_tasks.append(
+                        ((zoom, *tile_position), canvas_tile)
+                    )
+                canvas_tile.set_image_and_position(image, tile_position)
+
+        self.pre_cache_position = (
+            round((self.upper_left_tile_pos[0] + self.lower_right_tile_pos[0]) / 2),
+            round((self.upper_left_tile_pos[1] + self.lower_right_tile_pos[1]) / 2),
+        )
+        self.draw_move(called_after_zoom=True)
+
+    def _dispatch_tile_requests(self) -> None:
+        generation = self._tile_generation
+        zoom_now = round(self.zoom)
+        center_x = (self.upper_left_tile_pos[0] + self.lower_right_tile_pos[0]) / 2
+        center_y = (self.upper_left_tile_pos[1] + self.lower_right_tile_pos[1]) / 2
+        widget_reference = weakref.ref(self)
+
+        while self.image_load_queue_tasks:
+            (zoom, x, y), canvas_tile = self.image_load_queue_tasks.pop()
+            if zoom != zoom_now:
+                continue
+            request_key = (generation, zoom, x, y, id(canvas_tile))
+            if request_key in self._pending_tile_requests:
+                continue
+            self._display_fallback(canvas_tile, zoom, x, y)
+            self._pending_tile_requests.add(request_key)
+            url = (
+                self.tile_server.replace("{x}", str(x))
+                .replace("{y}", str(y))
+                .replace("{z}", str(zoom))
+            )
+
+            def cancelled(
+                reference: weakref.ReferenceType[_StationMapView] = widget_reference,
+                expected_generation: int = generation,
+            ) -> bool:
+                widget = reference()
+                return (
+                    widget is None
+                    or not widget.running
+                    or widget._tile_generation != expected_generation
+                )
+
+            def deliver(
+                payload: bytes | None,
+                reference: weakref.ReferenceType[_StationMapView] = widget_reference,
+                result: tuple[int, int, int, int, object] = (
+                    generation,
+                    zoom,
+                    x,
+                    y,
+                    canvas_tile,
+                ),
+            ) -> None:
+                widget = reference()
+                if widget is not None:
+                    widget._tile_result_queue.put((*result, payload))
+
+            priority = (x + 0.5 - center_x) ** 2 + (y + 0.5 - center_y) ** 2
+            self._tile_loader.submit(
+                TileLoadTask(url=url, cancelled=cancelled, deliver=deliver),
+                priority=priority,
+            )
+
+    def update_canvas_tile_images(self) -> None:
+        self._dispatch_tile_requests()
+        while self.running:
+            try:
+                generation, zoom, x, y, canvas_tile, payload = (
+                    self._tile_result_queue.get_nowait()
+                )
+            except queue.Empty:
+                break
+            self._pending_tile_requests.discard((generation, zoom, x, y, id(canvas_tile)))
+            if (
+                payload is None
+                or generation != self._tile_generation
+                or zoom != round(self.zoom)
+                or getattr(canvas_tile, "tile_name_position", None) != (x, y)
+                or not any(
+                    canvas_tile is current_tile
+                    for column in self.canvas_tile_array
+                    for current_tile in column
+                )
+            ):
+                continue
+            try:
+                pil_image = Image.open(io.BytesIO(payload)).convert("RGB")
+                pil_image.load()
+            except (OSError, ValueError):
+                continue
+            photo_image = ImageTk.PhotoImage(pil_image)
+            self._pil_tile_cache[(zoom, x, y)] = pil_image
+            self.tile_image_cache[self._tile_cache_key(zoom, x, y)] = photo_image
+            canvas_tile.set_image(photo_image)
+        if self.running:
+            self.after(10, self.update_canvas_tile_images)
 
     def after(self, ms: int, func: object = None, *args: object) -> str:  # type: ignore[override]
         if func is None:
@@ -610,6 +800,7 @@ class _StationMapView(TkinterMapView):
 
     def destroy(self) -> None:
         self.running = False
+        self._tile_generation += 1
         for after_id in tuple(self._map_after_ids):
             try:
                 super().after_cancel(after_id)

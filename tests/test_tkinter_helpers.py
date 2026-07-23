@@ -1,5 +1,6 @@
 import pandas as pd
 import pytest
+from PIL import Image
 from pypdf import PdfReader
 import tkinter_app
 
@@ -34,7 +35,7 @@ from rainwater_app.ui_logic import (
     validated_demand_object_library as _validated_demand_object_library,
     validated_schedule_library as _validated_schedule_library,
 )
-from tkinter_app import RainwaterTkApp, _normalize_text_scale_percent
+from tkinter_app import RainwaterTkApp, _StationMapView, _normalize_text_scale_percent
 from tkinter_app import DemandObjectDialog
 
 
@@ -532,6 +533,40 @@ def test_station_clustering_groups_nearby_stations_only_at_low_zoom() -> None:
 
     assert sorted(len(cluster) for cluster in low_zoom_clusters) == [1, 2]
     assert sorted(len(cluster) for cluster in high_zoom_clusters) == [1, 1, 1]
+
+
+def test_map_zoom_fallback_crops_the_matching_parent_quadrant() -> None:
+    map_view = object.__new__(_StationMapView)
+    map_view.tile_size = 256
+    parent = Image.new("RGB", (256, 256), "red")
+    parent.paste("green", (128, 0, 256, 128))
+    parent.paste("blue", (0, 128, 128, 256))
+    parent.paste("yellow", (128, 128, 256, 256))
+    map_view._pil_tile_cache = {(4, 3, 2): parent}
+
+    fallback = map_view._fallback_tile_image(5, 7, 5)
+
+    assert fallback is not None
+    assert fallback.getpixel((128, 128)) == (255, 255, 0)
+
+
+def test_map_zoom_fallback_combines_cached_child_tiles() -> None:
+    map_view = object.__new__(_StationMapView)
+    map_view.tile_size = 256
+    map_view._pil_tile_cache = {
+        (6, 8, 10): Image.new("RGB", (256, 256), "red"),
+        (6, 9, 10): Image.new("RGB", (256, 256), "green"),
+        (6, 8, 11): Image.new("RGB", (256, 256), "blue"),
+        (6, 9, 11): Image.new("RGB", (256, 256), "yellow"),
+    }
+
+    fallback = map_view._fallback_tile_image(5, 4, 5)
+
+    assert fallback is not None
+    assert fallback.getpixel((32, 32)) == (255, 0, 0)
+    assert fallback.getpixel((224, 32)) == (0, 128, 0)
+    assert fallback.getpixel((32, 224)) == (0, 0, 255)
+    assert fallback.getpixel((224, 224)) == (255, 255, 0)
 
 
 def test_chart_render_indices_limit_points_and_preserve_extrema() -> None:
