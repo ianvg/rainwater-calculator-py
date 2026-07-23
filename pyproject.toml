@@ -15,12 +15,14 @@ dependencies = [
   "pypdf>=5.0",
   "pycountry>=24.6",
   "requests>=2.31",
+  "resvg_py==0.3.3",
   "tkintermapview>=1.29,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
+  "pytest-cov>=6.0",
   "ruff>=0.9",
 ]
 desktop-build = [
@@ -50,6 +52,12 @@ rainwater_app = ["data/*.json.gz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+
+[tool.coverage.report]
+skip_covered = true
 
 [tool.ruff]
 target-version = "py310"

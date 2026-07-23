@@ -480,6 +480,7 @@ def simulate_hourly_indirect_aggregates(
     config: ProjectConfig,
     prepared: PreparedHourlyInputs,
     tank_size_gallons: float,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> HourlySimulationAggregates:
     """Run the indirect hourly mass balance without constructing timestep result rows."""
     if tank_size_gallons <= 0.0:
@@ -504,6 +505,8 @@ def simulate_hourly_indirect_aggregates(
     annual_pump = np.zeros(prepared.year_count, dtype=np.float64)
     met_hours = 0
     for index in range(prepared.demand_gallons.size):
+        if cancel_callback is not None and index % 256 == 0 and cancel_callback():
+            raise AnalysisCancelledError("Analysis cancelled by user.")
         demand = max(float(prepared.demand_gallons[index]), 0.0)
         sewer_eligible_demand = min(
             max(float(prepared.sewer_eligible_demand_gallons[index]), 0.0), demand

@@ -15,7 +15,7 @@ Continue extracting cohesive boundaries instead of performing a single wholesale
 - Keep dialogs and tab construction thin, with calculation and validation logic independently testable.
 - Add characterization tests before moving UI behavior whose expected output is not already covered.
 
-[Implemented initial gate] Run tests and static checks for pushes and pull requests, build the documentation strictly, and import/smoke-test the desktop entry point on Windows. The manually triggered executable build must run the tests before packaging and smoke-test the packaged executable before uploading it. Future quality work should add coverage reporting, dependency auditing, and targeted visual tests for high-risk Tkinter screens.
+[Implemented initial gate] Run tests and static checks for pushes and pull requests, build the documentation strictly, and import/smoke-test the desktop entry point on Windows. The manually triggered executable build must run the tests before packaging and smoke-test the packaged executable before uploading it. CI records branch-aware test coverage for the shared application modules and Tkinter entry point, publishes XML and browsable HTML reports without imposing an initial percentage gate, and audits installed dependencies for known vulnerabilities. Future quality work should use the coverage baseline to target high-risk gaps, adopt evidence-based thresholds where useful, and add targeted visual tests for high-risk Tkinter screens.
 
 ## Prioritized product and platform upgrades
 
@@ -113,7 +113,7 @@ A brute-force search can become expensive because candidate counts multiply. For
 6. Run detailed timestep simulations only for shortlisted designs.
 7. Refine the search around the best candidates and report nearby alternatives rather than only one winner.
 
-[Partially implemented] Rainfall collection, hourly demand, and calendar arrays are precomputed and retained in a bounded cache for unchanged runs. Optimization candidates use an aggregate-only hourly evaluator that avoids timestep dictionaries and DataFrames while returning supply, municipal makeup, overflow, pump energy inputs, reliability, costs, savings, and payback. Candidate-result caching, parallel worker processes, cancellation, constraint-based early stopping, and detailed simulation of shortlisted designs remain planned.
+[Partially implemented] Rainfall collection, hourly demand, and calendar arrays are precomputed and retained in a bounded cache for unchanged runs. Optimization candidates use an aggregate-only hourly evaluator that avoids timestep dictionaries and DataFrames while returning supply, municipal makeup, overflow, pump energy inputs, reliability, costs, savings, and payback. Candidate evaluations are retained in a bounded input-keyed cache so objective and constraint changes can reuse and re-rank unchanged simulations. Cooperative cancellation is checked between candidates and inside the hourly state loop without caching partial work. Parallel worker processes, constraint-based early stopping, and detailed simulation of shortlisted designs remain planned.
 
 A genetic algorithm may help after the design space expands to additional continuous and discrete variables such as pump head, efficiency, refill controls, minimum operating level, tariff structures, catalog equipment, replacement schedules, and energy costs. For only three moderately sized variables, a deterministic coarse-to-fine grid remains easier to validate, explain, and reproduce.
 
@@ -141,7 +141,7 @@ Implementation requirements include:
 - [Implemented] Keep first-flush loss separate from runoff coefficient, filter loss, tank overflow, and net collection in calculations and reports.
 - [Implemented] Preserve manual per-surface sizing and add an explicitly applied three-layer planning method: location baseline, design preset, and rainfall-history event definition.
 - [Future] Evaluate event-level carry-over for sub-daily rainfall. Under the current observation-based method, an unused diversion allowance on the first wet observation does not carry into later observations in the same event. Before changing this behavior, validate the physical-device theory and its effect against monitored storms and the cited first-flush models.
-- [Partially implemented] Report diverted volume by timestep and full analysis period, with event identifiers retained in results. Dedicated event and yearly summary tables remain planned.
+- [Implemented] Report diverted volume by timestep and full analysis period, retain event identifiers in results, and provide dedicated event and yearly first-flush summary tables on screen and in HTML, LaTeX, and direct PDF reports.
 - [Implemented] Add tests for rainfall below the diversion threshold, multi-timestep storms, storms spanning midnight, dry-period reset, zero diversion, and persistence compatibility.
 
 ## Unusable tank volume and operating levels

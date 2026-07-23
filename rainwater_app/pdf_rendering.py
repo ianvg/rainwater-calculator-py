@@ -573,6 +573,40 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         )
     y -= 4
 
+    heading("First-flush Diversion Summary")
+    add_wrapped(
+        "Event counts are assigned to the calendar year in which each rainfall event starts. "
+        "Gross runoff less first-flush diversion reconciles to net collected water."
+    )
+    yearly_first_flush = list(report.get("first_flush_yearly_summary", []))
+    add_wrapped("Yearly totals:", indent=10)
+    if not yearly_first_flush:
+        add_wrapped("No yearly first-flush summary is available.", indent=20)
+    for row in yearly_first_flush:
+        add_wrapped(
+            f'{int(row.get("year", 0))}: {int(row.get("event_count", 0)):,} event(s); '
+            f'gross {format_number(float(row.get("gross_runoff", 0.0)))} {report["volume_unit"]}; '
+            f'diverted {format_number(float(row.get("first_flush_loss", 0.0)))} {report["volume_unit"]}; '
+            f'net {format_number(float(row.get("net_collected", 0.0)))} {report["volume_unit"]}; '
+            f'{format_number(float(row.get("diversion_percent", 0.0)))}% diverted',
+            indent=20,
+        )
+    event_first_flush = list(report.get("first_flush_event_summary", []))
+    add_wrapped("Rainfall-event totals:", indent=10)
+    if not event_first_flush:
+        add_wrapped("No event-level first-flush summary is available.", indent=20)
+    for row in event_first_flush:
+        add_wrapped(
+            f'Event {row.get("event_id", "")}: {row.get("start", "")} to {row.get("end", "")}; '
+            f'{int(row.get("wet_timesteps", 0)):,} wet timestep(s); '
+            f'gross {format_number(float(row.get("gross_runoff", 0.0)))} {report["volume_unit"]}; '
+            f'diverted {format_number(float(row.get("first_flush_loss", 0.0)))} {report["volume_unit"]}; '
+            f'net {format_number(float(row.get("net_collected", 0.0)))} {report["volume_unit"]}; '
+            f'{format_number(float(row.get("diversion_percent", 0.0)))}% diverted',
+            indent=20,
+        )
+    y -= 4
+
     heading("Analysis Provenance")
     provenance = report.get("provenance", {})
     for label, value in (

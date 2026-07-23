@@ -53,6 +53,7 @@ REPORT_SECTION_DEFINITIONS = (
     ("rainfall_quality", "Rainfall quality and completeness", "rainfall-quality", "Rainfall Quality and Completeness"),
     ("yearly_rainfall", "Yearly rainfall summary", "yearly-rainfall", "Yearly Rainfall Summary"),
     ("rainfall_events", "Rainfall-event summary", "rainfall-events", "Rainfall-event Summary"),
+    ("first_flush_summary", "First-flush diversion summary", "first-flush-summary", "First-flush Diversion Summary"),
     ("analysis_provenance", "Analysis provenance", "analysis-provenance", "Analysis Provenance"),
     ("reliability_curve", "Reliability curve", "reliability-curve", "Reliability Curve"),
     ("yearly_demand_reliability", "Yearly demand reliability", "yearly-demand-reliability", "Yearly Demand Reliability"),
@@ -143,6 +144,8 @@ class ReportModel(Mapping[str, object]):
         normalized.setdefault("rainfall_quality", {})
         normalized.setdefault("yearly_rainfall_summary", [])
         normalized.setdefault("rainfall_event_summary", {})
+        normalized.setdefault("first_flush_event_summary", [])
+        normalized.setdefault("first_flush_yearly_summary", [])
         normalized.setdefault("average_annual_rainfall_volumes", {})
         normalized["report_sections"] = normalize_report_sections(
             normalized.get("report_sections")
@@ -284,6 +287,85 @@ def report_average_annual_rainfall_volumes(
         key: volume_to_display(float(annual[key].mean()), config)
         for key in columns
     }
+
+
+def report_first_flush_summaries(
+    results: pd.DataFrame, config: ProjectConfig
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Aggregate first-flush volumes by rainfall event and calendar year.
+
+    Event rows include only timesteps carrying a rainfall event identifier. Yearly
+    rows retain all simulated volumes, including legacy results that predate event
+    identifiers. An event is counted in the year in which it starts, even when it
+    crosses a calendar-year boundary.
+    """
+    if results.empty or "Date" not in results:
+        return [], []
+
+    values = pd.DataFrame({"date": pd.to_datetime(results["Date"], errors="coerce")})
+    for output, source in (
+        ("gross_runoff", "GrossCollectedGallons"),
+        ("first_flush_loss", "FirstFlushLossGallons"),
+        ("net_collected", "CollectedGallons"),
+    ):
+        values[output] = pd.to_numeric(
+            results.get(source, pd.Series(0.0, index=results.index)), errors="coerce"
+        ).fillna(0.0).clip(lower=0.0)
+    values["event_id"] = results.get(
+        "RainfallEventId", pd.Series(pd.NA, index=results.index, dtype="object")
+    )
+    supplied_starts = results.get("RainfallEventStart")
+    if supplied_starts is None:
+        values["event_start"] = values["event_id"].notna() & ~values["event_id"].duplicated()
+    else:
+        values["event_start"] = supplied_starts.fillna(False).astype(bool)
+    values = values.dropna(subset=["date"])
+    if values.empty:
+        return [], []
+
+    def displayed_volume(value: object) -> float:
+        return volume_to_display(float(value), config)
+
+    def diversion_percent(group: pd.DataFrame) -> float:
+        gross = float(group["gross_runoff"].sum())
+        diverted = float(group["first_flush_loss"].sum())
+        return diverted / gross * 100.0 if gross > 0.0 else 0.0
+
+    event_rows: list[dict[str, object]] = []
+    event_values = values.dropna(subset=["event_id"])
+    for event_id, group in event_values.groupby("event_id", sort=False):
+        normalized_id: object = event_id
+        try:
+            numeric_id = float(event_id)
+            normalized_id = int(numeric_id) if numeric_id.is_integer() else numeric_id
+        except (TypeError, ValueError):
+            normalized_id = str(event_id)
+        event_rows.append(
+            {
+                "event_id": normalized_id,
+                "start": group["date"].min().isoformat(),
+                "end": group["date"].max().isoformat(),
+                "wet_timesteps": len(group),
+                "gross_runoff": displayed_volume(group["gross_runoff"].sum()),
+                "first_flush_loss": displayed_volume(group["first_flush_loss"].sum()),
+                "net_collected": displayed_volume(group["net_collected"].sum()),
+                "diversion_percent": diversion_percent(group),
+            }
+        )
+
+    yearly_rows: list[dict[str, object]] = []
+    for year, group in values.groupby(values["date"].dt.year, sort=True):
+        yearly_rows.append(
+            {
+                "year": int(year),
+                "event_count": int(group["event_start"].sum()),
+                "gross_runoff": displayed_volume(group["gross_runoff"].sum()),
+                "first_flush_loss": displayed_volume(group["first_flush_loss"].sum()),
+                "net_collected": displayed_volume(group["net_collected"].sum()),
+                "diversion_percent": diversion_percent(group),
+            }
+        )
+    return event_rows, yearly_rows
 
 
 def report_demand_summary(

@@ -7,6 +7,8 @@ a = Analysis(
     datas=[
         ("site", "help"),
         ("assets/app_icon.png", "assets"),
+        ("assets/bootstrap-icons", "assets/bootstrap-icons"),
+        ("assets/tabler-icons", "assets/tabler-icons"),
         ("assets/third_party/weather", "assets/third_party/weather"),
         (
             "rainwater_app/data/noaa_normals_1991_2020_v1_0_1_station_catalog.json.gz",

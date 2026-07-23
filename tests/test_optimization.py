@@ -3,6 +3,7 @@ import math
 import pandas as pd
 import pytest
 
+import rainwater_app.optimization as optimization_module
 from rainwater_app.defaults import default_project_config
 from rainwater_app.models import ProjectConfig, Surface
 from rainwater_app.optimization import (
@@ -10,10 +11,16 @@ from rainwater_app.optimization import (
     FiltrationPumpProduct,
     PrimaryTankProduct,
     optimize_indirect_system,
+    _CANDIDATE_RESULT_CACHE,
     _PREPARED_INPUT_CACHE,
     _cached_prepared_inputs,
 )
-from rainwater_app.engine import prepare_hourly_inputs, simulate_hourly_indirect_aggregates, simulate_hourly_tank
+from rainwater_app.engine import (
+    AnalysisCancelledError,
+    prepare_hourly_inputs,
+    simulate_hourly_indirect_aggregates,
+    simulate_hourly_tank,
+)
 from rainwater_app.financial import average_annual_rainwater_supplied
 
 
@@ -148,3 +155,109 @@ def test_prepared_hourly_inputs_are_cached_for_unchanged_inputs() -> None:
     second = _cached_prepared_inputs(config, rainfall.copy())
 
     assert first is second
+
+
+def test_candidate_results_are_reused_until_simulation_inputs_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = default_project_config("Candidate cache")
+    config.optimization_parameters.minimum_reliability_percent = 0.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=3, freq="D"),
+            "Precipitation": [0.5, 0.0, 0.0],
+        }
+    )
+    products = {
+        "primary_tanks": (PrimaryTankProduct("Tank", 500.0, 500.0),),
+        "filtration_pumps": (FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
+        "booster_tanks": (BoosterTankProduct("Booster", 100.0, 100.0),),
+    }
+    real_simulate = optimization_module.simulate_hourly_indirect_aggregates
+    simulation_calls = 0
+
+    def counted_simulation(*args, **kwargs):
+        nonlocal simulation_calls
+        simulation_calls += 1
+        return real_simulate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        optimization_module, "simulate_hourly_indirect_aggregates", counted_simulation
+    )
+    _CANDIDATE_RESULT_CACHE.clear()
+    first_cache_events: list[bool] = []
+    second_cache_events: list[bool] = []
+
+    optimize_indirect_system(
+        config, rainfall, cache_callback=first_cache_events.append, **products
+    )
+    config.optimization_parameters.objective = "Rainwater reliability"
+    config.optimization_parameters.minimum_reliability_percent = 95.0
+    optimize_indirect_system(
+        config, rainfall.copy(), cache_callback=second_cache_events.append, **products
+    )
+
+    assert simulation_calls == 1
+    assert first_cache_events == [False]
+    assert second_cache_events == [True]
+
+    config.demand.simple_daily_demand_gallons += 1.0
+    optimize_indirect_system(config, rainfall, **products)
+
+    assert simulation_calls == 2
+
+
+def test_optimizer_cancels_inside_candidate_simulation() -> None:
+    config = default_project_config("Cancellation")
+    config.optimization_parameters.minimum_reliability_percent = 0.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2020-01-01", periods=365, freq="D"),
+            "Precipitation": 0.0,
+        }
+    )
+    callback_calls = 0
+    progress_updates: list[tuple[int, int]] = []
+
+    def cancel_during_simulation() -> bool:
+        nonlocal callback_calls
+        callback_calls += 1
+        return callback_calls >= 3
+
+    _CANDIDATE_RESULT_CACHE.clear()
+    with pytest.raises(AnalysisCancelledError, match="cancelled"):
+        optimize_indirect_system(
+            config,
+            rainfall,
+            primary_tanks=(PrimaryTankProduct("Tank", 500.0, 500.0),),
+            filtration_pumps=(FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
+            booster_tanks=(BoosterTankProduct("Booster", 100.0, 100.0),),
+            progress_callback=lambda current, total: progress_updates.append((current, total)),
+            cancel_callback=cancel_during_simulation,
+        )
+
+    assert callback_calls == 3
+    assert progress_updates == []
+    assert _CANDIDATE_RESULT_CACHE == {}
+
+
+def test_candidate_result_cache_is_bounded(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = default_project_config("Bounded cache")
+    config.optimization_parameters.minimum_reliability_percent = 0.0
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+    monkeypatch.setattr(optimization_module, "_MAX_CANDIDATE_RESULT_CACHE_ENTRIES", 2)
+    _CANDIDATE_RESULT_CACHE.clear()
+
+    optimize_indirect_system(
+        config,
+        rainfall,
+        primary_tanks=(
+            PrimaryTankProduct("Tank 1", 500.0, 500.0),
+            PrimaryTankProduct("Tank 2", 750.0, 700.0),
+            PrimaryTankProduct("Tank 3", 1_000.0, 900.0),
+        ),
+        filtration_pumps=(FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
+        booster_tanks=(BoosterTankProduct("Booster", 100.0, 100.0),),
+    )
+
+    assert len(_CANDIDATE_RESULT_CACHE) == 2

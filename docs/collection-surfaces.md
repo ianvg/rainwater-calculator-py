@@ -50,4 +50,6 @@ The first-flush device's **Antecedent dry period** defines rainfall events using
 
 For each surface, the calculator follows the paper's runoff equation by subtracting the first-flush depth before applying area and runoff coefficient. Equivalently, diverted volume is `area x runoff coefficient x min(rainfall depth, first-flush depth)` with the required unit conversions.
 
+After running an analysis, open **Results > First-flush summaries** to review reconciled yearly and rainfall-event totals for gross runoff, first-flush diversion, and net collection. Event rows retain the simulation event identifier and timing; yearly event counts assign an event to the year in which it begins, even if the event continues into the next year. The same tables are available as an optional report section.
+
 This rainfall-history criterion follows the preferred criterion reported by Khan's 2026 multi-model comparison, [“How much to divert? A multi-model analysis of first flush optimisation in rainwater harvesting systems”](https://doi.org/10.1080/1573062X.2026.2695189). The calculator implements the hydraulic rainfall-history criterion; it does not reproduce the paper's broader savings and economic optimization models.

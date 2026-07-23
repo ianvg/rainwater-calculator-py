@@ -32,7 +32,8 @@ from urllib.parse import parse_qs, quote, urlparse
 
 import pandas as pd
 import pycountry
-from PIL import Image, ImageTk
+import resvg_py
+from PIL import Image, ImageDraw, ImageTk
 from tkintermapview import TkinterMapView, decimal_to_osm
 
 from rainwater_app.acis import (
@@ -185,6 +186,7 @@ from rainwater_app.reporting import (
     report_average_annual_precipitation as _report_average_annual_precipitation,
     report_average_annual_rainfall_volumes as _report_average_annual_rainfall_volumes,
     report_demand_summary as _report_demand_summary,
+    report_first_flush_summaries as _report_first_flush_summaries,
     report_surface_rows as _report_surface_rows,
     report_tank_level_distribution as _report_tank_level_distribution,
     normalize_report_sections,
@@ -562,6 +564,86 @@ def _help_index_path() -> Path | None:
 
 def _float(value: object, default: float = 0.0) -> float:
     return parse_number(value, default)
+
+
+class _ScaledCanvasProxy:
+    """Create Canvas items directly in screen coordinates for a model-space scene."""
+
+    def __init__(
+        self,
+        canvas: tk.Canvas,
+        zoom: float,
+        pan_x: float,
+        pan_y: float,
+    ) -> None:
+        self.canvas = canvas
+        self.zoom = max(float(zoom), 0.01)
+        self.pan_x = float(pan_x)
+        self.pan_y = float(pan_y)
+
+    def _coordinates(self, coordinates: tuple[object, ...]) -> tuple[object, ...]:
+        transformed: list[object] = []
+        for index, value in enumerate(coordinates):
+            if isinstance(value, (int, float)):
+                offset = self.pan_x if index % 2 == 0 else self.pan_y
+                screen_coordinate = (float(value) + offset) * self.zoom
+                transformed.append(round(screen_coordinate * 2.0) / 2.0)
+            else:
+                transformed.append(value)
+        return tuple(transformed)
+
+    def _options(self, options: dict[str, object], *, scale_font: bool = False) -> dict[str, object]:
+        scaled = dict(options)
+        if isinstance(scaled.get("width"), (int, float)):
+            scaled["width"] = max(float(scaled["width"]) * self.zoom, 1.0)
+        if isinstance(scaled.get("arrowshape"), (tuple, list)):
+            scaled["arrowshape"] = tuple(
+                max(float(value) * self.zoom, 1.0) for value in scaled["arrowshape"]
+            )
+        if isinstance(scaled.get("dash"), (tuple, list)):
+            scaled["dash"] = tuple(
+                max(round(float(value) * self.zoom), 1) for value in scaled["dash"]
+            )
+        if scale_font and isinstance(scaled.get("font"), (tuple, list)):
+            font = list(scaled["font"])
+            if len(font) >= 2 and isinstance(font[1], (int, float)):
+                font[1] = max(round(float(font[1]) * self.zoom), 6)
+                scaled["font"] = tuple(font)
+        return scaled
+
+    def create_line(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_line(
+            *self._coordinates(coordinates), **self._options(options)
+        )
+
+    def create_oval(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_oval(
+            *self._coordinates(coordinates), **self._options(options)
+        )
+
+    def create_rectangle(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_rectangle(
+            *self._coordinates(coordinates), **self._options(options)
+        )
+
+    def create_arc(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_arc(
+            *self._coordinates(coordinates), **self._options(options)
+        )
+
+    def create_polygon(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_polygon(
+            *self._coordinates(coordinates), **self._options(options)
+        )
+
+    def create_text(self, *coordinates: object, **options: object) -> int:
+        scaled = self._options(options, scale_font=True)
+        if isinstance(options.get("width"), (int, float)):
+            scaled["width"] = max(float(options["width"]) * self.zoom, 1.0)
+        return self.canvas.create_text(*self._coordinates(coordinates), **scaled)
+
+    def create_image(self, *coordinates: object, **options: object) -> int:
+        return self.canvas.create_image(*self._coordinates(coordinates), **options)
 
 
 class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
@@ -1012,6 +1094,7 @@ class RainwaterTkApp(tk.Tk):
             self.iconphoto(True, self.app_icon)
         self.system_weather_images: dict[str, tk.PhotoImage] = {}
         self.system_weather_assets_loaded = False
+        self.system_builder_node_images: dict[tuple[object, ...], ImageTk.PhotoImage] = {}
         self.active_project_name: str | None = None
         self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
         self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
@@ -6482,104 +6565,101 @@ class RainwaterTkApp(tk.Tk):
         )
 
     @staticmethod
-    def _draw_rounded_system_card(
-        canvas: tk.Canvas,
-        x: float,
-        y: float,
+    def _system_builder_icon_assets() -> dict[str, str]:
+        return {
+            "rainwater_input": "assets/bootstrap-icons/cloud-rain.svg",
+            "primary_tank": "assets/tabler-icons/cylinder.svg",
+            "filtration_pump": "assets/bootstrap-icons/arrow-right-circle-fill.svg",
+            "filtration_system": "assets/bootstrap-icons/filter-square.svg",
+            "booster_tank": "assets/tabler-icons/cylinder.svg",
+            "booster_pump": "assets/bootstrap-icons/speedometer2.svg",
+            "municipal_backup": "assets/bootstrap-icons/buildings-fill.svg",
+            "end_uses": "assets/bootstrap-icons/house-door-fill.svg",
+            "first_flush_diversion": "assets/bootstrap-icons/funnel-fill.svg",
+            "overflow_pipe": "assets/bootstrap-icons/box-arrow-down-right.svg",
+        }
+
+    def _system_builder_node_image(
+        self,
+        component_type: str,
         width: float,
         height: float,
         *,
         fill: str,
         outline: str,
         line_width: int,
-        tags: tuple[str, ...],
-    ) -> None:
-        radius = min(12.0, width / 5.0, height / 4.0)
-        left, top = x - width / 2.0, y - height / 2.0
-        right, bottom = x + width / 2.0, y + height / 2.0
-        canvas.create_polygon(
-            left + radius, top, right - radius, top, right, top + radius,
-            right, bottom - radius, right - radius, bottom, left + radius, bottom,
-            left, bottom - radius, left, top + radius,
-            smooth=True, splinesteps=12, fill=fill, outline=outline,
-            width=line_width, tags=tags,
+    ) -> ImageTk.PhotoImage:
+        zoom = max(float(self.system_builder_zoom), 0.01)
+        target_width = max(round(float(width) * zoom), 1)
+        target_height = max(round(float(height) * zoom), 1)
+        cache_key = (
+            component_type, target_width, target_height, fill, outline, line_width
+        )
+        cached = self.system_builder_node_images.get(cache_key)
+        if cached is not None:
+            return cached
+        if len(self.system_builder_node_images) >= 256:
+            self.system_builder_node_images.clear()
+
+        supersample = 4
+        render_width = target_width * supersample
+        render_height = target_height * supersample
+        image = Image.new("RGBA", (render_width, render_height), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(image)
+        stroke_width = max(round(line_width * zoom * supersample), 1)
+        inset = stroke_width / 2.0
+        radius = min(
+            12.0 * zoom * supersample,
+            render_width / 5.0,
+            render_height / 4.0,
+        )
+        draw.rounded_rectangle(
+            (inset, inset, render_width - inset - 1, render_height - inset - 1),
+            radius=radius,
+            fill=fill,
+            outline=outline,
+            width=stroke_width,
         )
 
-    @staticmethod
-    def _draw_system_component_icon(
-        canvas: tk.Canvas,
-        component_type: str,
-        x: float,
-        y: float,
-        *,
-        color: str,
-        tags: tuple[str, ...],
-    ) -> None:
-        """Draw compact canvas pictograms; tank geometry follows Tabler's MIT cylinder icon."""
-        line = {"fill": color, "width": 2, "tags": tags}
-        if component_type in {"primary_tank", "booster_tank"}:
-            half_width = 15.0 if component_type == "primary_tank" else 13.0
-            height = 24.0 if component_type == "primary_tank" else 21.0
-            top = y - height / 2.0
-            bottom = y + height / 2.0
-            water_fill = "#d8efff" if component_type == "primary_tank" else "#e3f4fb"
-            canvas.create_rectangle(
-                x - half_width, top + 4, x + half_width, bottom - 4,
-                fill=water_fill, outline="", tags=tags,
+        asset_relative_path = self._system_builder_icon_assets().get(component_type)
+        if asset_relative_path is not None:
+            asset_path = _resource_path(asset_relative_path)
+            if asset_path.is_file():
+                svg = asset_path.read_text(encoding="utf-8").replace("currentColor", outline)
+                icon_size = max(round(28.0 * zoom * supersample), 4)
+                icon_png = resvg_py.svg_to_bytes(
+                    svg_string=svg,
+                    width=icon_size,
+                    height=icon_size,
+                    skip_system_fonts=True,
+                )
+                with Image.open(io.BytesIO(icon_png)) as icon_source:
+                    icon = icon_source.convert("RGBA")
+                center_y = render_height / 2.0 - 10.0 * zoom * supersample
+                icon_left = round((render_width - icon.width) / 2.0)
+                icon_top = round(center_y - icon.height / 2.0)
+                image.alpha_composite(icon, (icon_left, icon_top))
+
+        if supersample > 1:
+            image = image.resize(
+                (target_width, target_height), Image.Resampling.LANCZOS
             )
-            canvas.create_arc(
-                x - half_width, top, x + half_width, top + 8,
-                start=0, extent=359, style=tk.ARC, **line,
-            )
-            canvas.create_arc(
-                x - half_width, bottom - 8, x + half_width, bottom,
-                start=180, extent=180, style=tk.ARC, **line,
-            )
-            canvas.create_line(x - half_width, top + 4, x - half_width, bottom - 4, **line)
-            canvas.create_line(x + half_width, top + 4, x + half_width, bottom - 4, **line)
-            canvas.create_line(x - half_width + 2, y + 3, x + half_width - 2, y + 3,
-                               fill="#4aa3d8", width=2, tags=tags)
-        elif component_type in {"filtration_pump", "booster_pump"}:
-            canvas.create_oval(x - 13, y - 13, x + 13, y + 13, outline=color, width=2, tags=tags)
-            canvas.create_polygon(
-                x - 5, y - 8, x + 10, y, x - 5, y + 8,
-                fill="#dcecff", outline=color, width=2, tags=tags,
-            )
-        elif component_type == "rainwater_input":
-            canvas.create_arc(x - 17, y - 9, x + 2, y + 8, start=20, extent=210, style=tk.ARC, **line)
-            canvas.create_arc(x - 3, y - 12, x + 17, y + 8, start=-20, extent=220, style=tk.ARC, **line)
-            for offset in (-10, 0, 10):
-                canvas.create_line(x + offset, y + 7, x + offset - 3, y + 13, **line)
-        elif component_type == "filtration_system":
-            canvas.create_rectangle(x - 16, y - 12, x + 16, y + 12, outline=color, width=2, tags=tags)
-            for offset in (-8, 0, 8):
-                canvas.create_line(x + offset, y - 8, x + offset, y + 8, **line)
-        elif component_type == "municipal_backup":
-            canvas.create_rectangle(x - 15, y - 10, x + 15, y + 12, outline=color, width=2, tags=tags)
-            canvas.create_polygon(x - 18, y - 10, x, y - 18, x + 18, y - 10,
-                                  fill="#e7edf2", outline=color, width=2, tags=tags)
-            canvas.create_line(x, y - 8, x, y + 9, **line)
-        elif component_type == "end_uses":
-            canvas.create_line(x - 15, y - 7, x + 7, y - 7, x + 7, y + 1, **line)
-            canvas.create_line(x - 8, y - 12, x - 8, y - 2, **line)
-            canvas.create_arc(x + 2, y - 2, x + 13, y + 9, start=0, extent=180, style=tk.ARC, **line)
-            canvas.create_oval(x + 6, y + 8, x + 10, y + 13, fill="#4aa3d8", outline="", tags=tags)
-        elif component_type == "first_flush_diversion":
-            canvas.create_polygon(x - 16, y - 12, x + 16, y - 12, x + 5, y,
-                                  x + 5, y + 12, x - 5, y + 12, x - 5, y,
-                                  fill="#edf6fb", outline=color, width=2, tags=tags)
-        elif component_type == "overflow_pipe":
-            canvas.create_line(x - 16, y - 10, x + 4, y - 10, x + 4, y + 10, x + 16, y + 10,
-                               smooth=True, **line)
-        else:
-            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline=color, width=2, tags=tags)
+        photo = ImageTk.PhotoImage(image, master=self)
+        self.system_builder_node_images[cache_key] = photo
+        return photo
 
     def _render_system_builder(self) -> None:
         if not hasattr(self, "system_builder_canvas"):
             return
         self._resize_system_builder_canvas_to_objects()
-        canvas = self.system_builder_canvas
-        canvas.delete("all")
+        raw_canvas = self.system_builder_canvas
+        raw_canvas.delete("all")
+        canvas = _ScaledCanvasProxy(
+            raw_canvas,
+            self.system_builder_zoom,
+            self.system_builder_pan_x,
+            self.system_builder_pan_y,
+        )
         self.system_builder_hover_port = None
         layout_by_id = {str(item.get("id")): item for item in self.config_model.system_layout}
         view_mode = self._normalized_system_builder_view(
@@ -6643,18 +6723,14 @@ class RainwaterTkApp(tk.Tk):
             tag = f"component:{component_id}"
             half_width, half_height = object_width / 2.0, object_height / 2.0
             if view_mode == "icon-graph":
-                self._draw_rounded_system_card(
-                    canvas, x, y, object_width, object_height,
+                node_image = self._system_builder_node_image(
+                    component_type, object_width, object_height,
                     fill=fill, outline=outline,
                     line_width=3 if selected or geometry_selected else 2,
-                    tags=(tag,),
                 )
-                self._draw_system_component_icon(
-                    canvas, component_type, x, y - 8,
-                    color=outline, tags=(tag,),
-                )
+                canvas.create_image(x, y, image=node_image, tags=(tag,))
                 canvas.create_text(
-                    x, y + 19, text=label, width=max(object_width - 10.0, 70.0),
+                    x, y + 17, text=label, width=max(object_width - 10.0, 70.0),
                     justify="center", font=("Segoe UI", 8, "bold"), tags=(tag,)
                 )
             else:
@@ -6793,14 +6869,6 @@ class RainwaterTkApp(tk.Tk):
                         text="OF", fill="#a84300", font=("Segoe UI", 6, "bold"),
                         tags=(f"port:{component_id}:overflow",),
                     )
-        if self.system_builder_zoom != 1.0:
-            canvas.scale("all", 0.0, 0.0, self.system_builder_zoom, self.system_builder_zoom)
-        if self.system_builder_pan_x or self.system_builder_pan_y:
-            canvas.move(
-                "all",
-                self.system_builder_pan_x * self.system_builder_zoom,
-                self.system_builder_pan_y * self.system_builder_zoom,
-            )
         self._refresh_system_component_editor()
         self._refresh_system_builder_warnings()
 
@@ -8575,7 +8643,7 @@ class RainwaterTkApp(tk.Tk):
             ("Economic input", "Electricity / replacement escalation", f"{financial.electricity_escalation_percent:g}% / {financial.equipment_replacement_escalation_percent:g}%", "Financial analysis"),
             ("Economic input", "Recurring replacement", f"{financial.currency} {format_number(financial.equipment_replacement_cost, cfg)} every {financial.equipment_replacement_interval_years} year(s)", "Financial analysis"),
             ("Search method", "Candidate enumeration", f"Up to {math.prod(counts.values())} combinations before compatibility filtering", "Optimization backend"),
-            ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs cached for 4 unchanged runs", "Optimization backend"),
+            ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs and bounded candidate results cached for unchanged runs", "Optimization backend"),
         ]
         self.optimization_assumptions_tree.delete(*self.optimization_assumptions_tree.get_children())
         for row in rows:
@@ -8588,7 +8656,6 @@ class RainwaterTkApp(tk.Tk):
             return
         self._apply_form_to_model()
         self._refresh_optimization_assumptions()
-        self.optimization_tree.delete(*self.optimization_tree.get_children())
         candidates = self._project_candidates()
         category_counts = [
             sum(
@@ -8609,25 +8676,44 @@ class RainwaterTkApp(tk.Tk):
         self.status_var.set("Optimization running: evaluating product combinations")
         self.config(cursor="watch")
         self.analysis_running = True
+        self.analysis_cancel_requested = False
+        self.analysis_active_label = "System optimization"
+        self.cancel_analysis_button.configure(text="Cancel optimization")
+        self.cancel_analysis_button.state(["!disabled"])
         config_snapshot = copy.deepcopy(self.config_model)
         rainfall_snapshot = self.rainfall_df.copy(deep=True)
 
         def worker() -> None:
+            cache_hits = 0
+
+            def record_cache_event(hit: bool) -> None:
+                nonlocal cache_hits
+                cache_hits += int(hit)
+
             try:
                 self.execution_log.debug("Optimization", "Optimization worker started")
                 results = optimize_indirect_system(
                     config_snapshot,
                     rainfall_snapshot,
                     progress_callback=lambda current, total: self.optimization_result_queue.put(
-                        ("progress", current, total)
+                        ("progress", current, total, cache_hits)
                     ),
+                    cancel_callback=lambda: self.analysis_cancel_requested,
+                    cache_callback=record_cache_event,
                 )
-                self.optimization_result_queue.put(("result", results, config_snapshot))
+                self.optimization_result_queue.put(
+                    ("result", results, config_snapshot, cache_hits)
+                )
+            except AnalysisCancelledError:
+                self.optimization_result_queue.put(("cancelled",))
             except Exception as exc:
                 self.execution_log.error("Optimization", "Optimization worker failed", exception=exc)
                 self.optimization_result_queue.put(("error", str(exc)))
 
-        threading.Thread(target=worker, daemon=True, name="optimization-worker").start()
+        self.analysis_thread = threading.Thread(
+            target=worker, daemon=True, name="optimization-worker"
+        )
+        self.analysis_thread.start()
         self.optimization_poll_after_id = self.after(50, self._poll_optimization_results)
 
     def _poll_optimization_results(self) -> None:
@@ -8639,16 +8725,33 @@ class RainwaterTkApp(tk.Tk):
                 break
             kind = message[0]
             if kind == "progress":
-                _kind, current, total = message
-                self.optimization_status_var.set(f"Evaluating combination {current} of {total}...")
+                _kind, current, total, cache_hits = message
+                reused = f"; {cache_hits} reused from cache" if cache_hits else ""
+                self.optimization_status_var.set(
+                    f"Evaluating combination {current} of {total}{reused}..."
+                )
                 self.analysis_progress_var.set(current / max(total, 1) * 100.0)
-                self.status_var.set(f"Optimization running: combination {current} of {total}")
+                self.status_var.set(
+                    f"Optimization running: combination {current} of {total}{reused}"
+                )
                 self.execution_log.debug(
                     "Optimization", f"Evaluating combination {current} of {total}"
                 )
             elif kind == "result":
-                _kind, results, config_snapshot = message
-                self._display_optimization_results(results, config_snapshot)
+                _kind, results, config_snapshot, cache_hits = message
+                self._display_optimization_results(
+                    results, config_snapshot, cache_hits=cache_hits
+                )
+                terminal_message = True
+            elif kind == "cancelled":
+                self.analysis_progress_var.set(0.0)
+                self.status_var.set(
+                    "System optimization cancelled; previous completed results retained"
+                )
+                self.optimization_status_var.set(
+                    "Optimization cancelled; previous completed results were retained."
+                )
+                self.execution_log.warning("Optimization", "System optimization cancelled")
                 terminal_message = True
             else:
                 _kind, error_message = message
@@ -8659,13 +8762,21 @@ class RainwaterTkApp(tk.Tk):
                 messagebox.showwarning(APP_TITLE, error_message, parent=self)
                 terminal_message = True
         if terminal_message:
-            self.analysis_running = False
+            self._finish_analysis_run()
+            self.cancel_analysis_button.configure(text="Cancel analysis")
             self.config(cursor="")
             self.optimization_poll_after_id = None
         elif self.analysis_running:
             self.optimization_poll_after_id = self.after(50, self._poll_optimization_results)
 
-    def _display_optimization_results(self, results: list[object], run_config: ProjectConfig) -> None:
+    def _display_optimization_results(
+        self,
+        results: list[object],
+        run_config: ProjectConfig,
+        *,
+        cache_hits: int = 0,
+    ) -> None:
+        self.optimization_tree.delete(*self.optimization_tree.get_children())
         currency = run_config.financial_parameters.currency
         feasible_count = sum(result.feasible for result in results)
         for index, result in enumerate(results):
@@ -8706,17 +8817,20 @@ class RainwaterTkApp(tk.Tk):
             self.optimization_status_var.set(
                 f"{feasible_count} of {len(results)} combinations meet all constraints. "
                 f"Best: {best.primary_tank.name} + {best.filtration_pump.name} + "
-                f"{best.filtration_unit.name} + {best.booster_tank.name}; {objective.lower()} {best_value}."
+                f"{best.filtration_unit.name} + {best.booster_tank.name}; {objective.lower()} {best_value}. "
+                f"Reused {cache_hits} cached candidate result(s)."
             )
         else:
             self.optimization_status_var.set(
-                f"None of the {len(results)} combinations meet the reliability target."
+                f"None of the {len(results)} combinations meet the reliability target. "
+                f"Reused {cache_hits} cached candidate result(s)."
             )
         self.analysis_progress_var.set(100.0)
         self.status_var.set("Optimization complete")
         self.execution_log.info(
             "Optimization",
-            f"Optimization completed with {len(results)} evaluated combinations and {feasible_count} feasible results",
+            f"Optimization completed with {len(results)} evaluated combinations, "
+            f"{feasible_count} feasible results, and {cache_hits} cache hits",
         )
 
     def _build_financial_tab(self) -> None:
@@ -9093,11 +9207,13 @@ class RainwaterTkApp(tk.Tk):
         self.candidate_results_tab = ttk.Frame(self.results_notebook, padding=8)
         self.multitank_results_tab = ttk.Frame(self.results_notebook, padding=8)
         self.hourly_results_tab = ttk.Frame(self.results_notebook, padding=8)
+        self.first_flush_results_tab = ttk.Frame(self.results_notebook, padding=8)
         self.report_generation_tab = ttk.Frame(self.results_notebook, padding=12)
         self.results_notebook.add(self.summary_results_tab, text="Single-tank summary")
         self.results_notebook.add(self.candidate_results_tab, text="Candidate performance")
         self.results_notebook.add(self.multitank_results_tab, text="Multitank summary")
         self.results_notebook.add(self.hourly_results_tab, text="Hourly results")
+        self.results_notebook.add(self.first_flush_results_tab, text="First-flush summaries")
         self.results_notebook.add(self.report_generation_tab, text="Report generation")
         self.results_notebook.bind("<<NotebookTabChanged>>", self._on_results_subtab_changed)
 
@@ -9412,6 +9528,82 @@ class RainwaterTkApp(tk.Tk):
         hourly_scroll_x = ttk.Scrollbar(hourly, orient="horizontal", command=self.hourly_results_tree.xview)
         hourly_scroll_x.grid(row=3, column=0, sticky="ew")
         self.hourly_results_tree.configure(yscrollcommand=hourly_scroll.set, xscrollcommand=hourly_scroll_x.set)
+
+        first_flush = self._create_results_scroll_content(self.first_flush_results_tab)
+        first_flush.columnconfigure(0, weight=1)
+        ttk.Label(
+            first_flush,
+            text=(
+                "Event totals follow the saved rainfall event identifiers. Yearly totals include "
+                "all simulated first-flush diversion, including legacy results without event IDs."
+            ),
+            foreground="#667278",
+            wraplength=1050,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 8))
+
+        yearly_frame = ttk.LabelFrame(first_flush, text="Yearly first-flush summary", padding=8)
+        yearly_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        yearly_frame.columnconfigure(0, weight=1)
+        yearly_columns = ("year", "events", "gross", "diverted", "collected", "percent")
+        self.first_flush_yearly_tree = ttk.Treeview(
+            yearly_frame, columns=yearly_columns, show="headings", height=7
+        )
+        for column, label in {
+            "year": "Year",
+            "events": "Events started",
+            "gross": "Gross runoff",
+            "diverted": "First-flush diversion",
+            "collected": "Net collected",
+            "percent": "Diverted",
+        }.items():
+            self.first_flush_yearly_tree.heading(column, text=label)
+            self.first_flush_yearly_tree.column(column, width=150, anchor="e", stretch=False)
+        self.first_flush_yearly_tree.grid(row=0, column=0, sticky="nsew")
+        yearly_scroll = ttk.Scrollbar(
+            yearly_frame, orient="vertical", command=self.first_flush_yearly_tree.yview
+        )
+        yearly_scroll.grid(row=0, column=1, sticky="ns")
+        self.first_flush_yearly_tree.configure(yscrollcommand=yearly_scroll.set)
+
+        event_frame = ttk.LabelFrame(first_flush, text="Rainfall-event first-flush summary", padding=8)
+        event_frame.grid(row=2, column=0, sticky="nsew")
+        event_frame.columnconfigure(0, weight=1)
+        event_columns = (
+            "event", "start", "end", "timesteps", "gross", "diverted", "collected", "percent"
+        )
+        self.first_flush_event_tree = ttk.Treeview(
+            event_frame, columns=event_columns, show="headings", height=12
+        )
+        for column, label in {
+            "event": "Event",
+            "start": "Start",
+            "end": "End",
+            "timesteps": "Wet timesteps",
+            "gross": "Gross runoff",
+            "diverted": "First-flush diversion",
+            "collected": "Net collected",
+            "percent": "Diverted",
+        }.items():
+            self.first_flush_event_tree.heading(column, text=label)
+            self.first_flush_event_tree.column(
+                column,
+                width=155,
+                anchor="w" if column in {"event", "start", "end"} else "e",
+                stretch=False,
+            )
+        self.first_flush_event_tree.grid(row=0, column=0, sticky="nsew")
+        event_scroll_y = ttk.Scrollbar(
+            event_frame, orient="vertical", command=self.first_flush_event_tree.yview
+        )
+        event_scroll_y.grid(row=0, column=1, sticky="ns")
+        event_scroll_x = ttk.Scrollbar(
+            event_frame, orient="horizontal", command=self.first_flush_event_tree.xview
+        )
+        event_scroll_x.grid(row=1, column=0, sticky="ew")
+        self.first_flush_event_tree.configure(
+            yscrollcommand=event_scroll_y.set, xscrollcommand=event_scroll_x.set
+        )
 
     @staticmethod
     def _create_results_scroll_content(parent: ttk.Frame) -> ttk.Frame:
@@ -14697,7 +14889,7 @@ class RainwaterTkApp(tk.Tk):
         if not self.analysis_running:
             return
         self.analysis_cancel_requested = True
-        self.status_var.set("Cancelling analysis...")
+        self.status_var.set(f"Cancelling {self.analysis_active_label.lower()}...")
         self.cancel_analysis_button.state(["disabled"])
 
     def export_results(self) -> None:
@@ -15201,6 +15393,9 @@ class RainwaterTkApp(tk.Tk):
             row["precipitation"] = precip_to_display(summary.precipitation, cfg)
             rainfall_events.append(row)
         event_depths = [item.precipitation for item in rainfall_quality.event_summaries]
+        first_flush_events, first_flush_years = _report_first_flush_summaries(
+            self.results_df, cfg
+        )
         try:
             application_version = importlib_metadata.version("rainwater-calculator-standalone")
         except importlib_metadata.PackageNotFoundError:
@@ -15310,6 +15505,8 @@ class RainwaterTkApp(tk.Tk):
                 "largest_events": rainfall_events,
                 "antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
             },
+            "first_flush_event_summary": first_flush_events,
+            "first_flush_yearly_summary": first_flush_years,
             "water_balance": self._report_water_balance(),
             "end_use_rows": self._report_end_use_rows(),
             "financial_summary": {
@@ -15887,7 +16084,54 @@ class RainwaterTkApp(tk.Tk):
                 ),
             )
         self._populate_hourly_results()
+        self._populate_first_flush_summaries()
         self._populate_candidate_performance()
+
+    def _populate_first_flush_summaries(self) -> None:
+        event_rows, yearly_rows = _report_first_flush_summaries(
+            self.results_df, self.config_model
+        )
+        unit = volume_unit(self.config_model)
+        for tree in (self.first_flush_yearly_tree, self.first_flush_event_tree):
+            tree.delete(*tree.get_children())
+            for column, label in (
+                ("gross", "Gross runoff"),
+                ("diverted", "First-flush diversion"),
+                ("collected", "Net collected"),
+            ):
+                tree.heading(column, text=f"{label} ({unit})")
+            tree.heading("percent", text="Diverted (%)")
+            self._wrap_treeview_headings(tree)
+        for row in yearly_rows:
+            self.first_flush_yearly_tree.insert(
+                "",
+                "end",
+                values=(
+                    int(row["year"]),
+                    int(row["event_count"]),
+                    format_number(float(row["gross_runoff"]), self.config_model),
+                    format_number(float(row["first_flush_loss"]), self.config_model),
+                    format_number(float(row["net_collected"]), self.config_model),
+                    format_number(float(row["diversion_percent"]), self.config_model),
+                ),
+            )
+        for row in event_rows:
+            start = str(row["start"]).replace("T00:00:00", "")
+            end = str(row["end"]).replace("T00:00:00", "")
+            self.first_flush_event_tree.insert(
+                "",
+                "end",
+                values=(
+                    row["event_id"],
+                    start,
+                    end,
+                    int(row["wet_timesteps"]),
+                    format_number(float(row["gross_runoff"]), self.config_model),
+                    format_number(float(row["first_flush_loss"]), self.config_model),
+                    format_number(float(row["net_collected"]), self.config_model),
+                    format_number(float(row["diversion_percent"]), self.config_model),
+                ),
+            )
 
     def _populate_hourly_results(self) -> None:
         self.hourly_results_tree.delete(*self.hourly_results_tree.get_children())
@@ -15976,6 +16220,9 @@ class RainwaterTkApp(tk.Tk):
         self.results_tree.delete(*self.results_tree.get_children())
         if hasattr(self, "hourly_results_tree"):
             self.hourly_results_tree.delete(*self.hourly_results_tree.get_children())
+        if hasattr(self, "first_flush_event_tree"):
+            self.first_flush_event_tree.delete(*self.first_flush_event_tree.get_children())
+            self.first_flush_yearly_tree.delete(*self.first_flush_yearly_tree.get_children())
         if hasattr(self, "candidate_performance_tree"):
             self.candidate_performance_tree.delete(*self.candidate_performance_tree.get_children())
             self.candidate_tree_sizes = {}

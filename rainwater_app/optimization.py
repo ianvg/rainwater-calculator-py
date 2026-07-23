@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import copy
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
+import hashlib
 import itertools
+import json
 import math
+import threading
 from typing import Callable, Sequence
 
 import pandas as pd
 
 from .analysis_state import analysis_input_signature
-from .engine import PreparedHourlyInputs, prepare_hourly_inputs, simulate_hourly_indirect_aggregates
+from .engine import (
+    AnalysisCancelledError,
+    PreparedHourlyInputs,
+    prepare_hourly_inputs,
+    simulate_hourly_indirect_aggregates,
+)
 from .financial import calculate_financial_results_from_annual_supply
 from .models import FILTRATION_SYSTEM_FLOW_RATES_GPM, ProjectConfig
 from .equipment_catalog import (
@@ -105,6 +113,9 @@ FILTRATION_UNIT_CATALOG = (
 
 _PREPARED_INPUT_CACHE: OrderedDict[str, PreparedHourlyInputs] = OrderedDict()
 _MAX_PREPARED_CACHE_ENTRIES = 4
+_CANDIDATE_RESULT_CACHE: OrderedDict[str, OptimizationResult] = OrderedDict()
+_MAX_CANDIDATE_RESULT_CACHE_ENTRIES = 2048
+_CANDIDATE_RESULT_CACHE_LOCK = threading.Lock()
 
 
 def _cached_prepared_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> PreparedHourlyInputs:
@@ -120,6 +131,50 @@ def _cached_prepared_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) ->
     return prepared
 
 
+def _candidate_result_cache_key(
+    simulation_signature: str,
+    config: ProjectConfig,
+    tank: PrimaryTankProduct,
+    pump: FiltrationPumpProduct,
+    filtration: FiltrationUnitProduct,
+    booster: BoosterTankProduct,
+) -> str:
+    """Return a stable key for every input that changes a candidate evaluation."""
+    payload = {
+        "simulation_signature": simulation_signature,
+        "financial_parameters": asdict(config.financial_parameters),
+        "electricity_rate_per_kwh": float(
+            config.optimization_parameters.electricity_rate_per_kwh
+        ),
+        "products": [
+            asdict(tank),
+            asdict(pump),
+            asdict(filtration),
+            asdict(booster),
+        ],
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cached_candidate_result(key: str) -> OptimizationResult | None:
+    with _CANDIDATE_RESULT_CACHE_LOCK:
+        cached = _CANDIDATE_RESULT_CACHE.get(key)
+        if cached is not None:
+            _CANDIDATE_RESULT_CACHE.move_to_end(key)
+        return cached
+
+
+def _store_candidate_result(key: str, result: OptimizationResult) -> None:
+    with _CANDIDATE_RESULT_CACHE_LOCK:
+        _CANDIDATE_RESULT_CACHE[key] = result
+        _CANDIDATE_RESULT_CACHE.move_to_end(key)
+        while len(_CANDIDATE_RESULT_CACHE) > _MAX_CANDIDATE_RESULT_CACHE_ENTRIES:
+            _CANDIDATE_RESULT_CACHE.popitem(last=False)
+
+
 def optimize_indirect_system(
     config: ProjectConfig,
     rainfall_df: pd.DataFrame,
@@ -129,6 +184,8 @@ def optimize_indirect_system(
     filtration_units: Sequence[FiltrationUnitProduct] | None = None,
     booster_tanks: Sequence[BoosterTankProduct] | None = None,
     progress_callback: Callable[[int, int], None] | None = None,
+    cancel_callback: Callable[[], bool] | None = None,
+    cache_callback: Callable[[bool], None] | None = None,
 ) -> list[OptimizationResult]:
     settings = config.optimization_parameters
     explicit_legacy_products = (
@@ -243,74 +300,111 @@ def optimize_indirect_system(
     if not 0.0 <= financial.sewer_eligible_percent <= 100.0:
         raise ValueError("Sewer-eligible supply must be between 0% and 100%.")
     raw: list[OptimizationResult] = []
+    if cancel_callback is not None and cancel_callback():
+        raise AnalysisCancelledError("Optimization cancelled by user.")
     prepared = _cached_prepared_inputs(config, rainfall_df)
+    simulation_signature = analysis_input_signature(config, rainfall_df)
     for index, (tank, pump, filtration, booster) in enumerate(products, start=1):
-        candidate = copy.deepcopy(config)
-        candidate.system_type = "Indirect system"
+        if cancel_callback is not None and cancel_callback():
+            raise AnalysisCancelledError("Optimization cancelled by user.")
         flow_gpm = filtration.capacity_gallons_per_hour / 60.0
         if flow_gpm not in FILTRATION_SYSTEM_FLOW_RATES_GPM:
             raise ValueError("Filtration system flow must be 15, 20, 30, 40, or 50 GPM.")
         if pump.capacity_gallons_per_hour != filtration.capacity_gallons_per_hour:
             raise ValueError("Transfer pump flow must match the filtration system flow.")
-        candidate.system_parameters.filtration_system_flow_gpm = int(flow_gpm)
-        candidate.system_parameters.synchronize_filtration_flow()
-        if filtration.recovery_percent is not None:
-            candidate.system_parameters.filter_recovery_percent = filtration.recovery_percent
-        candidate.system_parameters.booster_tank_size_gallons = booster.capacity_gallons
-        aggregates = simulate_hourly_indirect_aggregates(candidate, prepared, tank.capacity_gallons)
-        reliability = aggregates.reliability_percent
-        supplied = aggregates.average_annual_supplied_gallons
-        sewer_eligible_supplied = aggregates.average_annual_sewer_eligible_supplied_gallons
-        municipal_makeup = aggregates.average_annual_municipal_makeup_gallons
-        overflow = aggregates.average_annual_overflow_gallons
-        annual_energy = aggregates.average_annual_pump_flow_gallons / pump.capacity_gallons_per_hour * pump.power_kw
-        installed = (financial.installed_cost + tank.installed_cost + pump.installed_cost
-                     + filtration.installed_cost + booster.installed_cost)
-        lifecycle = calculate_financial_results_from_annual_supply(
-            supplied,
-            average_annual_sewer_eligible_supplied_gallons=sewer_eligible_supplied,
-            water_rate=financial.water_rate,
-            sewer_rate=financial.sewer_rate,
-            billing_unit=financial.tariff_billing_unit,
-            sewer_eligible_percent=financial.sewer_eligible_percent,
-            installed_cost=installed,
-            incentives=financial.incentives,
-            fixed_annual_maintenance=financial.fixed_annual_maintenance,
-            maintenance_percent=financial.annual_maintenance_percent,
-            analysis_period_years=financial.analysis_period_years,
-            discount_rate_percent=financial.discount_rate_percent,
-            utility_rate_escalation_percent=financial.utility_rate_escalation_percent,
-            maintenance_escalation_percent=financial.maintenance_escalation_percent,
-            average_annual_pump_energy_kwh=annual_energy,
-            electricity_rate_per_kwh=settings.electricity_rate_per_kwh,
-            electricity_escalation_percent=financial.electricity_escalation_percent,
-            equipment_replacement_cost=financial.equipment_replacement_cost,
-            equipment_replacement_interval_years=(
-                financial.equipment_replacement_interval_years
-            ),
-            equipment_replacement_escalation_percent=(
-                financial.equipment_replacement_escalation_percent
-            ),
+        cache_key = _candidate_result_cache_key(
+            simulation_signature, config, tank, pump, filtration, booster
         )
-        net_savings = lifecycle.net_annual_savings
-        payback = lifecycle.simple_payback_years
-        period_benefit = lifecycle.analysis_period_net_benefit
-        feasible = reliability >= settings.minimum_reliability_percent
-        if settings.maximum_annual_municipal_makeup_gallons is not None:
-            feasible = feasible and municipal_makeup <= settings.maximum_annual_municipal_makeup_gallons
-        if settings.maximum_installed_cost is not None:
-            feasible = feasible and installed <= settings.maximum_installed_cost
-        if settings.require_positive_net_savings:
-            feasible = feasible and net_savings > 0.0
-        raw.append(
-            OptimizationResult(
-                None, feasible, tank, pump, filtration, booster, reliability, supplied,
-                annual_energy, installed, net_savings, payback, municipal_makeup,
-                overflow, period_benefit, lifecycle.lifecycle_net_present_value,
+        base_result = _cached_candidate_result(cache_key)
+        cache_hit = base_result is not None
+        if cache_callback is not None:
+            cache_callback(cache_hit)
+        if base_result is None:
+            candidate = copy.deepcopy(config)
+            candidate.system_type = "Indirect system"
+            candidate.system_parameters.filtration_system_flow_gpm = int(flow_gpm)
+            candidate.system_parameters.synchronize_filtration_flow()
+            if filtration.recovery_percent is not None:
+                candidate.system_parameters.filter_recovery_percent = filtration.recovery_percent
+            candidate.system_parameters.booster_tank_size_gallons = booster.capacity_gallons
+            aggregates = simulate_hourly_indirect_aggregates(
+                candidate,
+                prepared,
+                tank.capacity_gallons,
+                cancel_callback=cancel_callback,
+            )
+            if cancel_callback is not None and cancel_callback():
+                raise AnalysisCancelledError("Optimization cancelled by user.")
+            supplied = aggregates.average_annual_supplied_gallons
+            annual_energy = (
+                aggregates.average_annual_pump_flow_gallons
+                / pump.capacity_gallons_per_hour
+                * pump.power_kw
+            )
+            installed = (
+                financial.installed_cost
+                + tank.installed_cost
+                + pump.installed_cost
+                + filtration.installed_cost
+                + booster.installed_cost
+            )
+            lifecycle = calculate_financial_results_from_annual_supply(
+                supplied,
+                average_annual_sewer_eligible_supplied_gallons=(
+                    aggregates.average_annual_sewer_eligible_supplied_gallons
+                ),
+                water_rate=financial.water_rate,
+                sewer_rate=financial.sewer_rate,
+                billing_unit=financial.tariff_billing_unit,
+                sewer_eligible_percent=financial.sewer_eligible_percent,
+                installed_cost=installed,
+                incentives=financial.incentives,
+                fixed_annual_maintenance=financial.fixed_annual_maintenance,
+                maintenance_percent=financial.annual_maintenance_percent,
+                analysis_period_years=financial.analysis_period_years,
+                discount_rate_percent=financial.discount_rate_percent,
+                utility_rate_escalation_percent=financial.utility_rate_escalation_percent,
+                maintenance_escalation_percent=financial.maintenance_escalation_percent,
+                average_annual_pump_energy_kwh=annual_energy,
+                electricity_rate_per_kwh=settings.electricity_rate_per_kwh,
+                electricity_escalation_percent=financial.electricity_escalation_percent,
+                equipment_replacement_cost=financial.equipment_replacement_cost,
+                equipment_replacement_interval_years=(
+                    financial.equipment_replacement_interval_years
+                ),
+                equipment_replacement_escalation_percent=(
+                    financial.equipment_replacement_escalation_percent
+                ),
+            )
+            base_result = OptimizationResult(
+                None,
+                False,
+                tank,
+                pump,
+                filtration,
+                booster,
+                aggregates.reliability_percent,
+                supplied,
+                annual_energy,
+                installed,
+                lifecycle.net_annual_savings,
+                lifecycle.simple_payback_years,
+                aggregates.average_annual_municipal_makeup_gallons,
+                aggregates.average_annual_overflow_gallons,
+                lifecycle.analysis_period_net_benefit,
+                lifecycle.lifecycle_net_present_value,
                 lifecycle.internal_rate_of_return_percent,
                 lifecycle.discounted_payback_years,
             )
-        )
+            _store_candidate_result(cache_key, base_result)
+        feasible = base_result.reliability_percent >= settings.minimum_reliability_percent
+        if settings.maximum_annual_municipal_makeup_gallons is not None:
+            feasible = feasible and base_result.average_annual_municipal_makeup_gallons <= settings.maximum_annual_municipal_makeup_gallons
+        if settings.maximum_installed_cost is not None:
+            feasible = feasible and base_result.total_installed_cost <= settings.maximum_installed_cost
+        if settings.require_positive_net_savings:
+            feasible = feasible and base_result.net_annual_savings > 0.0
+        raw.append(replace(base_result, feasible=feasible))
         if progress_callback:
             progress_callback(index, len(products))
     objective = settings.objective

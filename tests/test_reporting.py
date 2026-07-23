@@ -13,6 +13,7 @@ from rainwater_app.reporting import (
     ReportValidationError,
     atomic_write_text,
     report_average_annual_rainfall_volumes,
+    report_first_flush_summaries,
 )
 
 
@@ -104,6 +105,79 @@ def test_average_annual_rainfall_volumes_reconcile_gross_first_flush_and_usable(
     }
 
 
+def test_first_flush_summaries_reconcile_events_and_years() -> None:
+    results = pd.DataFrame(
+        {
+            "Date": ["2024-12-31", "2025-01-01", "2025-01-10", "2025-01-11"],
+            "RainfallEventId": [1, 1, 2, pd.NA],
+            "RainfallEventStart": [True, False, True, False],
+            "GrossCollectedGallons": [100.0, 50.0, 200.0, 0.0],
+            "FirstFlushLossGallons": [10.0, 0.0, 20.0, 0.0],
+            "CollectedGallons": [90.0, 50.0, 180.0, 0.0],
+        }
+    )
+
+    events, years = report_first_flush_summaries(results, default_project_config())
+
+    assert events == [
+        {
+            "event_id": 1,
+            "start": "2024-12-31T00:00:00",
+            "end": "2025-01-01T00:00:00",
+            "wet_timesteps": 2,
+            "gross_runoff": 150.0,
+            "first_flush_loss": 10.0,
+            "net_collected": 140.0,
+            "diversion_percent": pytest.approx(10.0 / 150.0 * 100.0),
+        },
+        {
+            "event_id": 2,
+            "start": "2025-01-10T00:00:00",
+            "end": "2025-01-10T00:00:00",
+            "wet_timesteps": 1,
+            "gross_runoff": 200.0,
+            "first_flush_loss": 20.0,
+            "net_collected": 180.0,
+            "diversion_percent": 10.0,
+        },
+    ]
+    assert years == [
+        {
+            "year": 2024,
+            "event_count": 1,
+            "gross_runoff": 100.0,
+            "first_flush_loss": 10.0,
+            "net_collected": 90.0,
+            "diversion_percent": 10.0,
+        },
+        {
+            "year": 2025,
+            "event_count": 1,
+            "gross_runoff": 250.0,
+            "first_flush_loss": 20.0,
+            "net_collected": 230.0,
+            "diversion_percent": 8.0,
+        },
+    ]
+
+
+def test_first_flush_yearly_summary_supports_legacy_results_without_event_ids() -> None:
+    results = pd.DataFrame(
+        {
+            "Date": ["2024-01-01"],
+            "GrossCollectedGallons": [100.0],
+            "FirstFlushLossGallons": [10.0],
+            "CollectedGallons": [90.0],
+        }
+    )
+
+    events, years = report_first_flush_summaries(results, default_project_config())
+
+    assert events == []
+    assert years[0]["event_count"] == 0
+    assert years[0]["first_flush_loss"] == 10.0
+
+
 def test_rainfall_volume_summary_is_grouped_in_every_report_format(tmp_path) -> None:
     report = _renderable_report()
     report["average_annual_rainfall_volumes"] = {
@@ -127,6 +201,48 @@ def test_rainfall_volume_summary_is_grouped_in_every_report_format(tmp_path) -> 
     assert "Rainfall Volume Summary" in pdf_text
     assert "Total average rain: 12,500 gal/year" in pdf_text
     assert "Total usable average rain: 11,750 gal/year" in pdf_text
+
+
+def test_first_flush_summaries_are_rendered_in_every_report_format(tmp_path) -> None:
+    report = _renderable_report()
+    report["first_flush_yearly_summary"] = [
+        {
+            "year": 2025,
+            "event_count": 2,
+            "gross_runoff": 350.0,
+            "first_flush_loss": 30.0,
+            "net_collected": 320.0,
+            "diversion_percent": 30.0 / 350.0 * 100.0,
+        }
+    ]
+    report["first_flush_event_summary"] = [
+        {
+            "event_id": 7,
+            "start": "2025-01-10T00:00:00",
+            "end": "2025-01-11T00:00:00",
+            "wet_timesteps": 2,
+            "gross_runoff": 150.0,
+            "first_flush_loss": 10.0,
+            "net_collected": 140.0,
+            "diversion_percent": 10.0 / 150.0 * 100.0,
+        }
+    ]
+    service = ReportRenderingService()
+
+    html = service.html(report)
+    latex = service.latex(report)
+    target = tmp_path / "first-flush-summaries.pdf"
+    service.pdf(target, report)
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(target).pages)
+
+    assert 'id="first-flush-summary"' in html
+    assert "350" in html
+    assert "2025-01-10T00:00:00" in html
+    assert r"\section{First-flush Diversion Summary}" in latex
+    assert "2025-01-10T00:00:00" in latex
+    assert "First-flush Diversion Summary" in pdf_text
+    assert "Event 7" in pdf_text
+    assert "diverted 10 gal" in pdf_text
 
 
 def test_report_section_choices_apply_to_html_latex_and_pdf(tmp_path) -> None:

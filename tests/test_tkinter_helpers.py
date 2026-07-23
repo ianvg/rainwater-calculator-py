@@ -42,6 +42,7 @@ from rainwater_app.ui_logic import (
 )
 from tkinter_app import (
     RainwaterTkApp,
+    _ScaledCanvasProxy,
     _StationMapView,
     _normalize_text_scale_percent,
     _two_line_heading_text,
@@ -60,6 +61,56 @@ from tkinter_app import DemandObjectDialog
 )
 def test_system_builder_view_normalization(value: object, expected: str) -> None:
     assert RainwaterTkApp._normalized_system_builder_view(value) == expected
+
+
+def test_scaled_canvas_proxy_redraws_geometry_and_type_at_target_zoom() -> None:
+    class RecordingCanvas:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, tuple[object, ...], dict[str, object]]] = []
+
+        def create_line(self, *coordinates: object, **options: object) -> int:
+            self.calls.append(("line", coordinates, options))
+            return 1
+
+        def create_text(self, *coordinates: object, **options: object) -> int:
+            self.calls.append(("text", coordinates, options))
+            return 2
+
+    canvas = RecordingCanvas()
+    proxy = _ScaledCanvasProxy(canvas, zoom=1.25, pan_x=-2.0, pan_y=3.0)
+
+    proxy.create_line(10.2, 20.2, 30.2, 40.2, width=2, dash=(5, 3))
+    proxy.create_text(10.2, 20.2, text="Tank", width=80, font=("Segoe UI", 8, "bold"))
+
+    assert canvas.calls[0] == (
+        "line",
+        (10.0, 29.0, 35.0, 54.0),
+        {"width": 2.5, "dash": (6, 4)},
+    )
+    assert canvas.calls[1] == (
+        "text",
+        (10.0, 29.0),
+        {"text": "Tank", "width": 100.0, "font": ("Segoe UI", 10, "bold")},
+    )
+
+
+def test_system_builder_uses_real_svg_asset_for_every_component() -> None:
+    assets = RainwaterTkApp._system_builder_icon_assets()
+
+    assert set(assets) == {
+        "rainwater_input",
+        "primary_tank",
+        "filtration_pump",
+        "filtration_system",
+        "booster_tank",
+        "booster_pump",
+        "municipal_backup",
+        "end_uses",
+        "first_flush_diversion",
+        "overflow_pipe",
+    }
+    for relative_path in assets.values():
+        assert tkinter_app._resource_path(relative_path).is_file()
 
 
 def test_demand_quantity_summary_uses_selected_number_format() -> None:

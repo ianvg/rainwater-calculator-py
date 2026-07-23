@@ -251,6 +251,30 @@ def render_latex(
         )
         for row in event_summary.get("largest_events", [])
     ) or _latex_row("No wet-weather events", "--", "--", "--", "--", "--")
+    first_flush_yearly_rows_latex = "\n".join(
+        _latex_row(
+            row.get("year", ""),
+            row.get("event_count", 0),
+            format_number(float(row.get("gross_runoff", 0.0))),
+            format_number(float(row.get("first_flush_loss", 0.0))),
+            format_number(float(row.get("net_collected", 0.0))),
+            f'{format_number(float(row.get("diversion_percent", 0.0)))}%',
+        )
+        for row in report.get("first_flush_yearly_summary", [])
+    ) or _latex_row("No yearly first-flush summary", "--", "--", "--", "--", "--")
+    first_flush_event_rows_latex = "\n".join(
+        _latex_row(
+            row.get("event_id", ""),
+            row.get("start", ""),
+            row.get("end", ""),
+            row.get("wet_timesteps", 0),
+            format_number(float(row.get("gross_runoff", 0.0))),
+            format_number(float(row.get("first_flush_loss", 0.0))),
+            format_number(float(row.get("net_collected", 0.0))),
+            f'{format_number(float(row.get("diversion_percent", 0.0)))}%',
+        )
+        for row in report.get("first_flush_event_summary", [])
+    ) or _latex_row("No event-level first-flush summary", "--", "--", "--", "--", "--", "--", "--")
     provenance_rows_latex = "\n".join(
         _latex_row(label, value)
         for label, value in (
@@ -639,6 +663,27 @@ Year & Observed & Missing & Complete & Precip. ({_latex_escape(report['precipita
 Event & Start & End & Duration & Wet days & Precip. \\
 \midrule
 {rainfall_event_rows_latex}
+\bottomrule
+\end{{longtable}}
+\normalsize
+
+\section{{First-flush Diversion Summary}}
+\noindent Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.
+\subsection*{{Yearly totals}}
+\scriptsize
+\begin{{longtable}}{{@{{}}rrrrrr@{{}}}}
+\toprule
+Year & Events & Gross ({_latex_escape(volume)}) & Diverted ({_latex_escape(volume)}) & Net ({_latex_escape(volume)}) & Diverted \% \\
+\midrule
+{first_flush_yearly_rows_latex}
+\bottomrule
+\end{{longtable}}
+\subsection*{{Rainfall-event totals}}
+\begin{{longtable}}{{@{{}}rllrrrrr@{{}}}}
+\toprule
+Event & Start & End & Wet steps & Gross & Diverted & Net & Diverted \% \\
+\midrule
+{first_flush_event_rows_latex}
 \bottomrule
 \end{{longtable}}
 \normalsize
@@ -1212,6 +1257,25 @@ def render_html(
         f'<td>{format_number(float(row.get("precipitation", 0.0)), max_decimal_places=3)}</td></tr>'
         for row in event_summary.get("largest_events", [])
     ) or '<tr><td colspan="6">No wet-weather events were identified.</td></tr>'
+    first_flush_yearly_rows = "".join(
+        f'<tr><td>{int(row.get("year", 0))}</td>'
+        f'<td>{int(row.get("event_count", 0)):,}</td>'
+        f'<td>{format_number(float(row.get("gross_runoff", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("first_flush_loss", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("net_collected", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("diversion_percent", 0.0)))}%</td></tr>'
+        for row in report.get("first_flush_yearly_summary", [])
+    ) or '<tr><td colspan="6">No yearly first-flush summary is available.</td></tr>'
+    first_flush_event_rows = "".join(
+        f'<tr><td>{escape(row.get("event_id", ""))}</td>'
+        f'<td>{escape(row.get("start", ""))}</td><td>{escape(row.get("end", ""))}</td>'
+        f'<td>{int(row.get("wet_timesteps", 0)):,}</td>'
+        f'<td>{format_number(float(row.get("gross_runoff", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("first_flush_loss", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("net_collected", 0.0)))}</td>'
+        f'<td>{format_number(float(row.get("diversion_percent", 0.0)))}%</td></tr>'
+        for row in report.get("first_flush_event_summary", [])
+    ) or '<tr><td colspan="8">No event-level first-flush summary is available.</td></tr>'
 
     provenance = report.get("provenance", {})
     provenance_rows = "".join(
@@ -1402,7 +1466,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 @media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
 </style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#first-flush-summary">First-flush diversion</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
@@ -1421,6 +1485,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="rainfall-quality"><h2>Rainfall quality and completeness</h2><dl>{rainfall_quality_rows}</dl><h3>Missing periods</h3><p>Up to 20 missing periods are shown, including partial-year boundary periods.</p><table><thead><tr><th>Start</th><th>End</th><th>Days</th></tr></thead><tbody>{missing_period_rows}</tbody></table></section>
 <section id="yearly-rainfall"><h2>Yearly rainfall summary</h2><div class="table-scroll"><table><thead><tr><th>Year</th><th>Observed days</th><th>Missing days</th><th>Completeness</th><th>Precipitation ({escape(report['precipitation_unit'])})</th><th>Wet days</th><th>Status</th></tr></thead><tbody>{yearly_rainfall_rows}</tbody></table></div></section>
 <section id="rainfall-events"><h2>Rainfall-event summary</h2><p>{format_number(int(event_summary.get('event_count', 0)), max_decimal_places=0)} event(s) were identified using an antecedent dry threshold of {format_number(float(event_summary.get('antecedent_dry_days', 1.0)))} day(s). Average event precipitation: {format_number(float(event_summary.get('average_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}; largest event: {format_number(float(event_summary.get('largest_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}. The table lists up to the 10 largest events.</p><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Duration (days)</th><th>Wet days</th><th>Precipitation ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{rainfall_event_rows}</tbody></table></div></section>
+<section id="first-flush-summary"><h2>First-flush diversion summary</h2><p>Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.</p><h3>Yearly totals</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Events started</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_yearly_rows}</tbody></table></div><h3>Rainfall-event totals</h3><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Wet timesteps</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_event_rows}</tbody></table></div></section>
 <section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
 <g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
