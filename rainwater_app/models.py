@@ -15,6 +15,25 @@ UNIT_SYSTEMS = (ENGLISH_UNIT_SYSTEM, METRIC_UNIT_SYSTEM)
 FRACTIONAL_SCHEDULE_TYPE = "fractional"
 OCCUPANCY_SCHEDULE_TYPE = "occupancy"
 SCHEDULE_TYPES = (FRACTIONAL_SCHEDULE_TYPE, OCCUPANCY_SCHEDULE_TYPE)
+FILTRATION_SYSTEM_FLOW_RATES_GPM = (15, 20, 30, 40, 50)
+TRANSFER_PUMP_TYPES = ("External", "Submersible")
+
+
+def normalize_filtration_system_flow_gpm(value: object) -> int:
+    """Return the nearest supported nominal filtration-skid flow rate."""
+    try:
+        flow = float(value)
+    except (TypeError, ValueError):
+        flow = 20.0
+    return min(FILTRATION_SYSTEM_FLOW_RATES_GPM, key=lambda candidate: (abs(candidate - flow), candidate))
+
+
+def normalize_transfer_pump_type(value: object) -> str:
+    label = str(value or "").strip().casefold()
+    return next(
+        (pump_type for pump_type in TRANSFER_PUMP_TYPES if pump_type.casefold() == label),
+        TRANSFER_PUMP_TYPES[0],
+    )
 
 
 def normalize_unit_system(value: object) -> str:
@@ -330,11 +349,32 @@ class TankParameters:
 class SystemComponentParameters:
     pump_capacity_gallons_per_hour: float = 0.0
     filtration_pump_capacity_gallons_per_hour: float = 1200.0
+    filtration_system_flow_gpm: int = 20
+    transfer_pump_type: str = "External"
     filter_recovery_percent: float = 100.0
     booster_tank_size_gallons: float = 0.0
     booster_initial_fill_percent: float = 0.0
     booster_refill_level_percent: float = 50.0
     municipal_backup_enabled: bool = True
+
+    def synchronize_filtration_flow(self) -> None:
+        """Make the legacy transfer-pump capacity mirror the filtration skid selection."""
+        self.filtration_system_flow_gpm = normalize_filtration_system_flow_gpm(
+            self.filtration_system_flow_gpm
+        )
+        self.transfer_pump_type = normalize_transfer_pump_type(self.transfer_pump_type)
+        self.filtration_pump_capacity_gallons_per_hour = (
+            float(self.filtration_system_flow_gpm) * 60.0
+        )
+
+    @property
+    def transfer_pump_capacity_gallons_per_hour(self) -> float:
+        """Linked transfer-pump capacity derived from the filtration system."""
+        if self.filtration_system_flow_gpm not in FILTRATION_SYSTEM_FLOW_RATES_GPM:
+            raise ValueError(
+                "Filtration system flow must be one of 15, 20, 30, 40, or 50 GPM."
+            )
+        return float(self.filtration_system_flow_gpm) * 60.0
 
 
 @dataclass

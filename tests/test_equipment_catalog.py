@@ -13,12 +13,16 @@ from rainwater_app.optimization import optimize_indirect_system
 
 
 def product(product_id: str, category: str, model: str, **properties: object) -> dict[str, object]:
+    rated_flow = float(properties.get("rated_flow_gpm", 0.0))
     return {
         "id": product_id,
         "category": category,
         "manufacturer": "Approved Co",
         "model": model,
-        "capacity": 100.0 if category != "Primary tank" else 1_000.0,
+        "capacity": (
+            1_000.0 if category == "Primary tank"
+            else rated_flow * 60.0 if rated_flow else 100.0
+        ),
         "installed_cost": 100.0,
         "properties": properties,
         "dimensions": {},
@@ -28,7 +32,9 @@ def product(product_id: str, category: str, model: str, **properties: object) ->
 
 
 def test_missing_required_attribute_warns_by_default_and_can_be_required() -> None:
-    pump = product("pump", "Filtration pump", "Pump")
+    pump = product(
+        "pump", "Filtration pump", "Pump", rated_flow_gpm=20, pump_type="External"
+    )
     eligible, reasons = evaluate_product_eligibility(pump, {"required_voltage": "230"})
     assert eligible is True
     assert reasons == ["Missing voltage"]
@@ -44,18 +50,21 @@ def test_missing_required_attribute_warns_by_default_and_can_be_required() -> No
     assert reasons == ["Missing voltage"]
 
 
-def test_flow_range_compatibility_is_optional() -> None:
-    pump = product("pump", "Filtration pump", "100 GPM pump", rated_flow_gpm=100)
+def test_transfer_pump_must_match_filtration_system_flow() -> None:
+    pump = product("pump", "Transfer pump", "20 GPM pump", rated_flow_gpm=20)
     filtration = product(
-        "filter", "Filtration unit", "Small filter", minimum_flow_gpm=10, maximum_flow_gpm=50
+        "filter", "Filtration system", "15 GPM system", rated_flow_gpm=15,
+        minimum_flow_gpm=15, maximum_flow_gpm=15,
     )
-    assert evaluate_combination_compatibility((pump, filtration), {})[0] is True
-
-    compatible, reasons = evaluate_combination_compatibility(
-        (pump, filtration), {"enforce_flow_compatibility": True}
-    )
+    compatible, reasons = evaluate_combination_compatibility((pump, filtration), {})
     assert compatible is False
-    assert "outside" in reasons[0]
+    assert "does not match" in reasons[0]
+
+    matching = product(
+        "filter-20", "Filtration system", "20 GPM system", rated_flow_gpm=20,
+        minimum_flow_gpm=20, maximum_flow_gpm=20,
+    )
+    assert evaluate_combination_compatibility((pump, matching), {})[0] is True
 
 
 def test_library_update_preserves_project_overrides() -> None:
@@ -74,14 +83,14 @@ def test_optimizer_uses_only_compatible_four_component_combinations() -> None:
     config = default_project_config("Catalog compatibility")
     candidates = [
         candidate_from_product(product("tank", "Primary tank", "Tank")),
-        candidate_from_product(product("pump", "Filtration pump", "Pump", power_kw=.5, rated_flow_gpm=100)),
+        candidate_from_product(product("pump", "Transfer pump", "Pump", power_kw=.5, rated_flow_gpm=20)),
         candidate_from_product(product(
-            "small-filter", "Filtration unit", "Small filter",
-            minimum_flow_gpm=10, maximum_flow_gpm=50,
+            "small-filter", "Filtration system", "15 GPM system", rated_flow_gpm=15,
+            minimum_flow_gpm=15, maximum_flow_gpm=15,
         )),
         candidate_from_product(product(
-            "right-filter", "Filtration unit", "Right filter",
-            minimum_flow_gpm=50, maximum_flow_gpm=150,
+            "right-filter", "Filtration system", "20 GPM system", rated_flow_gpm=20,
+            minimum_flow_gpm=20, maximum_flow_gpm=20,
         )),
         candidate_from_product(product("buffer", "Buffer tank", "Buffer")),
     ]
@@ -93,5 +102,5 @@ def test_optimizer_uses_only_compatible_four_component_combinations() -> None:
     results = optimize_indirect_system(config, rainfall)
 
     assert len(results) == 1
-    assert results[0].filtration_unit.name == "Right filter"
+    assert results[0].filtration_unit.name == "20 GPM system"
     assert results[0].total_installed_cost == 400.0

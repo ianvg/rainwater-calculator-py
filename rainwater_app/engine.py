@@ -397,7 +397,7 @@ def simulate_hourly_indirect_aggregates(
     if tank_size_gallons <= 0.0:
         raise ValueError("Tank size must be greater than zero.")
     params = config.system_parameters
-    pump_capacity = max(float(params.filtration_pump_capacity_gallons_per_hour), 0.0)
+    pump_capacity = params.transfer_pump_capacity_gallons_per_hour
     recovery = min(max(float(params.filter_recovery_percent) / 100.0, 0.0), 1.0)
     booster_capacity = max(float(params.booster_tank_size_gallons), 0.0)
     booster_water = booster_capacity * min(max(float(params.booster_initial_fill_percent) / 100.0, 0.0), 1.0)
@@ -550,7 +550,7 @@ def simulate_tank(
                 )
                 requested_input = demand_today / recovery if recovery > 0.0 else 0.0
                 daily_capacity = max(
-                    config.system_parameters.filtration_pump_capacity_gallons_per_hour, 0.0
+                    config.system_parameters.transfer_pump_capacity_gallons_per_hour, 0.0
                 ) * 24.0
                 withdrawn_today = min(available_for_withdrawal, requested_input)
                 if daily_capacity > 0.0:
@@ -654,9 +654,7 @@ def simulate_hourly_tank(
     indirect = system.filtration_path or system.booster_storage_path
     component_params = config.system_parameters
     pump_capacity = max(float(component_params.pump_capacity_gallons_per_hour), 0.0)
-    filtration_pump_capacity = max(
-        float(component_params.filtration_pump_capacity_gallons_per_hour), 0.0
-    )
+    filtration_pump_capacity = component_params.transfer_pump_capacity_gallons_per_hour
     filter_recovery = min(max(float(component_params.filter_recovery_percent) / 100.0, 0.0), 1.0)
     booster_capacity = (
         max(float(component_params.booster_tank_size_gallons), 0.0)

@@ -44,6 +44,9 @@ lock-bootstrap = [
 where = ["."]
 include = ["rainwater_app*"]
 
+[tool.setuptools.package-data]
+rainwater_app = ["data/*.json.gz"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

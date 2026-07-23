@@ -17,7 +17,7 @@ The application separates the problem into the following parts:
 
 | Part | Meaning | Current implementation |
 | --- | --- | --- |
-| Design variables | Decisions left open to the optimizer | Primary tank product, filtration pump product, buffer tank product |
+| Design variables | Decisions left open to the optimizer | Primary tank product, transfer pump product, buffer tank product |
 | Fixed parameters | Project values not changed by the optimizer | Rainfall, collection surfaces, demand, controls, tariffs, maintenance, electricity price |
 | Governing model | Predicts each candidate's behavior | Hourly collection, storage, treatment, booster, demand, backup, and overflow mass balance |
 | Objective | Defines which feasible design ranks highest | Simple payback, net annual savings, rainwater reliability, or analysis-period net benefit |
@@ -31,17 +31,17 @@ The **Optimization problem definition and assumptions** table shows the actual v
 The current optimizer leaves four discrete equipment selections open:
 
 - Primary tank product and capacity.
-- Filtration pump product, capacity, power, and cost.
-- Filtration unit product, compatible flow range, optional recovery, and cost.
+- Transfer pump product, linked flow, installation type, power, and cost. The transfer pump is also known as the filtration pump.
+- Filtration system product, nominal 15, 20, 30, 40, or 50 GPM flow, optional recovery, and cost.
 - Buffer tank product and capacity.
 
 The equipment workspace is nested under **Optimization problem definition and assumptions**. **Equipment library** contains reusable products shared by projects. Applying a product creates a project snapshot, so later library edits never silently change an existing analysis. Select a project product and choose **Update from library** to accept current library values explicitly; any project overrides remain in effect. **Edit project copy** can change the effective name, capacity, cost, or power without changing the shared library.
 
-**Project candidates** classifies applied products as **Candidate**, **Fixed**, or **Excluded**. A fixed product is the only product considered in its category. The eligibility column distinguishes products accepted by the project constraints, accepted with warnings, and excluded as ineligible. The optimizer requires an eligible primary tank, filtration pump, filtration unit, and buffer tank.
+**Project candidates** classifies applied products as **Candidate**, **Fixed**, or **Excluded**. A fixed product is the only product considered in its category. The eligibility column distinguishes products accepted by the project constraints, accepted with warnings, and excluded as ineligible. The optimizer requires an eligible primary tank, transfer pump, filtration system, and buffer tank.
 
 **Project constraints** supports approved vendors, required tags and standards, voltage, phase, pressure class, connection size, optional dimensional limits, access clearance, and project notes. Missing product values pass with a warning by default. Enable **Require values for active constraints** to make missing values ineligible. Dimensions in the shared library and project constraints use inches and square inches.
 
-Pump-to-filtration-unit flow checking is optional. When enabled, the pump rated flow must fall within the filtration unit's minimum and maximum compatible flow. Products may also declare required companion equipment categories. **Compatibility review** explains product warnings and rejected combinations before an optimization run.
+Transfer-pump and filtration-system flow matching is mandatory. A combination is eligible only when both products have the same nominal 15, 20, 30, 40, or 50 GPM flow. Products may also declare required companion equipment categories. **Compatibility review** explains product warnings and rejected combinations before an optimization run.
 
 The supplied catalog is illustrative. Its product identifiers, capacities, power, and prices are development assumptions, not vendor data, quotations, or engineering recommendations.
 
@@ -50,7 +50,7 @@ The supplied catalog is illustrative. Its product identifiers, capacities, power
 Only one objective is used for ranking during a run:
 
 - **Simple payback** minimizes net installed cost divided by positive net annual savings. A candidate with non-positive savings has no finite payback.
-- **Net annual savings** maximizes avoided water and eligible sewer charges after maintenance and filtration-pump electricity.
+- **Net annual savings** maximizes avoided water and eligible sewer charges after maintenance and transfer-pump electricity.
 - **Rainwater reliability** maximizes the percentage of hourly demand intervals fully supplied by rainwater.
 - **Analysis-period net benefit** maximizes undiscounted net annual savings over the selected analysis period minus net installed cost.
 - **Lifecycle NPV** maximizes discounted lifecycle value after escalation, electricity, maintenance, and recurring replacement costs.
@@ -61,7 +61,7 @@ Changing the objective changes ranking, not the hydraulic simulation or feasibil
 
 Minimum rainwater reliability is always evaluated. Optional constraints include maximum annual municipal makeup, maximum installed cost, and positive net annual savings. Blank maximum fields mean no limit. A candidate receives a rank only when every active constraint is satisfied.
 
-Physical limits enforced inside the simulation include non-negative storage, tank-capacity limits, the primary minimum operating level, filtration-pump capacity, booster capacity, filter recovery, demand withdrawal, municipal-backup behavior, and overflow. Equipment catalog values must have positive capacity and non-negative cost and power.
+Physical limits enforced inside the simulation include non-negative storage, tank-capacity limits, the primary minimum operating level, linked filtration-system and transfer-pump flow, booster capacity, filter recovery, demand withdrawal, municipal-backup behavior, and overflow. Equipment catalog values must have positive capacity and non-negative cost and power.
 
 ## Fixed assumptions used by optimization
 
@@ -85,7 +85,7 @@ Current model assumptions that materially affect interpretation are:
 - Hydraulic calculations use hourly timesteps.
 - Each day's collected rainfall enters storage after that day's demand, a conservative timing assumption.
 - Municipal backup does not count as rainwater reliability or rainwater supplied.
-- Filtration-pump energy is estimated from simulated transferred volume divided by rated capacity, multiplied by catalog power.
+- Transfer-pump energy is estimated from simulated transferred volume divided by rated capacity, multiplied by catalog power.
 - Financial calculations use flat tariffs and the shared lifecycle cash-flow engine. NPV uses year-end cash flows and the configured discount and escalation rates.
 - Catalog component costs are added to the base installed system cost; incentives are subtracted once.
 - Percentage maintenance applies to total installed cost.
@@ -93,7 +93,7 @@ Current model assumptions that materially affect interpretation are:
 
 ## Candidate evaluation
 
-For every eligible and compatible primary-tank, filtration-pump, filtration-unit, and buffer-tank combination, the application:
+For every eligible and compatible primary-tank, transfer-pump, filtration-system, and buffer-tank combination, the application:
 
 1. Creates an indirect-system candidate.
 2. Runs the same hourly mass-balance rules in aggregate-only mode, without constructing a full timestep table.

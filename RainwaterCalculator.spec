@@ -8,6 +8,10 @@ a = Analysis(
         ("site", "help"),
         ("assets/app_icon.png", "assets"),
         ("assets/third_party/weather", "assets/third_party/weather"),
+        (
+            "rainwater_app/data/noaa_normals_1991_2020_v1_0_1_station_catalog.json.gz",
+            "rainwater_app/data",
+        ),
     ],
     hiddenimports=[],
     hookspath=[],

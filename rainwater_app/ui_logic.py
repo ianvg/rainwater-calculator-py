@@ -231,7 +231,7 @@ def system_object_editor_validation(
         "graph_end": "Graph end tank size",
         "graph_step": "Graph step",
         "graph_auto_step_count": "Number of steps",
-        "filtration_pump_capacity": "Pump capacity",
+        "filtration_system_flow_gpm": "Filtration system flow",
         "filter_recovery": "Filter recovery",
         "booster_tank_size": "Tank size",
         "booster_initial_fill": "Initial fill",
@@ -248,8 +248,8 @@ def system_object_editor_validation(
             "graph_step",
             "graph_auto_step_count",
         ),
-        "filtration_pump": ("filtration_pump_capacity",),
-        "filtration_system": ("filter_recovery",),
+        "filtration_pump": (),
+        "filtration_system": ("filtration_system_flow_gpm", "filter_recovery"),
         "booster_tank": (
             "booster_tank_size",
             "booster_initial_fill",
@@ -271,9 +271,20 @@ def system_object_editor_validation(
     if errors:
         return errors
 
-    for field in {"filtration_pump_capacity", "booster_tank_size", "pump_capacity"}.intersection(parsed):
+    for field in {"booster_tank_size", "pump_capacity"}.intersection(parsed):
         if parsed[field] < 0:
             errors.append(f"{numeric_labels[field]} cannot be negative.")
+
+    if (
+        "filtration_system_flow_gpm" in parsed
+        and parsed["filtration_system_flow_gpm"] not in {15.0, 20.0, 30.0, 40.0, 50.0}
+    ):
+        errors.append("Filtration system flow must be 15, 20, 30, 40, or 50 GPM.")
+
+    if component_type == "filtration_pump" and values.get("transfer_pump_type") not in {
+        "External", "Submersible"
+    }:
+        errors.append("Transfer pump type must be External or Submersible.")
 
     for field in (
         "initial_fill",

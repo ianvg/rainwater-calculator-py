@@ -1022,7 +1022,7 @@ def test_indirect_booster_refill_cycles_from_setpoint_until_full() -> None:
     cfg.system_parameters.booster_tank_size_gallons = 100.0
     cfg.system_parameters.booster_initial_fill_percent = 100.0
     cfg.system_parameters.booster_refill_level_percent = 50.0
-    cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = 10.0
+    cfg.system_parameters.filtration_system_flow_gpm = 15
     cfg.system_parameters.municipal_backup_enabled = False
     rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
 
@@ -1030,9 +1030,19 @@ def test_indirect_booster_refill_cycles_from_setpoint_until_full() -> None:
 
     assert result["PumpFlowGallons"].iloc[0] == pytest.approx(0.0)
     assert result["BoosterTankGallons"].iloc[0] == pytest.approx(40.0)
-    assert result["PumpFlowGallons"].iloc[1:7].tolist() == pytest.approx([10.0] * 6)
-    assert result["BoosterTankGallons"].iloc[6] == pytest.approx(100.0)
-    assert result["PumpFlowGallons"].iloc[7:].sum() == pytest.approx(0.0)
+    assert result["PumpFlowGallons"].iloc[1] == pytest.approx(60.0)
+    assert result["BoosterTankGallons"].iloc[1] == pytest.approx(100.0)
+    assert result["PumpFlowGallons"].iloc[2:].sum() == pytest.approx(0.0)
+
+
+def test_simulation_rejects_unsupported_filtration_system_flow() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.system_parameters.filtration_system_flow_gpm = 25
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    with pytest.raises(ValueError, match="15, 20, 30, 40, or 50 GPM"):
+        simulate_hourly_tank(cfg, rainfall, 1000.0)
 
 
 def test_indirect_municipal_makeup_refills_booster_when_primary_is_empty() -> None:
@@ -1046,17 +1056,17 @@ def test_indirect_municipal_makeup_refills_booster_when_primary_is_empty() -> No
     cfg.system_parameters.booster_tank_size_gallons = 100.0
     cfg.system_parameters.booster_initial_fill_percent = 0.0
     cfg.system_parameters.booster_refill_level_percent = 50.0
-    cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = 20.0
+    cfg.system_parameters.filtration_system_flow_gpm = 15
     cfg.system_parameters.municipal_backup_enabled = True
     rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
 
     result = simulate_hourly_tank(cfg, rainfall, 1000.0)
 
-    assert result["MainsMakeupGallons"].sum() == pytest.approx(110.0)
+    assert result["MainsMakeupGallons"].sum() == pytest.approx(100.0)
     assert result["MainsSuppliedGallons"].sum() == pytest.approx(10.0)
     assert result["SystemUnmetDemandGallons"].sum() == pytest.approx(0.0)
     assert not bool(result["DemandMet"].iloc[0])
-    assert result["BoosterTankGallons"].iloc[5] == pytest.approx(100.0)
+    assert result["BoosterTankGallons"].iloc[0] == pytest.approx(90.0)
 
 
 def test_hourly_simulation_uses_active_schedule_from_library() -> None:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import csv
+import gzip
 import hashlib
 import http.client
 import io
 import json
 import os
 import re
+import socket
 import tarfile
 import threading
 import time
@@ -41,6 +43,7 @@ NCEI_BULK_ARCHIVE_SHA256 = (
     "0fdb814203150780d4ee0c5d53c7844a237a21881101fb7d922b0aa3a1fd190f"
 )
 CLIMATE_NORMALS_DATASET = "normals-annualseasonal-1991-2020"
+CLIMATE_NORMALS_PRODUCT_VERSION = "1991-2020-v1.0.1"
 ANNUAL_PRECIPITATION_FIELD = "ANN-PRCP-NORMAL"
 PRECIPITATION_NORMAL_FIELDS = (
     ("annual", ANNUAL_PRECIPITATION_FIELD),
@@ -58,12 +61,36 @@ _QUICK_ACCESS_STATION_PATTERN = re.compile(
     r'\["((?:[^"\\]|\\.)*)","(US[A-Z0-9]{9})"\]'
 )
 DEFAULT_CACHE_DIR = user_cache_dir() / "weather"
+_PACKAGE_DATA_DIR = Path(__file__).resolve().parent / "data"
+BUNDLED_CATALOG_PATH = (
+    _PACKAGE_DATA_DIR / "noaa_normals_1991_2020_v1_0_1_station_catalog.json.gz"
+)
 CATALOG_CACHE_NAME = "noaa_normals_1991_2020_station_catalog.json"
 BULK_CATALOG_CACHE_NAME = "noaa_normals_1991_2020_complete_station_catalog.json"
 CATALOG_CACHE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 ANNUAL_VALUE_CACHE_NAME = "noaa_normals_1991_2020_annual_values.json"
-ANNUAL_VALUE_CACHE_MAX_AGE_SECONDS = 365 * 24 * 60 * 60
-ANNUAL_REQUEST_TIMEOUTS_SECONDS = (105, 60)
+NEGATIVE_CACHE_MAX_AGE_SECONDS = 24 * 60 * 60
+ANNUAL_REQUEST_TIMEOUTS_SECONDS = (15,)
+STATION_FILE_SOURCES = (
+    (
+        "NOAA Azure mirror",
+        "https://noaanormals.blob.core.windows.net/climate-normals/"
+        "normals-annualseasonal/1991-2020/access/{station_id}.csv",
+        8,
+    ),
+    (
+        "NOAA AWS mirror",
+        "https://noaa-normals-pds.s3.amazonaws.com/"
+        "normals-annualseasonal/1991-2020/access/{station_id}.csv",
+        8,
+    ),
+    (
+        "NOAA direct download",
+        "https://www.ncei.noaa.gov/data/normals-annualseasonal/"
+        "1991-2020/access/{station_id}.csv",
+        10,
+    ),
+)
 US_STATE_CODES = frozenset(
     "AL AK AZ AR CA CO CT DE DC FL GA HI ID IL IN IA KS KY LA ME MD MA MI MN MS "
     "MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split()
@@ -146,6 +173,11 @@ class _NceiKeepAliveClient:
         if connection is None:
             return
         try:
+            if connection.sock is not None:
+                connection.sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
             connection.close()
         except OSError:
             pass
@@ -163,7 +195,37 @@ class _NceiKeepAliveClient:
         self._connection = None
 
 
-_annual_normal_http_client = _NceiKeepAliveClient()
+class _NceiClientPool:
+    """Distribute fallback API requests across independent keep-alive connections."""
+
+    def __init__(self, size: int = 4) -> None:
+        if size < 1:
+            raise ValueError("NOAA client pool size must be positive.")
+        self._clients = tuple(_NceiKeepAliveClient() for _index in range(size))
+        self._next_client = 0
+        self._lock = threading.Lock()
+
+    def get_json(
+        self,
+        url: str,
+        timeout: int,
+        cancel_event: threading.Event | None = None,
+    ) -> object:
+        with self._lock:
+            client = self._clients[self._next_client]
+            self._next_client = (self._next_client + 1) % len(self._clients)
+        return client.get_json(url, timeout, cancel_event)
+
+    def cancel_active_request(self) -> None:
+        for client in self._clients:
+            client.cancel_active_request()
+
+    def close(self) -> None:
+        for client in self._clients:
+            client.close()
+
+
+_annual_normal_http_client = _NceiClientPool(size=4)
 
 
 def climate_normals_bulk_archive_path(cache_dir: Path = DEFAULT_CACHE_DIR) -> Path:
@@ -247,12 +309,16 @@ def fetch_us_annual_precipitation_normal_catalog(
     cache_dir: Path = DEFAULT_CACHE_DIR,
     max_age_seconds: int = CATALOG_CACHE_MAX_AGE_SECONDS,
 ) -> list[dict[str, Any]]:
-    """Return the mapped U.S. station catalog used by NOAA Quick Access.
+    """Return the versioned station catalog bundled with the application.
 
-    Quick Access embeds its station names and identifiers in its current application bundle.
-    Coordinates and state codes are joined from NOAA's authoritative GHCN-D station inventory.
-    The merged catalog is cached so subsequent browsing and name filtering are local.
+    The bundled catalog is generated from NOAA's authoritative versioned by-station archive.
+    Legacy archive and online catalog construction remain recovery paths for incomplete source
+    installations and development environments.
     """
+    bundled = _read_bundled_catalog()
+    if bundled is not None:
+        return bundled
+
     archive_installed = climate_normals_bulk_archive_installed(cache_dir)
     cache_path = cache_dir / (
         BULK_CATALOG_CACHE_NAME if archive_installed else CATALOG_CACHE_NAME
@@ -287,6 +353,23 @@ def fetch_us_annual_precipitation_normal_catalog(
     return catalog
 
 
+def _read_bundled_catalog(path: Path | None = None) -> list[dict[str, Any]] | None:
+    catalog_path = path or BUNDLED_CATALOG_PATH
+    try:
+        with gzip.open(catalog_path, mode="rt", encoding="utf-8") as source:
+            payload = json.load(source)
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("product_version") != CLIMATE_NORMALS_PRODUCT_VERSION:
+        return None
+    stations = payload.get("stations")
+    if not isinstance(stations, list) or not all(isinstance(item, dict) for item in stations):
+        return None
+    return [dict(item) for item in stations]
+
+
 def fetch_annual_precipitation_normal(
     station: dict[str, Any],
     *,
@@ -299,9 +382,26 @@ def fetch_annual_precipitation_normal(
     if not _STATION_ID_PATTERN.fullmatch(station_id):
         raise ValueError("The selected NOAA station identifier is invalid.")
     _raise_if_cancelled(cancel_event)
+    cached_error = _read_cached_precipitation_error(cache_dir, station_id)
+    if cached_error is not None:
+        raise ValueError(cached_error)
     cached_values = _read_cached_precipitation_values(cache_dir, station_id)
     if cached_values is not None:
         return _annual_normal_record(station, station_id, cached_values)
+    _raise_if_cancelled(cancel_event)
+    mirror_record = _request_station_normal_from_mirrors(
+        station_id, progress_callback, cancel_event
+    )
+    if mirror_record is not None:
+        precipitation_values, attributes, provider = mirror_record
+        _cache_precipitation_values(cache_dir, station_id, precipitation_values)
+        return _annual_normal_record(
+            station,
+            station_id,
+            precipitation_values,
+            attributes=attributes,
+            provider=f"NOAA NCEI U.S. Climate Normals ({provider})",
+        )
     _raise_if_cancelled(cancel_event)
     archived_record = _read_annual_normal_from_bulk_archive(cache_dir, station_id)
     if archived_record is not None:
@@ -312,7 +412,7 @@ def fetch_annual_precipitation_normal(
             station_id,
             precipitation_values,
             attributes=attributes,
-            provider="NOAA NCEI U.S. Climate Normals (local bulk archive)",
+            provider="NOAA NCEI U.S. Climate Normals (local bulk archive fallback)",
         )
     parameters = {
         "dataset": CLIMATE_NORMALS_DATASET,
@@ -322,11 +422,16 @@ def fetch_annual_precipitation_normal(
     }
     url = f"{NCEI_ACCESS_DATA_URL}?{parse.urlencode(parameters)}"
     _raise_if_cancelled(cancel_event)
-    payload = _request_annual_normal_payload(url, progress_callback, cancel_event)
+    if cancel_event is None:
+        payload = _request_annual_normal_payload(url, progress_callback)
+    else:
+        payload = _request_annual_normal_payload(url, progress_callback, cancel_event)
     if isinstance(payload, dict) and payload.get("errorMessage"):
         raise RuntimeError(str(payload["errorMessage"]))
     if not isinstance(payload, list) or not payload:
-        raise ValueError("NOAA returned no annual precipitation normal for this station.")
+        message = "NOAA returned no annual precipitation normal for this station."
+        _cache_precipitation_error(cache_dir, station_id, message)
+        raise ValueError(message)
     matching_row = next(
         (
             row
@@ -337,15 +442,77 @@ def fetch_annual_precipitation_normal(
         None,
     )
     if matching_row is None:
-        raise ValueError("NOAA returned no annual precipitation normal for this station.")
+        message = "NOAA returned no annual precipitation normal for this station."
+        _cache_precipitation_error(cache_dir, station_id, message)
+        raise ValueError(message)
     precipitation_values = _precipitation_values_from_row(matching_row)
     if precipitation_values is None:
-        raise ValueError(
+        message = (
             "This station does not have a complete set of 1991-2020 annual and "
             "seasonal precipitation normals."
         )
+        _cache_precipitation_error(cache_dir, station_id, message)
+        raise ValueError(message)
     _cache_precipitation_values(cache_dir, station_id, precipitation_values)
     return _annual_normal_record(station, station_id, precipitation_values)
+
+
+def _request_station_normal_from_mirrors(
+    station_id: str,
+    progress_callback: Callable[[str], None] | None,
+    cancel_event: threading.Event | None,
+) -> tuple[dict[str, float], str, str] | None:
+    """Return one station row from NOAA's static mirrors, in failover order."""
+    for source_name, url_template, timeout in STATION_FILE_SOURCES:
+        _raise_if_cancelled(cancel_event)
+        if progress_callback is not None:
+            progress_callback(f"Connecting to {source_name} (timeout {timeout} seconds)...")
+        try:
+            row = _request_station_csv_row(
+                url_template.format(station_id=station_id), timeout, cancel_event
+            )
+        except ClimateNormalRequestCancelled:
+            raise
+        except (
+            OSError,
+            TimeoutError,
+            error.HTTPError,
+            error.URLError,
+            csv.Error,
+            UnicodeError,
+            ValueError,
+        ):
+            continue
+        returned_station_id = str(row.get("STATION") or "").strip().upper()
+        if returned_station_id != station_id:
+            continue
+        precipitation_values = _precipitation_values_from_row(row)
+        if precipitation_values is None:
+            continue
+        completeness = str(
+            row.get(f"comp_flag_{ANNUAL_PRECIPITATION_FIELD}") or ""
+        ).strip()
+        years = str(row.get(f"years_{ANNUAL_PRECIPITATION_FIELD}") or "").strip()
+        attributes = ",".join(part for part in (completeness, years) if part)
+        return precipitation_values, attributes, source_name
+    return None
+
+
+def _request_station_csv_row(
+    url: str, timeout: int, cancel_event: threading.Event | None
+) -> dict[str, str]:
+    _raise_if_cancelled(cancel_event)
+    req = request.Request(
+        url,
+        headers={"Accept": "text/csv", "User-Agent": USER_AGENT},
+    )
+    with request.urlopen(req, timeout=timeout) as response:
+        body = response.read().decode("utf-8-sig")
+    _raise_if_cancelled(cancel_event)
+    row = next(csv.DictReader(io.StringIO(body, newline="")), None)
+    if not isinstance(row, dict):
+        raise ValueError("NOAA returned an empty station file.")
+    return row
 
 
 def _annual_normal_record(
@@ -691,54 +858,91 @@ def _write_catalog_cache(path: Path, catalog: list[dict[str, Any]]) -> None:
 def _read_cached_precipitation_values(
     cache_dir: Path, station_id: str
 ) -> dict[str, float] | None:
-    cache_path = cache_dir / ANNUAL_VALUE_CACHE_NAME
     with _annual_value_cache_lock:
-        try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        stations = _read_versioned_value_cache(cache_dir)
+        if stations is None:
             return None
-        if not isinstance(payload, dict):
-            return None
-        entry = payload.get(station_id)
+        entry = stations.get(station_id)
         if not isinstance(entry, dict):
+            return None
+        if entry.get("status", "ok") != "ok":
             return None
         values = {
             key: _number(entry.get(key)) for key in PRECIPITATION_NORMAL_RECORD_KEYS
         }
+        if any(value is None for value in values.values()):
+            return None
+        return {key: float(value) for key, value in values.items() if value is not None}
+
+
+def _read_cached_precipitation_error(cache_dir: Path, station_id: str) -> str | None:
+    with _annual_value_cache_lock:
+        stations = _read_versioned_value_cache(cache_dir)
+        if stations is None:
+            return None
+        entry = stations.get(station_id)
+        if not isinstance(entry, dict) or entry.get("status") != "unavailable":
+            return None
         try:
             cached_at = float(entry["cached_at"])
         except (KeyError, TypeError, ValueError):
             return None
-        if (
-            any(value is None for value in values.values())
-            or time.time() - cached_at > ANNUAL_VALUE_CACHE_MAX_AGE_SECONDS
-        ):
+        if time.time() - cached_at > NEGATIVE_CACHE_MAX_AGE_SECONDS:
             return None
-        return {key: float(value) for key, value in values.items() if value is not None}
+        message = str(entry.get("message") or "").strip()
+        return message or None
 
 
 def _cache_precipitation_values(
     cache_dir: Path, station_id: str, values: dict[str, float]
 ) -> None:
-    cache_path = cache_dir / ANNUAL_VALUE_CACHE_NAME
     with _annual_value_cache_lock:
+        stations = _read_versioned_value_cache(cache_dir) or {}
+        stations[station_id] = {**values, "status": "ok", "cached_at": time.time()}
+        _write_versioned_value_cache(cache_dir, stations)
+
+
+def _cache_precipitation_error(cache_dir: Path, station_id: str, message: str) -> None:
+    with _annual_value_cache_lock:
+        stations = _read_versioned_value_cache(cache_dir) or {}
+        stations[station_id] = {
+            "status": "unavailable",
+            "message": message,
+            "cached_at": time.time(),
+        }
+        _write_versioned_value_cache(cache_dir, stations)
+
+
+def _read_versioned_value_cache(cache_dir: Path) -> dict[str, Any] | None:
+    cache_path = cache_dir / ANNUAL_VALUE_CACHE_NAME
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("product_version") != CLIMATE_NORMALS_PRODUCT_VERSION:
+        return None
+    stations = payload.get("stations")
+    return stations if isinstance(stations, dict) else None
+
+
+def _write_versioned_value_cache(cache_dir: Path, stations: dict[str, Any]) -> None:
+    cache_path = cache_dir / ANNUAL_VALUE_CACHE_NAME
+    payload = {
+        "product_version": CLIMATE_NORMALS_PRODUCT_VERSION,
+        "stations": stations,
+    }
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = cache_path.with_suffix(".tmp")
+    try:
+        temporary_path.write_text(json.dumps(payload), encoding="utf-8")
+        temporary_path.replace(cache_path)
+    except OSError:
         try:
-            payload = json.loads(cache_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            payload = {}
-        if not isinstance(payload, dict):
-            payload = {}
-        payload[station_id] = {**values, "cached_at": time.time()}
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        temporary_path = cache_path.with_suffix(".tmp")
-        try:
-            temporary_path.write_text(json.dumps(payload), encoding="utf-8")
-            temporary_path.replace(cache_path)
+            temporary_path.unlink(missing_ok=True)
         except OSError:
-            try:
-                temporary_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+            pass
 
 
 def _get_text(url: str) -> str:

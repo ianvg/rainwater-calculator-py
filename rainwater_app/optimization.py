@@ -12,7 +12,7 @@ import pandas as pd
 from .analysis_state import analysis_input_signature
 from .engine import PreparedHourlyInputs, prepare_hourly_inputs, simulate_hourly_indirect_aggregates
 from .financial import calculate_financial_results_from_annual_supply
-from .models import ProjectConfig
+from .models import FILTRATION_SYSTEM_FLOW_RATES_GPM, ProjectConfig
 from .equipment_catalog import (
     built_in_equipment_library,
     default_project_candidates,
@@ -167,7 +167,7 @@ def optimize_indirect_system(
         filtration_pumps = tuple(
             FiltrationPumpProduct(str(item["model"]), float(item["capacity"]),
                                   float(prop(item, "power_kw")), float(item["installed_cost"]), str(item["id"]))
-            for item in candidate_products.get("Filtration pump", [])
+            for item in candidate_products.get("Transfer pump", [])
         )
         filtration_units = tuple(
             FiltrationUnitProduct(
@@ -176,15 +176,22 @@ def optimize_indirect_system(
                 _optional_float(prop(item, "maximum_flow_gpm", None)),
                 _optional_float(prop(item, "recovery_percent", None)),
                 str(item["id"]),
-            ) for item in candidate_products.get("Filtration unit", [])
+            ) for item in candidate_products.get("Filtration system", [])
         )
         booster_tanks = tuple(
             BoosterTankProduct(str(item["model"]), float(item["capacity"]), float(item["installed_cost"]), str(item["id"]))
             for item in candidate_products.get("Buffer tank", [])
         )
     elif filtration_units is None:
-        # Preserve the public three-sequence API while four-category project catalogs migrate.
-        filtration_units = (FiltrationUnitProduct("Existing filtration", 1e12, 0.0),)
+        # Preserve the public three-sequence API with a linked filtration system.
+        filtration_units = tuple(
+            FiltrationUnitProduct(
+                "Existing filtration", pump.capacity_gallons_per_hour, 0.0,
+                pump.capacity_gallons_per_hour / 60.0,
+                pump.capacity_gallons_per_hour / 60.0,
+            )
+            for pump in filtration_pumps
+        )
     if not 0.0 <= settings.minimum_reliability_percent <= 100.0:
         raise ValueError("Minimum reliability must be between 0% and 100%.")
     if settings.electricity_rate_per_kwh < 0.0:
@@ -221,9 +228,9 @@ def optimize_indirect_system(
     if any(item.capacity_gallons <= 0.0 or item.installed_cost < 0.0 for item in primary_tanks):
         raise ValueError("Primary tank catalog values must have positive capacity and non-negative cost.")
     if any(item.capacity_gallons_per_hour <= 0.0 or item.power_kw < 0.0 or item.installed_cost < 0.0 for item in filtration_pumps):
-        raise ValueError("Filtration pump catalog values must have positive capacity and non-negative power and cost.")
+        raise ValueError("Transfer pump catalog values must have positive capacity and non-negative power and cost.")
     if any(item.capacity_gallons_per_hour <= 0.0 or item.installed_cost < 0.0 for item in filtration_units):
-        raise ValueError("Filtration-unit catalog values must have positive capacity and non-negative cost.")
+            raise ValueError("Filtration-system catalog values must have positive capacity and non-negative cost.")
     if any(item.capacity_gallons <= 0.0 or item.installed_cost < 0.0 for item in booster_tanks):
         raise ValueError("Buffer tank catalog values must have positive capacity and non-negative cost.")
     financial = config.financial_parameters
@@ -240,7 +247,13 @@ def optimize_indirect_system(
     for index, (tank, pump, filtration, booster) in enumerate(products, start=1):
         candidate = copy.deepcopy(config)
         candidate.system_type = "Indirect system"
-        candidate.system_parameters.filtration_pump_capacity_gallons_per_hour = pump.capacity_gallons_per_hour
+        flow_gpm = filtration.capacity_gallons_per_hour / 60.0
+        if flow_gpm not in FILTRATION_SYSTEM_FLOW_RATES_GPM:
+            raise ValueError("Filtration system flow must be 15, 20, 30, 40, or 50 GPM.")
+        if pump.capacity_gallons_per_hour != filtration.capacity_gallons_per_hour:
+            raise ValueError("Transfer pump flow must match the filtration system flow.")
+        candidate.system_parameters.filtration_system_flow_gpm = int(flow_gpm)
+        candidate.system_parameters.synchronize_filtration_flow()
         if filtration.recovery_percent is not None:
             candidate.system_parameters.filter_recovery_percent = filtration.recovery_percent
         candidate.system_parameters.booster_tank_size_gallons = booster.capacity_gallons

@@ -38,7 +38,7 @@ def test_optimizer_filters_by_reliability_and_ranks_feasible_payback() -> None:
             PrimaryTankProduct("Small", 500.0, 500.0),
             PrimaryTankProduct("Large", 1_000.0, 1_500.0),
         ),
-        filtration_pumps=(FiltrationPumpProduct("Pump", 300.0, 0.5, 250.0),),
+        filtration_pumps=(FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
         booster_tanks=(BoosterTankProduct("Booster", 100.0, 100.0),),
         progress_callback=lambda current, total: progress_updates.append((current, total)),
     )
@@ -71,7 +71,7 @@ def test_optimizer_can_rank_by_lifecycle_npv() -> None:
             PrimaryTankProduct("Small", 500.0, 500.0),
             PrimaryTankProduct("Large", 1_000.0, 1_500.0),
         ),
-        filtration_pumps=(FiltrationPumpProduct("Pump", 300.0, 0.5, 250.0),),
+        filtration_pumps=(FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
         booster_tanks=(BoosterTankProduct("Booster", 100.0, 100.0),),
     )
 
@@ -99,7 +99,7 @@ def test_optimizer_applies_installed_cost_constraint() -> None:
     results = optimize_indirect_system(
         config, rainfall,
         primary_tanks=(PrimaryTankProduct("Tank", 500.0, 500.0),),
-        filtration_pumps=(FiltrationPumpProduct("Pump", 300.0, 0.5, 250.0),),
+        filtration_pumps=(FiltrationPumpProduct("Pump", 900.0, 0.5, 250.0),),
         booster_tanks=(
             BoosterTankProduct("Within budget", 100.0, 100.0),
             BoosterTankProduct("Over budget", 200.0, 500.0),

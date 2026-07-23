@@ -33,3 +33,19 @@ def test_installer_build_is_included_in_windows_release_workflow() -> None:
 
     assert "build_installer.ps1 -SkipExecutableBuild" in workflow
     assert "RainwaterCalculator-Setup-*.exe" in workflow
+
+
+def test_versioned_climate_normal_catalog_is_packaged() -> None:
+    spec = (REPOSITORY_ROOT / "RainwaterCalculator.spec").read_text(encoding="utf-8")
+    pyproject = (REPOSITORY_ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    catalog = (
+        REPOSITORY_ROOT
+        / "rainwater_app"
+        / "data"
+        / "noaa_normals_1991_2020_v1_0_1_station_catalog.json.gz"
+    )
+
+    assert catalog.is_file()
+    assert catalog.stat().st_size < 1_000_000
+    assert catalog.name in spec
+    assert 'rainwater_app = ["data/*.json.gz"]' in pyproject

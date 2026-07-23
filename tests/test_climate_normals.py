@@ -2,15 +2,23 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import tarfile
+import threading
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from rainwater_app.climate_normals import (
+    BUNDLED_CATALOG_PATH,
+    CLIMATE_NORMALS_PRODUCT_VERSION,
+    ClimateNormalRequestCancelled,
+    _NceiClientPool,
     _NceiKeepAliveClient,
     _catalog_from_noaa_sources,
     _normal_records_from_payload,
+    _read_bundled_catalog,
+    _request_station_normal_from_mirrors,
     _request_annual_normal_payload,
     climate_normals_bulk_archive_installed,
     climate_normals_bulk_archive_path,
@@ -20,6 +28,17 @@ from rainwater_app.climate_normals import (
     filter_climate_normal_stations,
     remove_climate_normals_bulk_archive,
 )
+
+
+@pytest.fixture(autouse=True)
+def isolate_bundled_and_mirror_sources(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._read_bundled_catalog", lambda: None
+    )
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._request_station_normal_from_mirrors",
+        lambda *_args: None,
+    )
 
 
 def _normal_row(
@@ -145,6 +164,60 @@ def test_catalog_joins_quick_access_names_to_noaa_station_coordinates() -> None:
     assert catalog[0]["longitude"] == pytest.approx(-120.17)
 
 
+def test_bundled_catalog_matches_expected_product_version() -> None:
+    catalog = _read_bundled_catalog(BUNDLED_CATALOG_PATH)
+
+    assert catalog is not None
+    assert len(catalog) == 14_905
+    athens = next(
+        record for record in catalog if record["station_id"] == "USW00013873"
+    )
+    assert athens["name"] == "ATHENS BEN EPPS AP"
+    assert athens["state"] == "GA"
+
+
+def test_station_file_mirrors_fail_over_and_parse_official_fields(monkeypatch) -> None:
+    calls: list[tuple[str, int]] = []
+    progress: list[str] = []
+
+    def fake_request(url: str, timeout: int, _cancel_event):
+        calls.append((url, timeout))
+        if "blob.core.windows.net" in url:
+            raise TimeoutError("slow mirror")
+        return {
+            "STATION": "USW00013873",
+            "ANN-PRCP-NORMAL": "48.95",
+            "DJF-PRCP-NORMAL": "13.15",
+            "MAM-PRCP-NORMAL": "11.17",
+            "JJA-PRCP-NORMAL": "13.63",
+            "SON-PRCP-NORMAL": "11.00",
+            "comp_flag_ANN-PRCP-NORMAL": "S",
+            "years_ANN-PRCP-NORMAL": "30",
+        }
+
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._request_station_csv_row", fake_request
+    )
+
+    result = _request_station_normal_from_mirrors(
+        "USW00013873", progress.append, None
+    )
+
+    assert result is not None
+    values, attributes, provider = result
+    assert values["annual_precipitation_inches"] == pytest.approx(48.95)
+    assert values["autumn_precipitation_inches"] == pytest.approx(11.0)
+    assert attributes == "S,30"
+    assert provider == "NOAA AWS mirror"
+    assert len(calls) == 2
+    assert calls[0][1] == 8
+    assert calls[1][1] == 8
+    assert progress == [
+        "Connecting to NOAA Azure mirror (timeout 8 seconds)...",
+        "Connecting to NOAA AWS mirror (timeout 8 seconds)...",
+    ]
+
+
 def test_fetch_annual_precipitation_normal_uses_request_and_persistent_cache(
     monkeypatch, tmp_path
 ) -> None:
@@ -201,8 +274,59 @@ def test_fetch_annual_precipitation_normal_uses_request_and_persistent_cache(
     assert "includeStationName" not in query
     assert "includeStationLocation" not in query
 
+    cache_payload = json.loads(
+        (tmp_path / "noaa_normals_1991_2020_annual_values.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert cache_payload["product_version"] == CLIMATE_NORMALS_PRODUCT_VERSION
+    assert cache_payload["stations"]["USC00041614"]["status"] == "ok"
 
-def test_fetch_annual_normal_prefers_installed_bulk_archive(monkeypatch, tmp_path) -> None:
+
+def test_value_cache_is_invalidated_when_product_version_changes(
+    monkeypatch, tmp_path
+) -> None:
+    cache_path = tmp_path / "noaa_normals_1991_2020_annual_values.json"
+    cache_path.write_text(
+        json.dumps(
+            {
+                "product_version": "obsolete-version",
+                "stations": {
+                    "USC00041614": {
+                        "status": "ok",
+                        "annual_precipitation_inches": 999.0,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._request_annual_normal_payload",
+        lambda *_args: [
+            {
+                "STATION": "USC00041614",
+                "ANN-PRCP-NORMAL": "13.12",
+                "DJF-PRCP-NORMAL": "3.00",
+                "MAM-PRCP-NORMAL": "3.12",
+                "JJA-PRCP-NORMAL": "4.00",
+                "SON-PRCP-NORMAL": "3.00",
+            }
+        ],
+    )
+    station = {"station_id": "USC00041614", "name": "CEDARVILLE"}
+
+    record = fetch_annual_precipitation_normal(station, cache_dir=tmp_path)
+
+    assert record["annual_precipitation_inches"] == pytest.approx(13.12)
+    refreshed = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert refreshed["product_version"] == CLIMATE_NORMALS_PRODUCT_VERSION
+    assert refreshed["stations"]["USC00041614"]["annual_precipitation_inches"] == 13.12
+
+
+def test_fetch_annual_normal_uses_installed_bulk_archive_before_api(
+    monkeypatch, tmp_path
+) -> None:
     archive_path = climate_normals_bulk_archive_path(tmp_path)
     _write_bulk_archive(archive_path)
     monkeypatch.setattr(
@@ -230,7 +354,7 @@ def test_fetch_annual_normal_prefers_installed_bulk_archive(monkeypatch, tmp_pat
     assert record["autumn_precipitation_inches"] == pytest.approx(11.0)
     assert record["attributes"] == "S,30"
     assert record["completeness"] == "Standard"
-    assert record["provider"].endswith("(local bulk archive)")
+    assert record["provider"].endswith("(local bulk archive fallback)")
 
 
 def test_catalog_can_be_built_offline_from_installed_bulk_archive(
@@ -377,6 +501,60 @@ def test_annual_request_retries_once_with_progress(monkeypatch) -> None:
         "NOAA did not respond; retrying once...",
         "Connecting to NOAA (attempt 2 of 2; timeout 2 seconds)...",
     ]
+
+
+def test_annual_request_stops_before_network_when_cancelled(monkeypatch) -> None:
+    calls: list[tuple[str, int]] = []
+    cancel_event = threading.Event()
+    cancel_event.set()
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._annual_normal_http_client.get_json",
+        lambda url, timeout, event: calls.append((url, timeout)),
+    )
+
+    with pytest.raises(ClimateNormalRequestCancelled):
+        _request_annual_normal_payload(
+            "https://www.ncei.noaa.gov/test", None, cancel_event
+        )
+
+    assert calls == []
+
+
+def test_confirmed_unavailable_station_is_cached_briefly(monkeypatch, tmp_path) -> None:
+    request_count = 0
+
+    def no_data(*_args):
+        nonlocal request_count
+        request_count += 1
+        return []
+
+    monkeypatch.setattr(
+        "rainwater_app.climate_normals._request_annual_normal_payload", no_data
+    )
+    station = {"station_id": "USC00041614", "name": "CEDARVILLE"}
+
+    with pytest.raises(ValueError, match="no annual precipitation normal"):
+        fetch_annual_precipitation_normal(station, cache_dir=tmp_path)
+    with pytest.raises(ValueError, match="no annual precipitation normal"):
+        fetch_annual_precipitation_normal(station, cache_dir=tmp_path)
+
+    assert request_count == 1
+
+
+def test_ncei_client_pool_distributes_requests_across_four_clients(monkeypatch) -> None:
+    calls: list[tuple[int, str]] = []
+    pool = _NceiClientPool(size=4)
+    for index, client in enumerate(pool._clients):
+        monkeypatch.setattr(
+            client,
+            "get_json",
+            lambda url, _timeout, _event=None, index=index: calls.append((index, url)),
+        )
+
+    for request_index in range(5):
+        pool.get_json(f"https://www.ncei.noaa.gov/{request_index}", 5)
+
+    assert [index for index, _url in calls] == [0, 1, 2, 3, 0]
 
 
 def test_keep_alive_client_reuses_connection(monkeypatch) -> None:

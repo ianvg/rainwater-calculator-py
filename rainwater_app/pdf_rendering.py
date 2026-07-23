@@ -402,7 +402,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         if system_type == "Indirect system":
             line(tank_left + tank_width, pipe_y, 235, pipe_y, 1.2)
             circle(252, pipe_y, 17)
-            text(220, pipe_y - 28, "Filtration pump", size=8)
+            text(220, pipe_y - 28, "Transfer pump", size=8)
             line(269, pipe_y, 310, pipe_y, 1.2)
             page().append(f"1.20 w 310 {pipe_y - 18:.2f} 80 36 re S")
             text(326, pipe_y - 3, "Filtration", size=8, bold=True)
