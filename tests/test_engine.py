@@ -687,6 +687,30 @@ def test_demand_object_contributes_only_on_days_enabled_by_its_schedule() -> Non
     assert demand_series(cfg, rainfall).tolist() == [4800.0, 4800.0, 4800.0, 4800.0, 4800.0, 0.0, 0.0]
 
 
+def test_demand_object_schedule_applies_only_in_selected_months() -> None:
+    cfg = default_project_config()
+    cfg.demand.hourly_schedule_library["Seasonal"] = {
+        day: [1.0] + [0.0] * 23
+        for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.demand.hourly_schedule_months["Seasonal"] = [1]
+    cfg.demand.demand_objects = [
+        DemandObject("Seasonal demand", "Other", 10.0, "Seasonal")
+    ]
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": [pd.Timestamp("2025-01-15"), pd.Timestamp("2025-02-15")],
+            "Precipitation": [0.0, 0.0],
+        }
+    )
+
+    assert demand_series(cfg, rainfall).tolist() == [600.0, 0.0]
+    hourly = simulate_hourly_tank(cfg, rainfall, 2000.0)
+    assert hourly.loc[hourly["Date"].dt.month == 1, "DemandGallons"].sum() == pytest.approx(600.0)
+    assert hourly.loc[hourly["Date"].dt.month == 2, "DemandGallons"].sum() == pytest.approx(0.0)
+
+
 def test_hourly_demand_object_uses_its_own_project_schedule() -> None:
     cfg = default_project_config()
     cfg.demand.simple_daily_demand_gallons = 24.0
@@ -1043,6 +1067,46 @@ def test_simulation_rejects_unsupported_filtration_system_flow() -> None:
 
     with pytest.raises(ValueError, match="15, 20, 30, 40, or 50 GPM"):
         simulate_hourly_tank(cfg, rainfall, 1000.0)
+
+
+def test_parallel_filtration_system_capacities_are_additive() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.demand.simple_daily_demand_gallons = 2_000.0
+    cfg.demand.hourly_weekly_fractions = {
+        day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.filtration_system_flow_gpm = 15
+    cfg.system_parameters.filtration_system_count = 2
+    cfg.system_parameters.booster_tank_size_gallons = 0.0
+    cfg.system_parameters.municipal_backup_enabled = False
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 5_000.0)
+
+    assert result["PumpFlowGallons"].iloc[0] == pytest.approx(1_800.0)
+    assert result["RainwaterSuppliedGallons"].sum() == pytest.approx(1_800.0)
+
+
+def test_infinite_filtration_flow_supplies_full_end_use_demand() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.demand.simple_daily_demand_gallons = 2_000.0
+    cfg.demand.hourly_weekly_fractions = {
+        day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.system_parameters.filtration_system_flow_gpm = 0
+    cfg.system_parameters.booster_tank_size_gallons = 0.0
+    cfg.system_parameters.municipal_backup_enabled = False
+    rainfall = pd.DataFrame({"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]})
+
+    result = simulate_hourly_tank(cfg, rainfall, 5_000.0)
+
+    assert result["PumpFlowGallons"].iloc[0] == pytest.approx(2_000.0)
+    assert result["RainwaterSuppliedGallons"].sum() == pytest.approx(2_000.0)
+    assert result["SystemUnmetDemandGallons"].sum() == pytest.approx(0.0)
 
 
 def test_indirect_municipal_makeup_refills_booster_when_primary_is_empty() -> None:

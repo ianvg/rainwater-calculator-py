@@ -232,6 +232,7 @@ def system_object_editor_validation(
         "graph_step": "Graph step",
         "graph_auto_step_count": "Number of steps",
         "filtration_system_flow_gpm": "Filtration system flow",
+        "filtration_system_count": "Number of filtration systems",
         "filter_recovery": "Filter recovery",
         "booster_tank_size": "Tank size",
         "booster_initial_fill": "Initial fill",
@@ -249,7 +250,9 @@ def system_object_editor_validation(
             "graph_auto_step_count",
         ),
         "filtration_pump": (),
-        "filtration_system": ("filtration_system_flow_gpm", "filter_recovery"),
+        "filtration_system": (
+            "filtration_system_flow_gpm", "filtration_system_count", "filter_recovery"
+        ),
         "booster_tank": (
             "booster_tank_size",
             "booster_initial_fill",
@@ -259,7 +262,13 @@ def system_object_editor_validation(
     }
     parsed: dict[str, float] = {}
     for field in fields_by_type.get(component_type, ()):
-        raw = str(values.get(field, "")).strip().replace(",", "")
+        default_value = "1" if field == "filtration_system_count" else ""
+        raw = str(values.get(field, default_value)).strip().replace(",", "")
+        if field == "filtration_system_flow_gpm" and raw.casefold() in {
+            "infinite", "unlimited"
+        }:
+            parsed[field] = 0.0
+            continue
         try:
             number = float(raw)
             if not math.isfinite(number):
@@ -277,9 +286,17 @@ def system_object_editor_validation(
 
     if (
         "filtration_system_flow_gpm" in parsed
-        and parsed["filtration_system_flow_gpm"] not in {15.0, 20.0, 30.0, 40.0, 50.0}
+        and parsed["filtration_system_flow_gpm"] not in {0.0, 15.0, 20.0, 30.0, 40.0, 50.0}
     ):
-        errors.append("Filtration system flow must be 15, 20, 30, 40, or 50 GPM.")
+        errors.append(
+            "Filtration system flow must be Infinite, 15, 20, 30, 40, or 50 GPM."
+        )
+
+    if "filtration_system_count" in parsed and (
+        parsed["filtration_system_count"] < 1
+        or not parsed["filtration_system_count"].is_integer()
+    ):
+        errors.append("Number of filtration systems must be a whole number of at least 1.")
 
     if component_type == "filtration_pump" and values.get("transfer_pump_type") not in {
         "External", "Submersible"

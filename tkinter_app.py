@@ -22,6 +22,7 @@ import threading
 import time
 import webbrowser
 import weakref
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from functools import partial
@@ -121,10 +122,12 @@ from rainwater_app.models import (
     default_hourly_weekly_fractions,
     fixture_daily_demand_gallons,
     migrate_legacy_demand_inputs,
+    normalized_schedule_months,
     normalize_schedule_type,
     normalize_filtration_system_flow_gpm,
     normalize_unit_system,
     purge_unused_hourly_schedules,
+    schedule_months_for,
     unused_hourly_schedule_names,
 )
 from rainwater_app.rainfall import (
@@ -260,6 +263,30 @@ def _normalize_text_scale_percent(value: object) -> int:
         return DEFAULT_TEXT_SCALE_PERCENT
     return min(TEXT_SCALE_PERCENTAGES, key=lambda option: abs(option - requested))
 
+
+def _two_line_heading_text(
+    text: str,
+    column_width: int,
+    measure: Callable[[str], int],
+    *,
+    horizontal_padding: int = 18,
+) -> str:
+    """Wrap a table heading at a word boundary, using no more than two lines."""
+    normalized = " ".join(str(text).split())
+    if not normalized or measure(normalized) + horizontal_padding <= column_width:
+        return normalized
+    words = normalized.split()
+    if len(words) < 2:
+        return normalized
+    split_at = min(
+        range(1, len(words)),
+        key=lambda index: (
+            max(measure(" ".join(words[:index])), measure(" ".join(words[index:]))),
+            abs(measure(" ".join(words[:index])) - measure(" ".join(words[index:]))),
+        ),
+    )
+    return f"{' '.join(words[:split_at])}\n{' '.join(words[split_at:])}"
+
 PROJECT_FORM_VARIABLES = (
     "project_name_var", "author_name_var", "street_address_var", "city_var",
     "state_or_province_var", "postal_code_var", "latitude_var", "longitude_var",
@@ -268,6 +295,7 @@ PROJECT_FORM_VARIABLES = (
     "use_synthetic_hourly_rainfall_var", "rainfall_data_type_var",
     "rainfall_resolution_var", "rainfall_timezone_var", "rainfall_timing_var",
     "pump_capacity_var", "filtration_pump_capacity_var", "filter_recovery_var",
+    "filtration_system_count_var",
     "booster_tank_size_var", "booster_initial_fill_var", "booster_refill_level_var",
     "municipal_backup_enabled_var", "flushes_var", "toilet_flush_var",
     "urinal_flush_var", "graph_start_var", "graph_end_var", "graph_step_var",
@@ -995,6 +1023,9 @@ class RainwaterTkApp(tk.Tk):
         self.progress_style.configure("OpenProject.Horizontal.TProgressbar", background="#2e8b57")
         self.progress_style.configure("SaveProject.Horizontal.TProgressbar", background="#2e8b57")
         self.progress_style.configure("Invalid.TLabel", foreground="#c62828", font=("TkDefaultFont", 11, "bold"))
+        self.progress_style.configure("Treeview.Heading", padding=(4, 8))
+        self.progress_style.configure("MonthlyDemand.Treeview.Heading", padding=(4, 8))
+        self.bind_class("Treeview", "<Map>", self._wrap_mapped_treeview_headings, add="+")
         try:
             self.execution_log = ExecutionLogger(application_state_dir / "logs")
         except OSError:
@@ -1012,6 +1043,7 @@ class RainwaterTkApp(tk.Tk):
         )
         self.custom_schedule_library_path = application_state_dir / "schedule_library.json"
         self.custom_schedule_template_types: dict[str, str] = {}
+        self.custom_schedule_template_months: dict[str, list[int]] = {}
         self.custom_schedule_templates = self._load_custom_schedule_templates()
         self.custom_demand_object_library_path = application_state_dir / "demand_object_library.json"
         self.custom_demand_object_templates = self._load_custom_demand_object_templates()
@@ -1067,6 +1099,7 @@ class RainwaterTkApp(tk.Tk):
         self.pump_capacity_var = tk.StringVar(value="0")
         self.filtration_pump_capacity_var = tk.StringVar(value="20")
         self.filtration_system_flow_gpm_var = tk.StringVar(value="20")
+        self.filtration_system_count_var = tk.StringVar(value="1")
         self.transfer_pump_type_var = tk.StringVar(value="External")
         self.filter_recovery_var = tk.StringVar(value="100")
         self.booster_tank_size_var = tk.StringVar(value="0")
@@ -1362,6 +1395,31 @@ class RainwaterTkApp(tk.Tk):
             )
         if self.working_draft_store.exists():
             self.after_idle(self._offer_working_draft_recovery)
+
+    def _wrap_mapped_treeview_headings(self, event: tk.Event) -> None:
+        """Give every displayed data table up to two lines for its headings."""
+        tree = event.widget
+        if isinstance(tree, ttk.Treeview):
+            self.after_idle(lambda: self._wrap_treeview_headings(tree))
+
+    def _wrap_treeview_headings(self, tree: ttk.Treeview) -> None:
+        if not isinstance(tree, ttk.Treeview):
+            return
+        try:
+            style_name = str(tree.cget("style") or "Treeview")
+            heading_style = f"{style_name}.Heading"
+            heading_font_name = ttk.Style(self).lookup(heading_style, "font") or "TkHeadingFont"
+            heading_font = tkfont.Font(root=self, font=heading_font_name)
+            for column in tree["columns"]:
+                text = str(tree.heading(column, "text"))
+                width = int(tree.column(column, "width"))
+                tree.heading(
+                    column,
+                    text=_two_line_heading_text(text, width, heading_font.measure),
+                )
+        except tk.TclError:
+            # A short-lived dialog can be destroyed before its idle callback runs.
+            return
 
     def _center_main_window(self) -> None:
         self.update_idletasks()
@@ -1756,6 +1814,7 @@ class RainwaterTkApp(tk.Tk):
             pass
 
     def _load_custom_schedule_templates(self) -> dict[str, dict[str, list[float]]]:
+        self.__dict__.setdefault("custom_schedule_template_months", {})
         try:
             payload = json.loads(self.custom_schedule_library_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
@@ -1771,9 +1830,13 @@ class RainwaterTkApp(tk.Tk):
                 self.custom_schedule_template_types[name] = normalize_schedule_type(
                     raw_value.get("schedule_type")
                 )
+                self.custom_schedule_template_months[name] = normalized_schedule_months(
+                    raw_value.get("months", list(range(1, 13)))
+                )
             else:
                 schedule_payload[name] = raw_value
                 self.custom_schedule_template_types[name] = FRACTIONAL_SCHEDULE_TYPE
+                self.custom_schedule_template_months[name] = list(range(1, 13))
         schedules = _validated_schedule_library(schedule_payload)
         self.custom_schedule_template_types = {
             name: self.custom_schedule_template_types.get(
@@ -1781,13 +1844,21 @@ class RainwaterTkApp(tk.Tk):
             )
             for name in schedules
         }
+        self.custom_schedule_template_months = {
+            name: self.custom_schedule_template_months.get(name, list(range(1, 13)))
+            for name in schedules
+        }
         return schedules
 
     def _save_custom_schedule_templates(self) -> None:
+        template_months = self.__dict__.get("custom_schedule_template_months", {})
         payload = {
             name: {
                 "schedule_type": self.custom_schedule_template_types.get(
                     name, FRACTIONAL_SCHEDULE_TYPE
+                ),
+                "months": template_months.get(
+                    name, list(range(1, 13))
                 ),
                 "values": schedule,
             }
@@ -2753,6 +2824,7 @@ class RainwaterTkApp(tk.Tk):
             "graph_step": tk.StringVar(),
             "graph_auto_step_count": tk.StringVar(),
             "filtration_system_flow_gpm": tk.StringVar(),
+            "filtration_system_count": tk.StringVar(),
             "transfer_pump_type": tk.StringVar(),
             "filter_recovery": tk.StringVar(),
             "booster_tank_size": tk.StringVar(),
@@ -2785,6 +2857,7 @@ class RainwaterTkApp(tk.Tk):
                 ("Graph step", editor_vars["graph_step"], self.tank_size_unit_var),
             ],
             "filtration_system": [
+                ("Number in parallel", editor_vars["filtration_system_count"], None),
                 ("Filter recovery", editor_vars["filter_recovery"], self.percent_unit_var),
             ],
             "booster_tank": [
@@ -2825,7 +2898,7 @@ class RainwaterTkApp(tk.Tk):
             transfer_pump_frame, textvariable=editor_vars["transfer_pump_type"],
             values=TRANSFER_PUMP_TYPES, state="readonly", width=14,
         ).grid(row=0, column=1, sticky="ew", pady=2)
-        ttk.Label(transfer_pump_frame, text="Linked flow").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(transfer_pump_frame, text="Linked total flow").grid(row=1, column=0, sticky="w", pady=2)
         ttk.Label(
             transfer_pump_frame, textvariable=editor_vars["filtration_system_flow_gpm"]
         ).grid(row=1, column=1, sticky="w", pady=2)
@@ -2838,7 +2911,7 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(filtration_frame, text="Nominal skid flow").grid(row=0, column=0, sticky="w", pady=2)
         ttk.Combobox(
             filtration_frame, textvariable=editor_vars["filtration_system_flow_gpm"],
-            values=tuple(str(value) for value in FILTRATION_SYSTEM_FLOW_RATES_GPM),
+            values=("Infinite", *(str(value) for value in FILTRATION_SYSTEM_FLOW_RATES_GPM)),
             state="readonly", width=8,
         ).grid(row=0, column=1, sticky="ew", pady=2)
         ttk.Label(filtration_frame, text="GPM").grid(row=0, column=2, sticky="w", pady=2)
@@ -4259,6 +4332,10 @@ class RainwaterTkApp(tk.Tk):
             )
             if schedule is None:
                 continue
+            if timestamp.month not in schedule_months_for(
+                self.config_model.demand, demand_object.schedule_name
+            ):
+                continue
             values = schedule.get(day_key, [])
             if timestamp.hour < len(values) and float(values[timestamp.hour]) > 0.0:
                 return True
@@ -5596,7 +5673,9 @@ class RainwaterTkApp(tk.Tk):
                 "graph_end", "graph_step", "graph_auto_step_count",
             ),
             "filtration_pump": ("transfer_pump_type", "filtration_system_flow_gpm"),
-            "filtration_system": ("filtration_system_flow_gpm", "filter_recovery"),
+            "filtration_system": (
+                "filtration_system_flow_gpm", "filtration_system_count", "filter_recovery"
+            ),
             "booster_tank": (
                 "booster_tank_size", "booster_initial_fill", "booster_refill_level",
             ),
@@ -5631,12 +5710,20 @@ class RainwaterTkApp(tk.Tk):
             })
         elif component_type == "filtration_pump":
             values["transfer_pump_type"] = cfg.system_parameters.transfer_pump_type
-            values["filtration_system_flow_gpm"] = str(
-                cfg.system_parameters.filtration_system_flow_gpm
+            values["filtration_system_flow_gpm"] = (
+                "Infinite" if cfg.system_parameters.filtration_system_flow_gpm == 0
+                else str(
+                    cfg.system_parameters.filtration_system_flow_gpm
+                    * cfg.system_parameters.filtration_system_count
+                )
             )
         elif component_type == "filtration_system":
-            values["filtration_system_flow_gpm"] = str(
-                cfg.system_parameters.filtration_system_flow_gpm
+            values["filtration_system_flow_gpm"] = (
+                "Infinite" if cfg.system_parameters.filtration_system_flow_gpm == 0
+                else str(cfg.system_parameters.filtration_system_flow_gpm)
+            )
+            values["filtration_system_count"] = str(
+                cfg.system_parameters.filtration_system_count
             )
             values["filter_recovery"] = f"{cfg.system_parameters.filter_recovery_percent:.2f}"
         elif component_type == "booster_tank":
@@ -5870,15 +5957,21 @@ class RainwaterTkApp(tk.Tk):
             cfg.system_parameters.synchronize_filtration_flow()
             self.transfer_pump_type_var.set(cfg.system_parameters.transfer_pump_type)
         elif component_type == "filtration_system":
-            cfg.system_parameters.filtration_system_flow_gpm = int(
-                number("filtration_system_flow_gpm")
+            cfg.system_parameters.filtration_system_flow_gpm = (
+                normalize_filtration_system_flow_gpm(values["filtration_system_flow_gpm"])
+            )
+            cfg.system_parameters.filtration_system_count = int(
+                number("filtration_system_count")
             )
             cfg.system_parameters.synchronize_filtration_flow()
-            self.filtration_system_flow_gpm_var.set(
-                str(cfg.system_parameters.filtration_system_flow_gpm)
+            flow_label = (
+                "Infinite" if cfg.system_parameters.filtration_system_flow_gpm == 0
+                else str(cfg.system_parameters.filtration_system_flow_gpm)
             )
-            self.filtration_pump_capacity_var.set(
-                str(cfg.system_parameters.filtration_system_flow_gpm)
+            self.filtration_system_flow_gpm_var.set(flow_label)
+            self.filtration_pump_capacity_var.set(flow_label)
+            self.filtration_system_count_var.set(
+                str(cfg.system_parameters.filtration_system_count)
             )
             cfg.system_parameters.filter_recovery_percent = number("filter_recovery")
             self.filter_recovery_var.set(str(values["filter_recovery"]))
@@ -7005,10 +7098,18 @@ class RainwaterTkApp(tk.Tk):
             )
             for name in self.custom_schedule_templates
         }
+        self.custom_schedule_template_months = {
+            name: self.custom_schedule_template_months.get(name, list(range(1, 13)))
+            for name in self.custom_schedule_templates
+        }
         self.common_schedule_templates = {**built_in_templates, **self.custom_schedule_templates}
         self.common_schedule_template_types = {
             **common_hourly_schedule_template_types(),
             **self.custom_schedule_template_types,
+        }
+        self.common_schedule_template_months = {
+            **{name: list(range(1, 13)) for name in built_in_templates},
+            **self.custom_schedule_template_months,
         }
 
         hourly_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule properties", padding=12)
@@ -7039,18 +7140,42 @@ class RainwaterTkApp(tk.Tk):
         self.schedule_type_combo.bind(
             "<<ComboboxSelected>>", self._schedule_type_changed
         )
+        months_frame = ttk.LabelFrame(hourly_frame, text="Active months", padding=8)
+        months_frame.grid(row=2, column=0, columnspan=3, sticky="ew", pady=(10, 0))
+        self.schedule_month_vars = {
+            month_number: tk.BooleanVar(value=True)
+            for month_number in range(1, 13)
+        }
+        self.schedule_month_checkbuttons: list[ttk.Checkbutton] = []
+        for index, (month_number, month_key) in enumerate(
+            zip(range(1, 13), MONTH_KEYS, strict=True)
+        ):
+            checkbox = ttk.Checkbutton(
+                months_frame,
+                text=month_key.title(),
+                variable=self.schedule_month_vars[month_number],
+                command=self._schedule_months_changed,
+            )
+            checkbox.grid(
+                row=index // 6,
+                column=index % 6,
+                sticky="w",
+                padx=(0, 10),
+                pady=2,
+            )
+            self.schedule_month_checkbuttons.append(checkbox)
         self.edit_schedule_button = ttk.Button(
             hourly_frame, text="Edit typical week...", command=self.edit_hourly_demand_schedule
         )
-        self.edit_schedule_button.grid(row=2, column=0, columnspan=3, sticky="w", pady=(10, 0))
+        self.edit_schedule_button.grid(row=3, column=0, columnspan=3, sticky="w", pady=(10, 0))
         self.save_schedule_to_library_button = ttk.Button(
             hourly_frame,
             text="Save selected to library",
             command=self.save_selected_schedule_to_library,
         )
-        self.save_schedule_to_library_button.grid(row=3, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        self.save_schedule_to_library_button.grid(row=4, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Label(hourly_frame, textvariable=self.hourly_schedule_summary_var, foreground="#667278").grid(
-            row=4, column=0, columnspan=3, sticky="w", pady=(6, 0)
+            row=5, column=0, columnspan=3, sticky="w", pady=(6, 0)
         )
 
         library_frame = ttk.LabelFrame(self.schedules_tab, text="Schedule library", padding=10)
@@ -8823,6 +8948,7 @@ class RainwaterTkApp(tk.Tk):
         self.comparison_tree_sizes: dict[str, float] = {}
         unit = volume_unit(self.config_model)
         self.comparison_tree.heading("size", text=f"Tank size ({unit})")
+        self._wrap_treeview_headings(self.comparison_tree)
         reliability_by_size = {
             round(float(row.TankSizeGallons), 6): float(row.ReliabilityPercent)
             for row in self.curve_df.itertuples(index=False)
@@ -9256,10 +9382,13 @@ class RainwaterTkApp(tk.Tk):
         self.pump_capacity_var.set(
             f"{volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
         )
-        self.filtration_pump_capacity_var.set(
-            str(cfg.system_parameters.filtration_system_flow_gpm)
+        filtration_flow_label = (
+            "Infinite" if cfg.system_parameters.filtration_system_flow_gpm == 0
+            else str(cfg.system_parameters.filtration_system_flow_gpm)
         )
-        self.filtration_system_flow_gpm_var.set(str(cfg.system_parameters.filtration_system_flow_gpm))
+        self.filtration_pump_capacity_var.set(filtration_flow_label)
+        self.filtration_system_flow_gpm_var.set(filtration_flow_label)
+        self.filtration_system_count_var.set(str(cfg.system_parameters.filtration_system_count))
         self.transfer_pump_type_var.set(cfg.system_parameters.transfer_pump_type)
         self.filter_recovery_var.set(f"{cfg.system_parameters.filter_recovery_percent:.2f}")
         self.booster_tank_size_var.set(
@@ -9461,8 +9590,11 @@ class RainwaterTkApp(tk.Tk):
         cfg.system_parameters.pump_capacity_gallons_per_hour = max(
             0.0, volume_to_internal(_float(self.pump_capacity_var.get(), 0.0) * 60.0, cfg)
         )
-        cfg.system_parameters.filtration_system_flow_gpm = int(
-            _float(self.filtration_system_flow_gpm_var.get(), 20.0)
+        cfg.system_parameters.filtration_system_flow_gpm = (
+            normalize_filtration_system_flow_gpm(self.filtration_system_flow_gpm_var.get())
+        )
+        cfg.system_parameters.filtration_system_count = max(
+            int(_float(self.filtration_system_count_var.get(), 1.0)), 1
         )
         cfg.system_parameters.transfer_pump_type = self.transfer_pump_type_var.get()
         cfg.system_parameters.synchronize_filtration_flow()
@@ -9597,6 +9729,7 @@ class RainwaterTkApp(tk.Tk):
         self.surface_tree.heading(
             "first_flush", text=f"First flush ({precip_unit(self.config_model)})"
         )
+        self._wrap_treeview_headings(self.surface_tree)
         self.surface_tree.delete(*self.surface_tree.get_children())
         for i, surface in enumerate(self.config_model.surfaces):
             template = DEFAULT_SURFACES[i] if i < len(DEFAULT_SURFACES) else None
@@ -9642,6 +9775,7 @@ class RainwaterTkApp(tk.Tk):
             tree.heading(
                 "instantaneous_demand", text="Demand quantity"
             )
+            self._wrap_treeview_headings(tree)
             tree.delete(*tree.get_children())
             for index, demand_object in enumerate(self.config_model.demand.demand_objects):
                 tree.insert(
@@ -9689,9 +9823,8 @@ class RainwaterTkApp(tk.Tk):
     def _update_demand_headings(self) -> None:
         unit = volume_unit(self.config_model)
         demand_style = ttk.Style(self)
-        demand_style.configure("MonthlyDemand.Treeview.Heading", padding=(4, 16))
         heading_font_name = demand_style.lookup("MonthlyDemand.Treeview.Heading", "font") or "TkHeadingFont"
-        heading_font = tkfont.nametofont(str(heading_font_name))
+        heading_font = tkfont.Font(root=self, font=heading_font_name)
         month_minimum_width = heading_font.measure("Month") + 18
         self.demand_tree.column("month", minwidth=month_minimum_width, width=max(80, month_minimum_width))
         for field, label in DEMAND_FIELDS:
@@ -9702,19 +9835,9 @@ class RainwaterTkApp(tk.Tk):
             words = heading.split()
             minimum_width = max(heading_font.measure(word) for word in words) + 18
             target_width = max(105, minimum_width)
-            lines: list[str] = []
-            current_line = ""
-            for word in words:
-                candidate = word if not current_line else f"{current_line} {word}"
-                if current_line and heading_font.measure(candidate) + 18 > target_width:
-                    lines.append(current_line)
-                    current_line = word
-                else:
-                    current_line = candidate
-            if current_line:
-                lines.append(current_line)
             self.demand_tree.column(field, minwidth=minimum_width, width=target_width)
-            self.demand_tree.heading(field, text="\n".join(lines))
+            self.demand_tree.heading(field, text=heading)
+        self._wrap_treeview_headings(self.demand_tree)
 
     def _update_rainfall_summary(self) -> None:
         if self.rainfall_df.empty:
@@ -9802,6 +9925,7 @@ class RainwaterTkApp(tk.Tk):
                 self.pump_capacity_var,
                 self.filtration_pump_capacity_var,
                 self.filtration_system_flow_gpm_var,
+                self.filtration_system_count_var,
                 self.transfer_pump_type_var,
                 self.filter_recovery_var,
                 self.booster_tank_size_var,
@@ -10858,6 +10982,7 @@ class RainwaterTkApp(tk.Tk):
             "Precipitation",
             text=f"Record precipitation ({precip_unit(self.config_model)})",
         )
+        self._wrap_treeview_headings(tree)
         if not has_hourly_rainfall(self.rainfall_df):
             self.hourly_profile_preview_var.set(
                 "Generate a profile to preview its distribution by hour."
@@ -11681,6 +11806,7 @@ class RainwaterTkApp(tk.Tk):
                 column,
                 text=f"{label}{indicator}" if column == active_column else label,
             )
+        self._wrap_treeview_headings(self.climate_normal_tree)
 
     def _refresh_climate_normal_comparison(self) -> None:
         unit = precip_unit(self.config_model)
@@ -12452,6 +12578,7 @@ class RainwaterTkApp(tk.Tk):
         self.config_model.demand.hourly_schedule_types[name] = (
             FRACTIONAL_SCHEDULE_TYPE
         )
+        self.config_model.demand.hourly_schedule_months[name] = list(range(1, 13))
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = True
         self.hourly_schedule_enabled_var.set(True)
@@ -12471,6 +12598,9 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.demand.hourly_schedule_types.get(
                 source_name, FRACTIONAL_SCHEDULE_TYPE
             )
+        )
+        self.config_model.demand.hourly_schedule_months[name] = schedule_months_for(
+            self.config_model.demand, source_name
         )
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = True
@@ -12507,6 +12637,9 @@ class RainwaterTkApp(tk.Tk):
             selected_name, FRACTIONAL_SCHEDULE_TYPE
         )
         schedule_types[new_name] = selected_type
+        schedule_months = self.config_model.demand.hourly_schedule_months
+        if selected_name in schedule_months:
+            schedule_months[new_name] = schedule_months.pop(selected_name)
         for demand_object in self.config_model.demand.demand_objects:
             if demand_object.schedule_name == selected_name:
                 demand_object.schedule_name = new_name
@@ -12558,6 +12691,23 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_schedule_summary_var.set(
             f"Schedule type: {SCHEDULE_TYPE_LABELS[schedule_type]}"
         )
+
+    def _schedule_months_changed(self) -> None:
+        selected_name = self._selected_schedule_name()
+        if selected_name is None:
+            return
+        months = [
+            month
+            for month, variable in self.schedule_month_vars.items()
+            if variable.get()
+        ]
+        self.config_model.demand.hourly_schedule_months[selected_name] = months
+        label = "All months" if len(months) == 12 else (
+            ", ".join(MONTH_KEYS[month - 1].title() for month in months)
+            if months
+            else "No active months"
+        )
+        self.hourly_schedule_summary_var.set(f"Active months: {label}")
 
     def _rename_schedule_from_event(self, _event: tk.Event) -> str:
         self.rename_hourly_demand_schedule()
@@ -12614,6 +12764,7 @@ class RainwaterTkApp(tk.Tk):
         self,
         previous: dict[str, dict[str, list[float]]],
         previous_types: dict[str, str] | None = None,
+        previous_months: dict[str, list[int]] | None = None,
     ) -> bool:
         try:
             self._save_custom_schedule_templates()
@@ -12621,6 +12772,8 @@ class RainwaterTkApp(tk.Tk):
             self.custom_schedule_templates = previous
             if previous_types is not None:
                 self.custom_schedule_template_types = previous_types
+            if previous_months is not None:
+                self.custom_schedule_template_months = previous_months
             self.common_schedule_templates = {
                 **common_hourly_schedule_templates(),
                 **self.custom_schedule_templates,
@@ -12628,6 +12781,13 @@ class RainwaterTkApp(tk.Tk):
             self.common_schedule_template_types = {
                 **common_hourly_schedule_template_types(),
                 **self.custom_schedule_template_types,
+            }
+            self.common_schedule_template_months = {
+                **{
+                    name: list(range(1, 13))
+                    for name in common_hourly_schedule_templates()
+                },
+                **self.custom_schedule_template_months,
             }
             messagebox.showerror(APP_TITLE, f"Could not save the custom schedule library:\n{exc}", parent=self)
             return False
@@ -12638,6 +12798,13 @@ class RainwaterTkApp(tk.Tk):
         self.common_schedule_template_types = {
             **common_hourly_schedule_template_types(),
             **self.custom_schedule_template_types,
+        }
+        self.common_schedule_template_months = {
+            **{
+                name: list(range(1, 13))
+                for name in common_hourly_schedule_templates()
+            },
+            **self.custom_schedule_template_months,
         }
         return True
 
@@ -12668,9 +12835,11 @@ class RainwaterTkApp(tk.Tk):
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
         previous_types = dict(self.custom_schedule_template_types)
+        previous_months = copy.deepcopy(self.custom_schedule_template_months)
         self.custom_schedule_templates[name] = copy.deepcopy(temporary_config.demand.hourly_weekly_fractions)
         self.custom_schedule_template_types[name] = FRACTIONAL_SCHEDULE_TYPE
-        if self._save_library_changes(previous, previous_types):
+        self.custom_schedule_template_months[name] = list(range(1, 13))
+        if self._save_library_changes(previous, previous_types, previous_months):
             self._refresh_schedule_library(select_name=name)
             self.status_var.set(f"Added '{name}' to the custom schedule library")
 
@@ -12683,13 +12852,17 @@ class RainwaterTkApp(tk.Tk):
         name = self._unique_library_name(f"{source_name} copy")
         previous = copy.deepcopy(self.custom_schedule_templates)
         previous_types = dict(self.custom_schedule_template_types)
+        previous_months = copy.deepcopy(self.custom_schedule_template_months)
         self.custom_schedule_templates[name] = copy.deepcopy(source)
         self.custom_schedule_template_types[name] = (
             self.common_schedule_template_types.get(
                 source_name, FRACTIONAL_SCHEDULE_TYPE
             )
         )
-        if self._save_library_changes(previous, previous_types):
+        self.custom_schedule_template_months[name] = list(
+            self.common_schedule_template_months.get(source_name, range(1, 13))
+        )
+        if self._save_library_changes(previous, previous_types, previous_months):
             self._refresh_schedule_library(select_name=name)
             self.status_var.set(f"Duplicated '{source_name}' in the custom schedule library")
 
@@ -12706,9 +12879,11 @@ class RainwaterTkApp(tk.Tk):
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
         previous_types = dict(self.custom_schedule_template_types)
+        previous_months = copy.deepcopy(self.custom_schedule_template_months)
         del self.custom_schedule_templates[name]
         self.custom_schedule_template_types.pop(name, None)
-        if self._save_library_changes(previous, previous_types):
+        self.custom_schedule_template_months.pop(name, None)
+        if self._save_library_changes(previous, previous_types, previous_months):
             self._refresh_schedule_library()
             self.status_var.set(f"Deleted '{name}' from the custom schedule library")
 
@@ -12740,6 +12915,9 @@ class RainwaterTkApp(tk.Tk):
             self.common_schedule_template_types.get(
                 template_name, FRACTIONAL_SCHEDULE_TYPE
             )
+        )
+        self.config_model.demand.hourly_schedule_months[name] = list(
+            self.common_schedule_template_months.get(template_name, range(1, 13))
         )
         self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(template)
@@ -12782,9 +12960,11 @@ class RainwaterTkApp(tk.Tk):
             return
         previous = copy.deepcopy(self.custom_schedule_templates)
         previous_types = dict(self.custom_schedule_template_types)
+        previous_months = copy.deepcopy(self.custom_schedule_template_months)
         if existing_name is not None and existing_name != selected_name:
             del self.custom_schedule_templates[existing_name]
             self.custom_schedule_template_types.pop(existing_name, None)
+            self.custom_schedule_template_months.pop(existing_name, None)
         schedule = copy.deepcopy(self.config_model.demand.hourly_schedule_library[selected_name])
         self.custom_schedule_templates[selected_name] = schedule
         self.custom_schedule_template_types[selected_name] = (
@@ -12792,7 +12972,10 @@ class RainwaterTkApp(tk.Tk):
                 selected_name, FRACTIONAL_SCHEDULE_TYPE
             )
         )
-        if not self._save_library_changes(previous, previous_types):
+        self.custom_schedule_template_months[selected_name] = schedule_months_for(
+            self.config_model.demand, selected_name
+        )
+        if not self._save_library_changes(previous, previous_types, previous_months):
             return
         self._refresh_schedule_library(select_name=selected_name)
         self.hourly_schedule_summary_var.set(f"Saved to common schedule library: {selected_name}")
@@ -12823,6 +13006,7 @@ class RainwaterTkApp(tk.Tk):
             return
         del self.config_model.demand.hourly_schedule_library[selected_name]
         self.config_model.demand.hourly_schedule_types.pop(selected_name, None)
+        self.config_model.demand.hourly_schedule_months.pop(selected_name, None)
         library = self.config_model.demand.hourly_schedule_library
         if library:
             active_name = next(iter(library))
@@ -12844,6 +13028,7 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.demand.hourly_schedule_types[name] = (
                 FRACTIONAL_SCHEDULE_TYPE
             )
+            self.config_model.demand.hourly_schedule_months[name] = list(range(1, 13))
             self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
         self._refresh_schedule_management()
@@ -13043,6 +13228,9 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.demand.hourly_schedule_types[active_name] = (
                 FRACTIONAL_SCHEDULE_TYPE
             )
+            self.config_model.demand.hourly_schedule_months.setdefault(
+                active_name, list(range(1, 13))
+            )
         names = list(library)
         for name in names:
             self.schedule_list.insert(tk.END, name)
@@ -13059,9 +13247,14 @@ class RainwaterTkApp(tk.Tk):
                     )
                 ]
             )
+            active_months = set(schedule_months_for(self.config_model.demand, target))
+            for month, variable in self.schedule_month_vars.items():
+                variable.set(month in active_months)
         else:
             self.schedule_name_var.set("")
             self.schedule_type_var.set("")
+            for variable in self.schedule_month_vars.values():
+                variable.set(False)
         self._update_schedule_management_state()
         self._refresh_applied_analysis_settings()
 
@@ -13093,6 +13286,11 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.demand.hourly_weekly_fractions = copy.deepcopy(
                 self.config_model.demand.hourly_schedule_library[selected_name]
             )
+            active_months = set(
+                schedule_months_for(self.config_model.demand, selected_name)
+            )
+            for month, variable in self.schedule_month_vars.items():
+                variable.set(month in active_months)
             self.hourly_schedule_summary_var.set(f"Selected schedule: {selected_name}")
         self._update_schedule_management_state()
         self._refresh_applied_analysis_settings()
@@ -13115,6 +13313,8 @@ class RainwaterTkApp(tk.Tk):
             self.schedule_type_combo.configure(
                 state="readonly" if has_schedule else "disabled"
             )
+        for checkbox in getattr(self, "schedule_month_checkbuttons", []):
+            checkbox.state(["!disabled"] if has_schedule else ["disabled"])
 
     def _edit_demand_month_from_event(self, event: tk.Event) -> str:
         row_id = self.demand_tree.identify_row(event.y)
@@ -13984,6 +14184,7 @@ class RainwaterTkApp(tk.Tk):
                 "municipal_backup": "Enabled" if cfg.system_parameters.municipal_backup_enabled else "Disabled",
                 "filter_recovery_percent": cfg.system_parameters.filter_recovery_percent,
                 "filtration_system_flow_gpm": cfg.system_parameters.filtration_system_flow_gpm,
+                "filtration_system_count": cfg.system_parameters.filtration_system_count,
                 "transfer_pump_type": cfg.system_parameters.transfer_pump_type,
                 "system_type": cfg.system_type,
                 "application_version": application_version,
@@ -14363,6 +14564,7 @@ class RainwaterTkApp(tk.Tk):
         }
         for column, label in heading_labels.items():
             tree.heading(column, text=label)
+        self._wrap_treeview_headings(tree)
         columns = tuple(str(column) for column in tree["columns"])
         display_rows = candidate_service.display_rows(data, columns)
         for position, (values_by_column, display_values) in enumerate(
@@ -14433,6 +14635,7 @@ class RainwaterTkApp(tk.Tk):
         self.results_tree.heading("demand", text=f"Demand ({volume_unit(self.config_model)})")
         self.results_tree.heading("unmet", text=f"Unmet ({volume_unit(self.config_model)})")
         self.results_tree.heading("tank", text=f"Water in Tank ({volume_unit(self.config_model)})")
+        self._wrap_treeview_headings(self.results_tree)
         self.results_tree.delete(*self.results_tree.get_children())
         display = self._display_results_df()
         overflow_column = f"Overflow ({volume_unit(self.config_model)}/day)"
@@ -14469,8 +14672,9 @@ class RainwaterTkApp(tk.Tk):
             "gross", "first_flush", "collected", "demand", "pump", "filter", "filter_loss", "booster", "mains",
             "shortfall", "system_unmet", "overflow", "tank",
         ):
-            label = self.hourly_results_tree.heading(column, "text").split(" (")[0]
+            label = re.split(r"\s+\(", self.hourly_results_tree.heading(column, "text"), maxsplit=1)[0]
             self.hourly_results_tree.heading(column, text=f"{label} ({unit})")
+        self._wrap_treeview_headings(self.hourly_results_tree)
         for row in self._selected_hourly_results().itertuples(index=False):
             self.hourly_results_tree.insert(
                 "", "end", values=(

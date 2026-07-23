@@ -63,7 +63,7 @@ The remaining roadmap work includes tiered and time-varying tariffs, component-s
 
 ## Filtration-system flexibility
 
-The current filtration skid is selected as a single fixed-flow system whose transfer pump is linked to the skid's nominal flow. Future work will allow users to modify the filtration skid's subsystem components individually and will support adding multiple filtration systems in parallel. Parallel systems will require explicit rules for flow sharing, staging, redundancy, combined capacity, energy use, and failure behavior before they are enabled in simulation or optimization.
+**Implemented:** Filtration can be configured with Infinite flow or as multiple equal nominal skids in parallel. Parallel skid capacity is additive, the linked transfer-pump capacity follows the combined flow, and saved projects created before this option default to one skid. Detailed subsystem editing, staging, redundancy, energy sharing, and failure behavior remain future work.
 
 Implementation requirements include:
 

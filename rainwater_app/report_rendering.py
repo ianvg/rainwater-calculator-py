@@ -1227,7 +1227,16 @@ def render_html(
             ("System", f'{provenance.get("system_type", "Not specified")}; municipal backup {str(provenance.get("municipal_backup", "Not specified")).lower()}'),
             ("Initial tank fill", f'{float(provenance.get("initial_tank_fill_percent", 0.0)):g}%'),
             ("Filter recovery", f'{float(provenance.get("filter_recovery_percent", 100.0)):g}%'),
-            ("Filtration system flow", f'{float(provenance.get("filtration_system_flow_gpm", 20.0)):g} GPM'),
+            (
+                "Filtration system flow",
+                "Infinite"
+                if float(provenance.get("filtration_system_flow_gpm", 20.0)) == 0.0
+                else f'{float(provenance.get("filtration_system_flow_gpm", 20.0)):g} GPM each',
+            ),
+            (
+                "Filtration systems in parallel",
+                str(int(provenance.get("filtration_system_count", 1))),
+            ),
             ("Transfer pump type", str(provenance.get("transfer_pump_type", "External"))),
             ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
             ("Report schema", provenance.get("report_schema_version", report["schema_version"])),

@@ -214,6 +214,20 @@ def test_legacy_transfer_flow_is_mapped_to_supported_filtration_system_size() ->
     assert config.system_parameters.filtration_pump_capacity_gallons_per_hour == 1800.0
 
 
+def test_filtration_parallel_count_and_infinite_flow_round_trip() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "Unlimited parallel filtration",
+        "system_parameters": {
+            "filtration_system_flow_gpm": 0,
+            "filtration_system_count": 3,
+        },
+    })
+
+    assert config.system_parameters.filtration_system_flow_gpm == 0
+    assert config.system_parameters.filtration_system_count == 3
+    assert config.system_parameters.transfer_pump_capacity_gallons_per_hour == 0.0
+
+
 def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -> None:
     config = SQLiteStore._config_from_dict({
         "name": "First flush project",
@@ -490,11 +504,29 @@ def test_schedule_type_metadata_round_trips_with_project(tmp_path) -> None:
         for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
     }
     config.demand.hourly_schedule_types["Occupied"] = OCCUPANCY_SCHEDULE_TYPE
+    config.demand.hourly_schedule_months["Occupied"] = [3, 4, 5]
 
     store.save_project(config)
     loaded, _rainfall = store.load_project(config.name)
 
     assert loaded.demand.hourly_schedule_types["Occupied"] == OCCUPANCY_SCHEDULE_TYPE
+    assert loaded.demand.hourly_schedule_months["Occupied"] == [3, 4, 5]
+
+
+def test_legacy_schedule_without_month_metadata_defaults_to_all_months() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "Legacy schedule months",
+        "demand": {
+            "hourly_schedule_library": {
+                "Always": {
+                    day: [1.0] * 24
+                    for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+                }
+            }
+        },
+    })
+
+    assert "Always" not in config.demand.hourly_schedule_months
 
 
 def test_system_builder_layout_is_loaded() -> None:

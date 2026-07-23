@@ -6,6 +6,7 @@ MONTH_KEYS = [
     "jan", "feb", "mar", "apr", "may", "jun",
     "jul", "aug", "sep", "oct", "nov", "dec",
 ]
+ALL_SCHEDULE_MONTHS = list(range(1, 13))
 WEEKDAY_KEYS = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
 DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY = 3.0
 DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH = 1.28
@@ -15,16 +16,21 @@ UNIT_SYSTEMS = (ENGLISH_UNIT_SYSTEM, METRIC_UNIT_SYSTEM)
 FRACTIONAL_SCHEDULE_TYPE = "fractional"
 OCCUPANCY_SCHEDULE_TYPE = "occupancy"
 SCHEDULE_TYPES = (FRACTIONAL_SCHEDULE_TYPE, OCCUPANCY_SCHEDULE_TYPE)
+UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM = 0
 FILTRATION_SYSTEM_FLOW_RATES_GPM = (15, 20, 30, 40, 50)
 TRANSFER_PUMP_TYPES = ("External", "Submersible")
 
 
 def normalize_filtration_system_flow_gpm(value: object) -> int:
     """Return the nearest supported nominal filtration-skid flow rate."""
+    if str(value).strip().casefold() in {"infinite", "unlimited"}:
+        return UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM
     try:
         flow = float(value)
     except (TypeError, ValueError):
         flow = 20.0
+    if flow == UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM:
+        return UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM
     return min(FILTRATION_SYSTEM_FLOW_RATES_GPM, key=lambda candidate: (abs(candidate - flow), candidate))
 
 
@@ -157,6 +163,7 @@ class DemandProfile:
     hourly_weekly_fractions: Dict[str, List[float]] = field(default_factory=default_hourly_weekly_fractions)
     hourly_schedule_library: Dict[str, Dict[str, List[float]]] = field(default_factory=dict)
     hourly_schedule_types: Dict[str, str] = field(default_factory=dict)
+    hourly_schedule_months: Dict[str, List[int]] = field(default_factory=dict)
     active_hourly_schedule_name: str = "Typical week demand"
     demand_objects: List[DemandObject] = field(default_factory=list)
     legacy_inputs_migrated: bool = False
@@ -193,7 +200,30 @@ def purge_unused_hourly_schedules(demand: DemandProfile) -> List[str]:
     for name in unused_names:
         del demand.hourly_schedule_library[name]
         demand.hourly_schedule_types.pop(name, None)
+        demand.hourly_schedule_months.pop(name, None)
     return unused_names
+
+
+def normalized_schedule_months(value: object) -> List[int]:
+    """Return unique, sorted calendar months from persisted schedule metadata."""
+    if not isinstance(value, (list, tuple, set)):
+        return list(ALL_SCHEDULE_MONTHS)
+    months: set[int] = set()
+    for raw_month in value:
+        try:
+            month = int(raw_month)
+        except (TypeError, ValueError):
+            continue
+        if 1 <= month <= 12:
+            months.add(month)
+    return sorted(months)
+
+
+def schedule_months_for(demand: DemandProfile, schedule_name: str) -> List[int]:
+    """Return a schedule's active months, defaulting legacy metadata to all months."""
+    if schedule_name not in demand.hourly_schedule_months:
+        return list(ALL_SCHEDULE_MONTHS)
+    return normalized_schedule_months(demand.hourly_schedule_months[schedule_name])
 
 
 def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
@@ -239,6 +269,9 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
         demand.hourly_schedule_types[
             occupational_schedule_name
         ] = OCCUPANCY_SCHEDULE_TYPE
+        demand.hourly_schedule_months[occupational_schedule_name] = schedule_months_for(
+            demand, schedule_name
+        )
     recurring_schedule_name = occupational_schedule_name
     legacy_operating_days = min(
         max(int(demand.daily_demand_days_per_week), 0), 7
@@ -262,6 +295,9 @@ def migrate_legacy_demand_inputs(demand: DemandProfile) -> list[int]:
         demand.hourly_schedule_types[
             recurring_schedule_name
         ] = OCCUPANCY_SCHEDULE_TYPE
+        demand.hourly_schedule_months[recurring_schedule_name] = schedule_months_for(
+            demand, occupational_schedule_name
+        )
     created: list[int] = []
 
     def add(item: DemandObject) -> None:
@@ -350,6 +386,7 @@ class SystemComponentParameters:
     pump_capacity_gallons_per_hour: float = 0.0
     filtration_pump_capacity_gallons_per_hour: float = 1200.0
     filtration_system_flow_gpm: int = 20
+    filtration_system_count: int = 1
     transfer_pump_type: str = "External"
     filter_recovery_percent: float = 100.0
     booster_tank_size_gallons: float = 0.0
@@ -363,18 +400,32 @@ class SystemComponentParameters:
             self.filtration_system_flow_gpm
         )
         self.transfer_pump_type = normalize_transfer_pump_type(self.transfer_pump_type)
+        try:
+            self.filtration_system_count = max(int(self.filtration_system_count), 1)
+        except (TypeError, ValueError):
+            self.filtration_system_count = 1
         self.filtration_pump_capacity_gallons_per_hour = (
-            float(self.filtration_system_flow_gpm) * 60.0
+            float(self.filtration_system_flow_gpm) * 60.0 * self.filtration_system_count
         )
 
     @property
     def transfer_pump_capacity_gallons_per_hour(self) -> float:
         """Linked transfer-pump capacity derived from the filtration system."""
-        if self.filtration_system_flow_gpm not in FILTRATION_SYSTEM_FLOW_RATES_GPM:
+        if self.filtration_system_flow_gpm not in {
+            UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM, *FILTRATION_SYSTEM_FLOW_RATES_GPM
+        }:
             raise ValueError(
-                "Filtration system flow must be one of 15, 20, 30, 40, or 50 GPM."
+                "Filtration system flow must be Infinite or one of 15, 20, 30, 40, or 50 GPM."
             )
-        return float(self.filtration_system_flow_gpm) * 60.0
+        if self.filtration_system_flow_gpm == UNLIMITED_FILTRATION_SYSTEM_FLOW_GPM:
+            return 0.0
+        if self.filtration_system_count < 1:
+            raise ValueError("Number of filtration systems must be at least 1.")
+        return (
+            float(self.filtration_system_flow_gpm)
+            * 60.0
+            * self.filtration_system_count
+        )
 
 
 @dataclass

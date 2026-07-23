@@ -35,7 +35,12 @@ from rainwater_app.ui_logic import (
     validated_demand_object_library as _validated_demand_object_library,
     validated_schedule_library as _validated_schedule_library,
 )
-from tkinter_app import RainwaterTkApp, _StationMapView, _normalize_text_scale_percent
+from tkinter_app import (
+    RainwaterTkApp,
+    _StationMapView,
+    _normalize_text_scale_percent,
+    _two_line_heading_text,
+)
 from tkinter_app import DemandObjectDialog
 
 
@@ -56,6 +61,21 @@ class _VariableStub:
 )
 def test_text_scale_preference_uses_the_closest_supported_percentage(value, expected) -> None:
     assert _normalize_text_scale_percent(value) == expected
+
+
+def test_table_heading_stays_on_one_line_when_it_fits() -> None:
+    assert _two_line_heading_text("Tank size", 120, lambda value: len(value) * 10) == "Tank size"
+
+
+def test_table_heading_wraps_to_no_more_than_two_balanced_lines() -> None:
+    heading = _two_line_heading_text(
+        "Annual rainwater supplied",
+        150,
+        lambda value: len(value) * 10,
+    )
+
+    assert heading == "Annual rainwater\nsupplied"
+    assert heading.count("\n") == 1
 
 
 class _WidgetStateStub:
@@ -230,17 +250,41 @@ def test_custom_schedule_library_preserves_schedule_types(tmp_path) -> None:
     app.custom_schedule_library_path = path
     app.custom_schedule_templates = {"Office occupied": schedule}
     app.custom_schedule_template_types = {"Office occupied": "occupancy"}
+    app.custom_schedule_template_months = {"Office occupied": [1, 2, 11, 12]}
 
     app._save_custom_schedule_templates()
 
     loaded_app = object.__new__(RainwaterTkApp)
     loaded_app.custom_schedule_library_path = path
     loaded_app.custom_schedule_template_types = {}
+    loaded_app.custom_schedule_template_months = {}
     loaded = loaded_app._load_custom_schedule_templates()
     assert loaded == {"Office occupied": schedule}
     assert loaded_app.custom_schedule_template_types == {
         "Office occupied": "occupancy"
     }
+    assert loaded_app.custom_schedule_template_months == {
+        "Office occupied": [1, 2, 11, 12]
+    }
+
+
+def test_schedule_month_checkboxes_update_selected_schedule() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.config_model.demand.hourly_schedule_library["Seasonal"] = {
+        day: [1.0] * 24 for day in WEEKDAY_KEYS
+    }
+    app._selected_schedule_name = lambda: "Seasonal"
+    app.schedule_month_vars = {
+        month: _VariableStub(month in {4, 5, 6})
+        for month in range(1, 13)
+    }
+    app.hourly_schedule_summary_var = _VariableStub()
+
+    app._schedule_months_changed()
+
+    assert app.config_model.demand.hourly_schedule_months["Seasonal"] == [4, 5, 6]
+    assert app.hourly_schedule_summary_var.get() == "Active months: Apr, May, Jun"
 
 
 def _analysis_settings_app(*, hourly: bool, synthetic: bool, generated: bool):
@@ -451,7 +495,21 @@ def test_system_object_editor_validates_other_visible_parameter_types() -> None:
     assert _system_object_editor_validation(
         "filtration_system",
         {"name": "Filter", "filtration_system_flow_gpm": "25", "filter_recovery": "95"},
-    ) == ["Filtration system flow must be 15, 20, 30, 40, or 50 GPM."]
+    ) == ["Filtration system flow must be Infinite, 15, 20, 30, 40, or 50 GPM."]
+    assert _system_object_editor_validation(
+        "filtration_system",
+        {
+            "name": "Filter", "filtration_system_flow_gpm": "Infinite",
+            "filtration_system_count": "2", "filter_recovery": "95",
+        },
+    ) == []
+    assert _system_object_editor_validation(
+        "filtration_system",
+        {
+            "name": "Filter", "filtration_system_flow_gpm": "20",
+            "filtration_system_count": "1.5", "filter_recovery": "95",
+        },
+    ) == ["Number of filtration systems must be a whole number of at least 1."]
 
 
 @pytest.mark.parametrize(

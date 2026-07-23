@@ -14,6 +14,7 @@ from .models import (
     TankParameters,
     WEEKDAY_KEYS,
     fixture_daily_demand_gallons,
+    schedule_months_for,
 )
 from .rainfall import expand_hourly_rainfall
 from .system_model import compile_builder_system
@@ -85,6 +86,11 @@ def _demand_object_daily_value_for_date(
     mode = getattr(demand_object, "demand_mode", "scheduled_flow")
     schedule = demand.hourly_schedule_library.get(demand_object.schedule_name)
     if schedule is None and mode != "monthly_volume":
+        return 0.0
+    if (
+        schedule is not None
+        and date.month not in schedule_months_for(demand, demand_object.schedule_name)
+    ):
         return 0.0
     if mode == "recurring_daily":
         day_key = WEEKDAY_KEYS[date.weekday()]
@@ -167,6 +173,8 @@ def _demand_object_hourly_for_date(
             schedule = {day: [1.0] * 24 for day in WEEKDAY_KEYS}
         else:
             return np.zeros(24, dtype=np.float64)
+    elif date.month not in schedule_months_for(demand, demand_object.schedule_name):
+        return np.zeros(24, dtype=np.float64)
     day_key = WEEKDAY_KEYS[date.weekday()]
     multipliers = [
         min(max(float(value), 0.0), 1.0)

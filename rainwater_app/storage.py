@@ -33,12 +33,13 @@ from .models import (
     TankParameters,
     WEEKDAY_KEYS,
     migrate_legacy_demand_inputs,
+    normalized_schedule_months,
     normalize_schedule_type,
 )
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 11
+PROJECT_SCHEMA_VERSION = 12
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -540,6 +541,11 @@ class SQLiteStore:
         demand.hourly_schedule_types = {
             name: normalize_schedule_type(demand.hourly_schedule_types.get(name))
             for name in demand.hourly_schedule_library
+        }
+        demand.hourly_schedule_months = {
+            name: normalized_schedule_months(months)
+            for name, months in demand.hourly_schedule_months.items()
+            if name in demand.hourly_schedule_library
         }
         if demand.hourly_schedule_enabled and not demand.hourly_schedule_library:
             demand.hourly_schedule_library[demand.active_hourly_schedule_name] = {
