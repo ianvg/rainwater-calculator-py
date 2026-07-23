@@ -4796,32 +4796,95 @@ class RainwaterTkApp(tk.Tk):
         def point(item: dict[str, object]) -> tuple[float, float]:
             return (15.0 + (float(item.get("x", 0.0)) - min_x) * scale,
                     15.0 + (float(item.get("y", 0.0)) - min_y) * scale)
+        def connection_screen_points(points: tuple[float, ...]) -> tuple[float, ...]:
+            transformed: list[float] = []
+            for index, value in enumerate(points):
+                origin = min_x if index % 2 == 0 else min_y
+                screen_value = 15.0 + (float(value) - origin) * scale
+                transformed.append(round(screen_value * 2.0) / 2.0)
+            return tuple(transformed)
         by_id = {str(item.get("id")): item for item in layout}
         for connection in self.config_model.system_connections:
             source, target = by_id.get(connection.get("source_component", "")), by_id.get(connection.get("target_component", ""))
             if source is None or target is None:
                 continue
-            sx, sy = point(source); tx, ty = point(target)
-            canvas.create_line(sx, sy, tx, ty, fill="#7b878d", width=3, arrow=tk.LAST)
+            source_x, source_y = float(source.get("x", 0.0)), float(source.get("y", 0.0))
+            target_x, target_y = float(target.get("x", 0.0)), float(target.get("y", 0.0))
+            if source.get("component_type") == "primary_tank":
+                source_y += self._primary_tank_outlet_offset(
+                    source, str(connection.get("source_port", "out"))
+                )
+            if target.get("component_type") == "booster_tank" and target.get("extra_input_node"):
+                target_y += 14.0 if connection.get("target_port") == "in2" else -14.0
+            routed_points = self._system_connection_points(
+                source_x,
+                source_y,
+                target_x,
+                target_y,
+                self._system_canvas_dimensions()[1],
+                float(source.get("width", 124.0)),
+                float(target.get("width", 124.0)),
+                float(source.get("height", 60.0)),
+                float(target.get("height", 60.0)),
+            )
+            screen_points = connection_screen_points(routed_points)
+            canvas.create_line(
+                *screen_points,
+                fill="#58656b",
+                width=max(3.0 * scale, 1.5),
+                arrow=tk.LAST,
+                arrowshape=tuple(max(value * scale, 3.0) for value in (10, 12, 5)),
+                joinstyle=tk.ROUND,
+            )
             source_type = str(source.get("component_type", ""))
             target_type = str(target.get("component_type", ""))
             if self._system_animation_connection_active(source_type, target_type, row):
                 for offset in (0.0, 0.33, 0.66):
                     fraction = (self.system_animation_phase + offset) % 1.0
-                    px, py = sx + (tx - sx) * fraction, sy + (ty - sy) * fraction
-                    canvas.create_oval(px - 5, py - 5, px + 5, py + 5, fill="#1687d9", outline="")
-            if self.system_animation_show_pipe_flow_var.get():
-                flow_volume = self._system_animation_connection_flow_gallons(
-                    source_type, target_type, row
-                )
+                    px, py = self._point_along_system_connection(screen_points, fraction)
+                    radius = max(4.0 * scale, 2.5)
+                    canvas.create_oval(
+                        px - radius,
+                        py - radius,
+                        px + radius,
+                        py + radius,
+                        fill="#1687d9",
+                        outline="#0d5f9e",
+                        width=max(scale, 1.0),
+                    )
+            flow_volume = self._system_animation_connection_flow_gallons(
+                source_type, target_type, row
+            )
+            if self.system_animation_show_pipe_flow_var.get() and flow_volume > 1e-9:
+                label_x, label_y = self._point_along_system_connection(screen_points, 0.5)
+                if abs(float(source.get("y", 0.0)) - float(target.get("y", 0.0))) < 0.001:
+                    source_top = float(source.get("y", 0.0)) - float(
+                        source.get("height", 60.0)
+                    ) / 2.0
+                    target_top = float(target.get("y", 0.0)) - float(
+                        target.get("height", 60.0)
+                    ) / 2.0
+                    label_y = 15.0 + (min(source_top, target_top) - min_y) * scale
+                    label_y -= max(9.0 * scale, 7.0)
+                else:
+                    before_x, before_y = self._point_along_system_connection(
+                        screen_points, 0.46
+                    )
+                    after_x, after_y = self._point_along_system_connection(
+                        screen_points, 0.54
+                    )
+                    if abs(after_y - before_y) > abs(after_x - before_x):
+                        label_x += max(22.0 * scale, 16.0)
+                    else:
+                        label_y -= max(9.0 * scale, 7.0)
                 label_id = canvas.create_text(
-                    (sx + tx) / 2.0,
-                    (sy + ty) / 2.0 - 9.0,
+                    label_x,
+                    label_y,
                     text=self._system_animation_pipe_flow_label(
                         flow_volume, self.config_model
                     ),
                     fill="#263238",
-                    font=("Segoe UI", 8, "bold"),
+                    font=("Segoe UI", max(round(8.0 * scale), 7), "bold"),
                 )
                 bounds = canvas.bbox(label_id)
                 if bounds is not None:
@@ -4849,10 +4912,13 @@ class RainwaterTkApp(tk.Tk):
             x, y = point(item); component_type = str(item.get("component_type", ""))
             component_id = str(item.get("id", ""))
             component_tag = f"animation-component:{component_id}"
-            block_w, block_h = 124.0 * scale, 60.0 * scale
-            canvas.create_rectangle(x - block_w / 2, y - block_h / 2, x + block_w / 2, y + block_h / 2,
-                                    fill="#f7f9fa", outline="#30363a", width=2,
-                                    tags=(component_tag,))
+            object_width = max(float(item.get("width", 124.0)), 80.0)
+            object_height = max(float(item.get("height", 60.0)), 44.0)
+            block_w, block_h = object_width * scale, object_height * scale
+            state_text = ""
+            state_color = "#35505c"
+            component_active = False
+            tank_state: tuple[float, float, float] | None = None
             if component_type in {"primary_tank", "booster_tank"}:
                 capacity = (self.config_model.selected_tank_size_gal if component_type == "primary_tank"
                             else self.config_model.system_parameters.booster_tank_size_gallons)
@@ -4866,40 +4932,20 @@ class RainwaterTkApp(tk.Tk):
                 volume = beginning_volume + (ending_volume - beginning_volume) * hour_progress
                 volume = min(max(volume, 0.0), max(capacity, 0.0))
                 fraction = min(max(volume / capacity, 0.0), 1.0) if capacity > 0 else 0.0
-                inner_h = max(block_h - 6.0, 0.0) * fraction
-                canvas.create_rectangle(x - block_w / 2 + 3, y + block_h / 2 - 3 - inner_h,
-                                        x + block_w / 2 - 3, y + block_h / 2 - 3,
-                                        fill="#70b7e6", outline="")
-                canvas.create_text(
-                    x,
-                    y,
-                    text=_tank_volume_capacity_label(volume, capacity, self.config_model),
-                    fill="#172026",
-                    font=("Segoe UI", 7, "bold"),
-                    width=max(block_w - 8.0, 20.0),
-                    justify="center",
-                    tags=(component_tag,),
-                )
-            if component_type in {"filtration_pump", "booster_pump"}:
+                tank_state = volume, capacity, fraction
+                state_text = _tank_volume_capacity_label(volume, capacity, self.config_model)
+                component_active = abs(ending_volume - beginning_volume) > 1e-9
+            elif component_type in {"filtration_pump", "booster_pump"}:
                 running = (float(row.get("PumpFlowGallons", 0.0)) > 1e-9 if component_type == "filtration_pump"
                            else float(row.get("DemandGallons", 0.0)) - float(row.get("SystemUnmetDemandGallons", 0.0)) > 1e-9)
-                angle = self.system_animation_phase * math.tau if running else 0.0
-                radius = min(block_w, block_h) * 0.23
-                canvas.create_oval(x - radius, y - radius, x + radius, y + radius, outline="#455a64", width=2)
-                for spoke in range(6):
-                    theta = angle + spoke * math.tau / 6.0
-                    canvas.create_line(x, y, x + math.cos(theta) * radius, y + math.sin(theta) * radius,
-                                       fill="#455a64", width=2)
-            if component_type == "rainwater_input":
+                component_active = running
+                state_text = "Running" if running else "Idle"
+                state_color = "#0d5f9e" if running else "#667278"
+            elif component_type == "rainwater_input":
                 raining = self._system_animation_rain_active(row)
-                if not self._draw_weather_asset_animation(
-                    canvas, x, y, self.system_animation_phase, raining
-                ):
-                    self._draw_pixel_weather_animation(
-                        canvas, x, y, max(block_w - 6.0, 1.0), max(block_h - 6.0, 1.0),
-                        self.system_animation_phase, raining,
-                    )
-            if component_type == "overflow_pipe":
+                component_active = raining
+                state_text = "Rain" if raining else "Dry"
+            elif component_type == "overflow_pipe":
                 overflow_start = float(
                     row.get("OverflowBeginningCumulativeGallons", 0.0)
                 )
@@ -4909,28 +4955,117 @@ class RainwaterTkApp(tk.Tk):
                 overflow_total = overflow_start + (
                     overflow_end - overflow_start
                 ) * hour_progress
-                canvas.create_text(
-                    x, y,
-                    text=(
-                        "Cumulative overflow\n"
-                        f"{format_number(volume_to_display(overflow_total, self.config_model), self.config_model, max_decimal_places=1)} "
-                        f"{volume_unit(self.config_model)}"
-                    ),
-                    fill="#a84300", font=("Segoe UI", 7, "bold"),
-                    width=max(block_w - 8.0, 20.0), justify="center",
+                component_active = overflow_end - overflow_start > 1e-9
+                state_text = (
+                    f"{format_number(volume_to_display(overflow_total, self.config_model), self.config_model, max_decimal_places=1)} "
+                    f"{volume_unit(self.config_model)} total"
+                )
+                state_color = "#a84300"
+            elif component_type == "filtration_system":
+                throughput = max(float(row.get("FilterThroughputGallons", 0.0)), 0.0)
+                component_active = throughput > 1e-9
+                state_text = (
+                    f"{format_number(volume_to_display(throughput, self.config_model), self.config_model, max_decimal_places=1)} "
+                    f"{volume_unit(self.config_model)}"
+                )
+            elif component_type == "municipal_backup":
+                makeup = max(float(row.get("MainsMakeupGallons", 0.0)), 0.0)
+                component_active = makeup > 1e-9
+                state_text = "Supplying" if component_active else "Standby"
+            elif component_type == "first_flush_diversion":
+                diverted = max(float(row.get("FirstFlushLossGallons", 0.0)), 0.0)
+                component_active = float(row.get("GrossCollectedGallons", 0.0)) > 1e-9
+                state_text = (
+                    f"{format_number(volume_to_display(diverted, self.config_model), self.config_model, max_decimal_places=1)} "
+                    f"{volume_unit(self.config_model)} diverted"
+                )
+            elif component_type == "end_uses":
+                demand = max(float(row.get("DemandGallons", 0.0)), 0.0)
+                component_active = demand > 1e-9
+                state_text = (
+                    f"{format_number(volume_to_display(demand, self.config_model), self.config_model, max_decimal_places=1)} "
+                    f"{volume_unit(self.config_model)} demand"
+                )
+
+            pulse = component_active and self.system_animation_phase >= 0.5
+            node_image = self._system_builder_node_image(
+                component_type,
+                object_width,
+                object_height,
+                fill="#e8f4ff" if component_active else "#f7f9fa",
+                outline="#1565c0" if component_active else "#30363a",
+                line_width=3 if pulse else 2,
+                render_scale=scale,
+            )
+            canvas.create_image(x, y, image=node_image, tags=(component_tag,))
+
+            if tank_state is not None:
+                _volume, _capacity, fraction = tank_state
+                bar_left = x - block_w / 2.0 + max(8.0 * scale, 4.0)
+                bar_right = x + block_w / 2.0 - max(8.0 * scale, 4.0)
+                bar_top = y + 8.0 * scale
+                bar_bottom = y + 25.0 * scale
+                canvas.create_rectangle(
+                    bar_left,
+                    bar_top,
+                    bar_right,
+                    bar_bottom,
+                    fill="#e5edf1",
+                    outline="#aebbc2",
+                    width=max(scale, 1.0),
                     tags=(component_tag,),
                 )
+                if fraction > 0.0:
+                    canvas.create_rectangle(
+                        bar_left + max(scale, 1.0),
+                        bar_top + max(scale, 1.0),
+                        bar_left + (bar_right - bar_left) * fraction,
+                        bar_bottom - max(scale, 1.0),
+                        fill="#70b7e6",
+                        outline="",
+                        tags=(component_tag,),
+                    )
+
             if (
                 component_type == "end_uses"
                 and self._system_animation_irrigation_active(item, animation_timestamp)
                 and float(row.get("DemandGallons", 0.0)) > 1e-9
             ):
                 self._draw_pixel_irrigation_animation(
-                    canvas, x, y, max(block_w - 6.0, 1.0), max(block_h - 6.0, 1.0),
+                    canvas, x, y - 9.0 * scale,
+                    max(block_w - 10.0 * scale, 1.0), max(block_h * 0.58, 1.0),
                     self.system_animation_phase,
                 )
-            canvas.create_text(x, y + block_h / 2 + 11, text=str(item.get("name", component_type)),
-                               font=("Segoe UI", 8, "bold"), tags=(component_tag,))
+            elif component_type == "rainwater_input":
+                self._draw_pixel_weather_animation(
+                    canvas,
+                    x,
+                    y - 9.0 * scale,
+                    max(block_w - 10.0 * scale, 1.0),
+                    max(block_h * 0.58, 1.0),
+                    self.system_animation_phase,
+                    component_active,
+                )
+            if state_text:
+                canvas.create_text(
+                    x,
+                    y + 17.0 * scale,
+                    text=state_text,
+                    fill=state_color,
+                    font=("Segoe UI", max(round(7.0 * scale), 6), "bold"),
+                    width=max(block_w - 12.0 * scale, 30.0),
+                    justify="center",
+                    tags=(component_tag,),
+                )
+            canvas.create_text(
+                x,
+                y + block_h / 2.0 + max(11.0 * scale, 8.0),
+                text=str(item.get("name", component_type)),
+                font=("Segoe UI", max(round(8.0 * scale), 7), "bold"),
+                width=max(block_w + 24.0 * scale, 70.0),
+                justify="center",
+                tags=(component_tag,),
+            )
 
     def save_custom_system_template(self) -> None:
         if not self.config_model.system_layout:
@@ -6565,6 +6700,34 @@ class RainwaterTkApp(tk.Tk):
         )
 
     @staticmethod
+    def _point_along_system_connection(
+        points: tuple[float, ...], fraction: float
+    ) -> tuple[float, float]:
+        """Return a distance-weighted point along a routed connection polyline."""
+        pairs = list(zip(points[0::2], points[1::2]))
+        if not pairs:
+            return 0.0, 0.0
+        if len(pairs) == 1:
+            return pairs[0]
+        segments = [
+            math.hypot(end[0] - start[0], end[1] - start[1])
+            for start, end in zip(pairs, pairs[1:])
+        ]
+        total_length = sum(segments)
+        if total_length <= 0.0:
+            return pairs[0]
+        remaining = min(max(float(fraction), 0.0), 1.0) * total_length
+        for (start, end), length in zip(zip(pairs, pairs[1:]), segments):
+            if remaining <= length:
+                progress = remaining / length if length > 0.0 else 0.0
+                return (
+                    start[0] + (end[0] - start[0]) * progress,
+                    start[1] + (end[1] - start[1]) * progress,
+                )
+            remaining -= length
+        return pairs[-1]
+
+    @staticmethod
     def _system_builder_icon_assets() -> dict[str, str]:
         return {
             "rainwater_input": "assets/bootstrap-icons/cloud-rain.svg",
@@ -6588,8 +6751,12 @@ class RainwaterTkApp(tk.Tk):
         fill: str,
         outline: str,
         line_width: int,
+        render_scale: float | None = None,
     ) -> ImageTk.PhotoImage:
-        zoom = max(float(self.system_builder_zoom), 0.01)
+        zoom = max(
+            float(self.system_builder_zoom if render_scale is None else render_scale),
+            0.01,
+        )
         target_width = max(round(float(width) * zoom), 1)
         target_height = max(round(float(height) * zoom), 1)
         cache_key = (

@@ -1915,6 +1915,15 @@ def test_reverse_connection_uses_gap_when_source_is_above_target() -> None:
     ]
 
 
+def test_animation_particle_follows_the_full_routed_connection() -> None:
+    points = (0.0, 0.0, 10.0, 0.0, 10.0, 30.0)
+
+    assert RainwaterTkApp._point_along_system_connection(points, 0.0) == (0.0, 0.0)
+    assert RainwaterTkApp._point_along_system_connection(points, 0.125) == (5.0, 0.0)
+    assert RainwaterTkApp._point_along_system_connection(points, 0.5) == (10.0, 10.0)
+    assert RainwaterTkApp._point_along_system_connection(points, 1.0) == (10.0, 30.0)
+
+
 def test_close_forward_connection_never_uses_loop_route() -> None:
     points = RainwaterTkApp._system_connection_points(
         100.0, 100.0, 232.0, 125.0, 420.0
