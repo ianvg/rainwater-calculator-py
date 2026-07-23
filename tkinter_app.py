@@ -108,6 +108,13 @@ from rainwater_app.example_projects import EXAMPLE_PROJECT_LABELS, build_complet
 from rainwater_app.financial import tariff_rate_per_gallon
 from rainwater_app.financial_service import FinancialAnalysisService
 from rainwater_app.candidate_service import CandidateAnalysisService
+from rainwater_app.chart_data import (
+    chart_render_indices as _chart_render_indices,
+    multitank_chart_data as _multitank_chart_data,
+    reliability_curve_chart_data as _reliability_curve_chart_data,
+    tank_level_distribution_chart_data as _tank_level_distribution_chart_data,
+    yearly_reliability_chart_data as _yearly_reliability_chart_data,
+)
 from rainwater_app.first_flush import (
     CODE_MINIMUM_PRESET,
     DESIGN_PRESET_LABELS,
@@ -188,10 +195,8 @@ from rainwater_app.reporting import (
     report_demand_summary as _report_demand_summary,
     report_first_flush_summaries as _report_first_flush_summaries,
     report_surface_rows as _report_surface_rows,
-    report_tank_level_distribution as _report_tank_level_distribution,
     normalize_report_sections,
     tank_volume_capacity_label as _tank_volume_capacity_label,
-    yearly_demand_reliability as _yearly_demand_reliability,
 )
 from rainwater_app.report_service import ReportRenderingService
 from rainwater_app.pdf_rendering import (
@@ -1094,7 +1099,7 @@ class RainwaterTkApp(tk.Tk):
             self.iconphoto(True, self.app_icon)
         self.system_weather_images: dict[str, tk.PhotoImage] = {}
         self.system_weather_assets_loaded = False
-        self.system_builder_node_images: dict[tuple[object, ...], ImageTk.PhotoImage] = {}
+        self.system_component_node_images: dict[tuple[object, ...], ImageTk.PhotoImage] = {}
         self.active_project_name: str | None = None
         self.geometry(f"{DEFAULT_WINDOW_WIDTH}x{DEFAULT_WINDOW_HEIGHT}")
         self.minsize(MINIMUM_WINDOW_WIDTH, DEFAULT_WINDOW_HEIGHT)
@@ -4988,7 +4993,7 @@ class RainwaterTkApp(tk.Tk):
                 )
 
             pulse = component_active and self.system_animation_phase >= 0.5
-            node_image = self._system_builder_node_image(
+            node_image = self._system_component_node_image(
                 component_type,
                 object_width,
                 object_height,
@@ -6742,7 +6747,7 @@ class RainwaterTkApp(tk.Tk):
             "overflow_pipe": "assets/bootstrap-icons/box-arrow-down-right.svg",
         }
 
-    def _system_builder_node_image(
+    def _system_component_node_image(
         self,
         component_type: str,
         width: float,
@@ -6762,11 +6767,11 @@ class RainwaterTkApp(tk.Tk):
         cache_key = (
             component_type, target_width, target_height, fill, outline, line_width
         )
-        cached = self.system_builder_node_images.get(cache_key)
+        cached = self.system_component_node_images.get(cache_key)
         if cached is not None:
             return cached
-        if len(self.system_builder_node_images) >= 256:
-            self.system_builder_node_images.clear()
+        if len(self.system_component_node_images) >= 256:
+            self.system_component_node_images.clear()
 
         supersample = 4
         render_width = target_width * supersample
@@ -6812,7 +6817,7 @@ class RainwaterTkApp(tk.Tk):
                 (target_width, target_height), Image.Resampling.LANCZOS
             )
         photo = ImageTk.PhotoImage(image, master=self)
-        self.system_builder_node_images[cache_key] = photo
+        self.system_component_node_images[cache_key] = photo
         return photo
 
     def _render_system_builder(self) -> None:
@@ -6890,7 +6895,7 @@ class RainwaterTkApp(tk.Tk):
             tag = f"component:{component_id}"
             half_width, half_height = object_width / 2.0, object_height / 2.0
             if view_mode == "icon-graph":
-                node_image = self._system_builder_node_image(
+                node_image = self._system_component_node_image(
                     component_type, object_width, object_height,
                     fill=fill, outline=outline,
                     line_width=3 if selected or geometry_selected else 2,
@@ -15563,6 +15568,11 @@ class RainwaterTkApp(tk.Tk):
         first_flush_events, first_flush_years = _report_first_flush_summaries(
             self.results_df, cfg
         )
+        reliability_chart = _reliability_curve_chart_data(self.curve_df, cfg)
+        yearly_reliability_chart = _yearly_reliability_chart_data(self.results_df, cfg)
+        tank_distribution_chart = _tank_level_distribution_chart_data(
+            self.results_df, cfg
+        )
         try:
             application_version = importlib_metadata.version("rainwater-calculator-standalone")
         except importlib_metadata.PackageNotFoundError:
@@ -15596,15 +15606,9 @@ class RainwaterTkApp(tk.Tk):
             ),
             "monthly_demand": monthly_demand,
             "total_annual_demand": total_annual_demand,
-            "yearly_reliability": _yearly_demand_reliability(self.results_df),
-            "tank_level_distribution": _report_tank_level_distribution(self.results_df, cfg),
-            "curve": [
-                {
-                    "tank_size": volume_to_display(row.TankSizeGallons, cfg),
-                    "reliability": float(row.ReliabilityPercent),
-                }
-                for row in self.curve_df.itertuples(index=False)
-            ],
+            "yearly_reliability": yearly_reliability_chart["rows"],
+            "tank_level_distribution": tank_distribution_chart["rows"],
+            "curve": reliability_chart["rows"],
             "selected_tank_size": volume_to_display(cfg.selected_tank_size_gal, cfg),
             "minimum_operating_level_percent": cfg.tank_parameters.minimum_operating_volume_percent,
             "minimum_operating_volume": volume_to_display(
@@ -15796,102 +15800,10 @@ class RainwaterTkApp(tk.Tk):
     def _multitank_report_chart_data(self) -> list[dict[str, object]]:
         if not self.config_model.multitank_comparison_enabled:
             return []
-        unit = volume_unit(self.config_model)
-        tank_series: list[dict[str, object]] = []
-        distribution_series: list[dict[str, object]] = []
-        yearly_series: list[dict[str, object]] = []
-        yearly_stacked_charts: list[dict[str, object]] = []
-        for tank_size, results in sorted(self.comparison_results.items()):
-            if results.empty:
-                continue
-            label = f"{format_number(volume_to_display(tank_size, self.config_model), self.config_model, max_decimal_places=0)} {unit}"
-            levels = [float(value) for value in results["WaterInTankGallons"]]
-            render_indices = self._chart_render_indices(levels, 800)
-            result_dates = pd.to_datetime(results["Date"], errors="coerce")
-            yearly_points: dict[str, list[tuple[float, float]]] = {}
-            for year in sorted(int(value) for value in result_dates.dropna().dt.year.unique()):
-                year_mask = result_dates.dt.year == year
-                year_levels = [
-                    volume_to_display(float(value), self.config_model)
-                    for value in results.loc[year_mask, "WaterInTankGallons"]
-                ]
-                year_indices = self._chart_render_indices(year_levels, 400)
-                yearly_points[str(year)] = [
-                    (float(index + 1), year_levels[index]) for index in year_indices
-                ]
-            tank_series.append(
-                {
-                    "label": label,
-                    "points": [
-                        (float(index), volume_to_display(levels[index], self.config_model))
-                        for index in render_indices
-                    ],
-                    "yearly_points": yearly_points,
-                    "dated_points": [
-                        (
-                            pd.Timestamp(result_dates.iloc[index]).strftime("%Y-%m-%d"),
-                            volume_to_display(levels[index], self.config_model),
-                        )
-                        for index in render_indices
-                        if not pd.isna(result_dates.iloc[index])
-                    ],
-                }
-            )
-            counts = [0] * 6
-            for value in levels:
-                percentage = min(max(value / tank_size * 100.0, 0.0), 100.0)
-                counts[min(int(percentage / (100.0 / 6)), 5)] += 1
-            total = len(levels) or 1
-            distribution_series.append(
-                {
-                    "label": label,
-                    "points": [
-                        ((index + 0.5) * (100.0 / 6), count / total * 100.0)
-                        for index, count in enumerate(counts)
-                    ],
-                }
-            )
-            yearly = _yearly_demand_reliability(results)
-            yearly_series.append(
-                {
-                    "label": label,
-                    "points": [
-                        (float(row["year"]), float(row["met_percent"]))
-                        for row in yearly
-                    ],
-                }
-            )
-            yearly_stacked_charts.append(
-                {
-                    "type": "yearly_stacked",
-                    "title": f"Yearly Demand Reliability - {label} tank",
-                    "yearly_reliability": yearly,
-                    "selected_reliability": float(results["ReliabilityPercent"].iloc[0]),
-                }
-            )
-        return [
-            {
-                "title": "Tank level distribution - multitank",
-                "x_label": "Tank level (% of capacity)",
-                "y_label": "Days (%)",
-                "series": distribution_series,
-            },
-            {
-                "title": "Yearly demand reliability - multitank",
-                "x_label": "Year",
-                "y_label": "Demand met (%)",
-                "series": yearly_series,
-                "interactive_series_toggle": True,
-            },
-            *yearly_stacked_charts,
-            {
-                "type": "tank_history",
-                "title": f"Tank Water Over Time ({unit})",
-                "x_label": "Day of year",
-                "y_label": unit,
-                "series": tank_series,
-            },
-        ]
+        prepared = _multitank_chart_data(
+            self.comparison_results, self.config_model
+        )
+        return list(prepared["report_charts"])
 
     def _build_report_latex(
         self, report: ReportModel | dict[str, object]
@@ -16435,20 +16347,15 @@ class RainwaterTkApp(tk.Tk):
     def _draw_curve(self) -> None:
         if self.curve_df.empty:
             return
-        x = [volume_to_display(v, self.config_model) for v in self.curve_df["TankSizeGallons"]]
-        y = list(self.curve_df["ReliabilityPercent"])
-        hover_labels = [
-            f"Tank size: {format_number(tank_size, self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)}\nReliability: {format_number(reliability, self.config_model)}%"
-            for tank_size, reliability in zip(x, y)
-        ]
+        chart = _reliability_curve_chart_data(self.curve_df, self.config_model)
         self._draw_line_chart(
             self.curve_canvas,
-            x,
-            y,
-            f"Reliability vs Tank Size ({volume_unit(self.config_model)})",
-            "Reliability %",
-            f"Tank size ({volume_unit(self.config_model)})",
-            hover_labels,
+            chart["x_values"],
+            chart["y_values"],
+            chart["title"],
+            chart["y_label"],
+            chart["x_label"],
+            chart["hover_labels"],
         )
 
     def _draw_tank_chart(self) -> None:
@@ -16573,16 +16480,10 @@ class RainwaterTkApp(tk.Tk):
         if self.results_df.empty:
             return
 
-        bin_count = 6
-        unit = volume_unit(self.config_model)
-        levels = [volume_to_display(value, self.config_model) for value in self.results_df["WaterInTankGallons"]]
-        selected_capacity = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
-        upper = max(selected_capacity, max(levels, default=0.0), 1.0)
-        bin_width = upper / bin_count
-        counts = [0] * bin_count
-        for level in levels:
-            index = min(max(int(max(level, 0.0) / bin_width), 0), bin_count - 1)
-            counts[index] += 1
+        chart = _tank_level_distribution_chart_data(self.results_df, self.config_model)
+        rows = chart["rows"]
+        counts = [int(row["count"]) for row in rows]
+        bin_count = len(rows)
 
         width = max(canvas.winfo_width(), 300)
         height = max(canvas.winfo_height(), 160)
@@ -16593,7 +16494,7 @@ class RainwaterTkApp(tk.Tk):
         canvas.create_text(
             width / 2,
             16,
-            text=f"Tank Level Distribution - {format_number(selected_capacity, self.config_model, max_decimal_places=0)} {unit} tank",
+            text=chart["title"],
             font=("Segoe UI", 10, "bold"),
         )
 
@@ -16612,15 +16513,15 @@ class RainwaterTkApp(tk.Tk):
             top = height - pad_bottom - (count / max_count) * plot_height
             bottom = height - pad_bottom
             canvas.create_rectangle(left, top, right, bottom, fill="#2e8b57", outline="#246b49")
-            low = index * bin_width
-            high = (index + 1) * bin_width
+            low = float(rows[index]["low"])
+            high = float(rows[index]["high"])
             canvas.create_text((left + right) / 2, bottom + 15, text=f"{format_number(low, self.config_model, max_decimal_places=0)}-{format_number(high, self.config_model, max_decimal_places=0)}", font=("Segoe UI", 7))
             canvas.create_text((left + right) / 2, max(top - 9, pad_top + 7), text=str(count), font=("Segoe UI", 8))
         canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
         canvas.create_text(
             pad_left + plot_width / 2,
             ((height - pad_bottom + 15) + height) / 2,
-            text=f"Tank level range ({unit})",
+            text=chart["x_label"],
             font=("Segoe UI", 8),
         )
 
@@ -16628,18 +16529,17 @@ class RainwaterTkApp(tk.Tk):
         canvas = self.yearly_reliability_canvas
         canvas.delete("all")
         canvas.hover_points = []
-        yearly = _yearly_demand_reliability(self.results_df)
+        chart = _yearly_reliability_chart_data(self.results_df, self.config_model)
+        yearly = chart["rows"]
         width = max(canvas.winfo_width(), 300)
         height = max(canvas.winfo_height(), 160)
         pad_left, pad_right, pad_top, pad_bottom = 50, 14, 46, 44
         plot_width = width - pad_left - pad_right
         plot_height = height - pad_top - pad_bottom
-        selected_capacity = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
-        unit = volume_unit(self.config_model)
         canvas.create_text(
             width / 2,
             14,
-            text=f"Yearly Demand Reliability - {format_number(selected_capacity, self.config_model, max_decimal_places=0)} {unit} tank",
+            text=chart["title"],
             font=("Segoe UI", 10, "bold"),
         )
         canvas.create_rectangle(16, 27, 26, 35, fill="#2e8b57", outline="")
@@ -16691,7 +16591,7 @@ class RainwaterTkApp(tk.Tk):
                 canvas.hover_points.append((center_x, pad_top + unmet_height / 2, label))
             if index % label_step == 0 or index == len(yearly) - 1:
                 canvas.create_text(center_x, baseline + 13, text=str(int(row["year"])), font=("Segoe UI", 7))
-        average_reliability = float(self.results_df["ReliabilityPercent"].iloc[0])
+        average_reliability = float(chart["selected_reliability"])
         average_x = pad_left + (len(yearly) + 0.5) * slot_width
         average_y = baseline - plot_height * average_reliability / 100.0
         canvas.create_oval(
@@ -16718,47 +16618,22 @@ class RainwaterTkApp(tk.Tk):
         canvas.bind("<Leave>", self._hide_chart_hover)
 
     def _draw_multitank_summary(self) -> None:
-        unit = volume_unit(self.config_model)
-        tank_series: list[tuple[str, list[float], list[float]]] = []
-        distribution_series: list[tuple[str, list[float], list[float]]] = []
-        yearly_series: list[tuple[str, list[float], list[float]]] = []
-        for tank_size, results in sorted(self.comparison_results.items()):
-            if results.empty:
-                continue
-            display_size = volume_to_display(tank_size, self.config_model)
-            label = f"{format_number(display_size, self.config_model, max_decimal_places=0)} {unit}"
-            tank_series.append(
-                (
-                    label,
-                    [float(index) for index in range(len(results))],
-                    [volume_to_display(value, self.config_model) for value in results["WaterInTankGallons"]],
-                )
-            )
-
-            percentages = [
-                min(max(float(value) / tank_size * 100.0, 0.0), 100.0)
-                for value in results["WaterInTankGallons"]
-            ]
-            counts = [0] * 6
-            for percentage in percentages:
-                counts[min(int(percentage / (100.0 / 6)), 5)] += 1
-            total = len(percentages) or 1
-            distribution_series.append(
-                (
-                    label,
-                    [(index + 0.5) * (100.0 / 6) for index in range(6)],
-                    [count / total * 100.0 for count in counts],
-                )
-            )
-
-            yearly = _yearly_demand_reliability(results)
-            yearly_series.append(
-                (
-                    label,
-                    [float(row["year"]) for row in yearly],
-                    [float(row["met_percent"]) for row in yearly],
-                )
-            )
+        prepared = _multitank_chart_data(
+            self.comparison_results, self.config_model
+        )
+        unit = prepared["unit"]
+        tank_series = [
+            (row["label"], row["x_values"], row["y_values"])
+            for row in prepared["tank_series"]
+        ]
+        distribution_series = [
+            (row["label"], row["x_values"], row["y_values"])
+            for row in prepared["distribution_series"]
+        ]
+        yearly_series = [
+            (row["label"], row["x_values"], row["y_values"])
+            for row in prepared["yearly_series"]
+        ]
 
         self._draw_multiline_chart(
             self.multitank_tank_canvas,
@@ -16922,24 +16797,7 @@ class RainwaterTkApp(tk.Tk):
         canvas.bind("<Motion>", self._show_chart_hover)
         canvas.bind("<Leave>", self._hide_chart_hover)
 
-    @staticmethod
-    def _chart_render_indices(y_values: list[float], max_points: int) -> list[int]:
-        point_count = len(y_values)
-        if point_count <= max_points:
-            return list(range(point_count))
-
-        bucket_count = max((max_points - 2) // 2, 1)
-        interior_count = point_count - 2
-        bucket_size = max((interior_count + bucket_count - 1) // bucket_count, 1)
-        indices = [0]
-        for start in range(1, point_count - 1, bucket_size):
-            stop = min(start + bucket_size, point_count - 1)
-            bucket = range(start, stop)
-            low = min(bucket, key=y_values.__getitem__)
-            high = max(bucket, key=y_values.__getitem__)
-            indices.extend(sorted({low, high}))
-        indices.append(point_count - 1)
-        return indices
+    _chart_render_indices = staticmethod(_chart_render_indices)
 
     def _show_chart_hover(self, event: tk.Event) -> None:
         canvas = event.widget

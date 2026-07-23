@@ -20,6 +20,8 @@ The **Analysis provenance and reproducibility** section identifies the rainfall 
 
 All report formats consume the same validated report model. The model currently uses report schema version 2 and rejects missing required sections, unsupported schema versions, and non-finite numeric values before rendering. The HTML, LaTeX, and direct PDF outputs include the same design recommendations, review conditions, rainfall quality, yearly rainfall, rainfall-event, first-flush diversion, lifecycle financial, and provenance sections.
 
+Reliability curves, yearly reliability rows, tank-level distributions, and multi-tank series are prepared by shared UI-independent chart-data helpers. The desktop canvases and report renderers therefore consume the same converted units and aggregated values, while each output remains responsible for its own drawing and interaction behavior.
+
 The HTML report embeds its styles, scripts, charts, and map layout without requiring Leaflet or another JavaScript mapping library. When project or weather-station coordinates are available, the static map loads the configured OpenStreetMap tiles and overlays labeled project and station markers. Map imagery requires an internet connection, while the coordinate table remains available offline. Every HTML chart includes a data table directly beneath it, so its values remain available when JavaScript is disabled, in print, and to assistive technology.
 
 HTML and PDF exports are generated into temporary sibling files, checked for non-empty or valid output, and atomically replace the requested destination only after generation succeeds. An interrupted or failed export therefore does not overwrite an existing completed report.

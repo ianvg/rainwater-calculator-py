@@ -11,7 +11,7 @@ Continue extracting cohesive boundaries instead of performing a single wholesale
 - [Implemented] Keep validated HTML, LaTeX, and direct-PDF renderers behind a dedicated reporting service.
 - Separate system-builder canvas interaction from graph validation and compilation.
 - [Implemented] Isolate hydraulic analysis coordination, cancellation callbacks, and progress events from widgets.
-- Move reusable chart data preparation away from Tkinter drawing code.
+- [Implemented initial extraction] Prepare reliability-curve rows and labels, yearly reliability, tank-level distributions, extrema-preserving line downsampling, and shared screen/report multitank series in the tested UI-independent `rainwater_app/chart_data.py` module. Tkinter retains canvas drawing and interactive range controls.
 - Keep dialogs and tab construction thin, with calculation and validation logic independently testable.
 - Add characterization tests before moving UI behavior whose expected output is not already covered.
 
