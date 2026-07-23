@@ -50,3 +50,4 @@ jobs:
           path: |
             dist/RainwaterCalculator.exe
             dist/RainwaterCalculator-Setup-*.exe
+            dist/RainwaterCalculator.cdx.json

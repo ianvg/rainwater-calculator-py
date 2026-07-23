@@ -55,7 +55,7 @@ from rainwater_app.climate_normals import (
     filter_climate_normal_stations,
     remove_climate_normals_bulk_archive,
 )
-from rainwater_app.defaults import default_project_config, default_surface_runoff
+from rainwater_app.defaults import DEFAULT_SURFACES, default_project_config, default_surface_runoff
 from rainwater_app.eccc import (
     fetch_canadian_daily_station_data,
     fetch_canadian_station_options,
@@ -202,7 +202,11 @@ SYSTEM_ANIMATION_CYCLES_PER_SECOND = 0.6
 DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
 DEFAULT_WINDOW_WIDTH = 1200
 DEFAULT_WINDOW_HEIGHT = 680
-MINIMUM_WINDOW_WIDTH = 1000
+MINIMUM_WINDOW_WIDTH = 750
+RESULTS_CHART_HEIGHT = 340
+RESULTS_MULTITANK_CHART_HEIGHT = 360
+RESULTS_HOURLY_CHART_HEIGHT = 480
+RESULTS_PLOT_STACK_BREAKPOINT = 900
 MAX_RECENT_PROJECTS = 8
 TEXT_SCALE_PERCENTAGES = (80, 90, 100, 110, 125, 150)
 DEFAULT_TEXT_SCALE_PERCENT = 100
@@ -6434,7 +6438,7 @@ class RainwaterTkApp(tk.Tk):
         state_list_frame.columnconfigure(0, weight=1)
         self.climate_normal_state_list = tk.Listbox(
             state_list_frame,
-            height=7,
+            height=len(DEFAULT_SURFACES),
             exportselection=False,
             activestyle="dotbox",
             disabledforeground="#90999d",
@@ -8071,12 +8075,37 @@ class RainwaterTkApp(tk.Tk):
 
         self._build_report_generation_tab()
 
-        summary = self.summary_results_tab
+        self.summary_results_tab.columnconfigure(0, weight=1)
+        self.summary_results_tab.rowconfigure(0, weight=1)
+        self.summary_scroll_canvas = tk.Canvas(
+            self.summary_results_tab,
+            highlightthickness=0,
+            borderwidth=0,
+        )
+        self.summary_scroll_canvas.grid(row=0, column=0, sticky="nsew")
+        summary_scrollbar = ttk.Scrollbar(
+            self.summary_results_tab,
+            orient="vertical",
+            command=self.summary_scroll_canvas.yview,
+        )
+        summary_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.summary_scroll_canvas.configure(yscrollcommand=summary_scrollbar.set)
+
+        summary = ttk.Frame(self.summary_scroll_canvas)
+        self.summary_results_content = summary
+        self.summary_scroll_window = self.summary_scroll_canvas.create_window(
+            (0, 0), window=summary, anchor="nw"
+        )
+        self._summary_results_stacked: bool | None = None
+        summary.bind(
+            "<Configure>",
+            lambda _event: self.summary_scroll_canvas.configure(
+                scrollregion=self.summary_scroll_canvas.bbox("all")
+            ),
+        )
+        self.summary_scroll_canvas.bind("<Configure>", self._on_summary_results_resize)
         summary.columnconfigure(0, weight=1)
         summary.columnconfigure(1, weight=1)
-        summary.rowconfigure(1, weight=1)
-        summary.rowconfigure(2, weight=1)
-        summary.rowconfigure(3, weight=1)
 
         results_summary = ttk.Frame(summary)
         results_summary.grid(row=0, column=0, columnspan=2, sticky="w")
@@ -8086,9 +8115,15 @@ class RainwaterTkApp(tk.Tk):
         ttk.Label(results_summary, textvariable=self.average_annual_precipitation_var).grid(
             row=1, column=0, sticky="w", pady=(2, 0)
         )
-        self.curve_canvas = tk.Canvas(summary, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.curve_canvas = tk.Canvas(
+            summary, height=RESULTS_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7"
+        )
         self.curve_canvas.grid(row=1, column=0, sticky="nsew", pady=(8, 8), padx=(0, 5))
-        self.tank_canvas = tk.Canvas(summary, height=170, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.tank_canvas = tk.Canvas(
+            summary, height=RESULTS_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7"
+        )
         self.tank_canvas.grid(row=1, column=1, sticky="nsew", pady=(8, 8), padx=(5, 0))
         self.tank_points_check = ttk.Checkbutton(
             self.tank_canvas,
@@ -8096,33 +8131,30 @@ class RainwaterTkApp(tk.Tk):
             variable=self.show_tank_points_var,
             command=self._draw_tank_chart,
         )
-        self.tank_points_check.place(x=58, rely=1, y=-4, anchor="sw")
-        tank_year_controls = ttk.Frame(self.tank_canvas)
-        tank_year_controls.place(relx=1, rely=1, x=-8, y=-4, anchor="se")
+        self.tank_year_controls = ttk.Frame(self.tank_canvas)
         ttk.Radiobutton(
-            tank_year_controls, text="Single year", variable=self.tank_chart_range_mode_var,
+            self.tank_year_controls, text="Single year", variable=self.tank_chart_range_mode_var,
             value="year", command=self._draw_tank_chart,
         ).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Radiobutton(
-            tank_year_controls, text="Custom range", variable=self.tank_chart_range_mode_var,
+            self.tank_year_controls, text="Custom range", variable=self.tank_chart_range_mode_var,
             value="range", command=self._draw_tank_chart,
         ).grid(row=0, column=2, columnspan=2, sticky="w")
         self.previous_tank_year_button = ttk.Button(
-            tank_year_controls, text="<", width=3, command=lambda: self._change_tank_chart_year(-1)
+            self.tank_year_controls, text="<", width=3, command=lambda: self._change_tank_chart_year(-1)
         )
         self.previous_tank_year_button.grid(row=1, column=0)
-        ttk.Label(tank_year_controls, text="Year").grid(row=1, column=1, padx=(4, 2))
+        ttk.Label(self.tank_year_controls, text="Year").grid(row=1, column=1, padx=(4, 2))
         self.tank_chart_year_entry = ttk.Entry(
-            tank_year_controls, textvariable=self.tank_chart_year_var, width=6, justify="center"
+            self.tank_year_controls, textvariable=self.tank_chart_year_var, width=6, justify="center"
         )
         self.tank_chart_year_entry.grid(row=1, column=2, padx=(0, 4))
         self.tank_chart_year_entry.bind("<Return>", self._set_tank_chart_year_from_entry)
         self.next_tank_year_button = ttk.Button(
-            tank_year_controls, text=">", width=3, command=lambda: self._change_tank_chart_year(1)
+            self.tank_year_controls, text=">", width=3, command=lambda: self._change_tank_chart_year(1)
         )
         self.next_tank_year_button.grid(row=1, column=3)
         self.tank_range_controls = ttk.Frame(self.tank_canvas)
-        self.tank_range_controls.place(x=58, rely=1, y=-30, anchor="sw")
         ttk.Label(self.tank_range_controls, textvariable=self.tank_chart_range_label_var).grid(
             row=0, column=0, columnspan=2, sticky="w"
         )
@@ -8138,7 +8170,7 @@ class RainwaterTkApp(tk.Tk):
         self.tank_range_end_scale.grid(row=1, column=1, padx=(4, 0))
         self.histogram_canvas = tk.Canvas(
             summary,
-            height=170,
+            height=RESULTS_CHART_HEIGHT,
             bg="white",
             highlightthickness=1,
             highlightbackground="#b7b7b7",
@@ -8146,7 +8178,7 @@ class RainwaterTkApp(tk.Tk):
         self.histogram_canvas.grid(row=2, column=0, sticky="nsew", pady=(0, 8), padx=(0, 5))
         self.yearly_reliability_canvas = tk.Canvas(
             summary,
-            height=170,
+            height=RESULTS_CHART_HEIGHT,
             bg="white",
             highlightthickness=1,
             highlightbackground="#b7b7b7",
@@ -8177,11 +8209,18 @@ class RainwaterTkApp(tk.Tk):
             self.results_tree.heading(col, text=heading)
             self.results_tree.column(col, width=120, anchor="e" if col != "date" else "w")
         self.results_tree.grid(row=3, column=0, columnspan=2, sticky="nsew")
-        results_scroll_y = ttk.Scrollbar(summary, orient="vertical", command=self.results_tree.yview)
-        results_scroll_y.grid(row=3, column=2, sticky="ns")
-        results_scroll_x = ttk.Scrollbar(summary, orient="horizontal", command=self.results_tree.xview)
-        results_scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
-        self.results_tree.configure(yscrollcommand=results_scroll_y.set, xscrollcommand=results_scroll_x.set)
+        self.results_scroll_y = ttk.Scrollbar(
+            summary, orient="vertical", command=self.results_tree.yview
+        )
+        self.results_scroll_y.grid(row=3, column=2, sticky="ns")
+        self.results_scroll_x = ttk.Scrollbar(
+            summary, orient="horizontal", command=self.results_tree.xview
+        )
+        self.results_scroll_x.grid(row=4, column=0, columnspan=2, sticky="ew")
+        self.results_tree.configure(
+            yscrollcommand=self.results_scroll_y.set,
+            xscrollcommand=self.results_scroll_x.set,
+        )
 
         candidate = self.candidate_results_tab
         candidate.columnconfigure(0, weight=1)
@@ -8289,23 +8328,28 @@ class RainwaterTkApp(tk.Tk):
         )
         self.candidate_performance_tree.bind("<Double-1>", self._use_candidate_as_primary_from_event)
 
-        multitank = self.multitank_results_tab
+        multitank = self._create_results_scroll_content(self.multitank_results_tab)
         multitank.columnconfigure(0, weight=1)
-        for row in range(3):
-            multitank.rowconfigure(row, weight=1)
-        self.multitank_tank_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
-        self.multitank_distribution_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
-        self.multitank_yearly_canvas = tk.Canvas(multitank, height=180, bg="white", highlightthickness=1, highlightbackground="#b7b7b7")
+        self.multitank_tank_canvas = tk.Canvas(
+            multitank, height=RESULTS_MULTITANK_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7",
+        )
+        self.multitank_distribution_canvas = tk.Canvas(
+            multitank, height=RESULTS_MULTITANK_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7",
+        )
+        self.multitank_yearly_canvas = tk.Canvas(
+            multitank, height=RESULTS_MULTITANK_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7",
+        )
         self.multitank_tank_canvas.grid(row=0, column=0, sticky="nsew", pady=(0, 5))
         self.multitank_distribution_canvas.grid(row=1, column=0, sticky="nsew", pady=5)
         self.multitank_yearly_canvas.grid(row=2, column=0, sticky="nsew", pady=(5, 0))
         for canvas in (self.multitank_tank_canvas, self.multitank_distribution_canvas, self.multitank_yearly_canvas):
             canvas.bind("<Configure>", self._schedule_results_chart_redraw)
 
-        hourly = self.hourly_results_tab
+        hourly = self._create_results_scroll_content(self.hourly_results_tab)
         hourly.columnconfigure(0, weight=1)
-        hourly.rowconfigure(1, weight=1)
-        hourly.rowconfigure(2, weight=1)
         hourly_controls = ttk.Frame(hourly)
         hourly_controls.grid(row=0, column=0, sticky="w", pady=(0, 6))
         ttk.Label(hourly_controls, text="Year").grid(row=0, column=0, padx=(0, 4))
@@ -8315,7 +8359,8 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_results_year_combo.grid(row=0, column=1)
         self.hourly_results_year_combo.bind("<<ComboboxSelected>>", lambda _event: self._refresh_hourly_results_view())
         self.hourly_tank_canvas = tk.Canvas(
-            hourly, height=240, bg="white", highlightthickness=1, highlightbackground="#b7b7b7"
+            hourly, height=RESULTS_HOURLY_CHART_HEIGHT, bg="white",
+            highlightthickness=1, highlightbackground="#b7b7b7",
         )
         self.hourly_tank_canvas.grid(row=1, column=0, sticky="nsew", pady=(0, 8))
         self.hourly_tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
@@ -8339,6 +8384,103 @@ class RainwaterTkApp(tk.Tk):
         hourly_scroll_x = ttk.Scrollbar(hourly, orient="horizontal", command=self.hourly_results_tree.xview)
         hourly_scroll_x.grid(row=3, column=0, sticky="ew")
         self.hourly_results_tree.configure(yscrollcommand=hourly_scroll.set, xscrollcommand=hourly_scroll_x.set)
+
+    @staticmethod
+    def _create_results_scroll_content(parent: ttk.Frame) -> ttk.Frame:
+        """Create full-width, vertically scrollable content for a results subtab."""
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(0, weight=1)
+        viewport = tk.Canvas(parent, highlightthickness=0, borderwidth=0)
+        viewport.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(parent, orient="vertical", command=viewport.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        viewport.configure(yscrollcommand=scrollbar.set)
+
+        content = ttk.Frame(viewport)
+        content_window = viewport.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event: viewport.configure(scrollregion=viewport.bbox("all")),
+        )
+        viewport.bind(
+            "<Configure>",
+            lambda event: viewport.itemconfigure(
+                content_window, width=max(int(event.width), 1)
+            ),
+        )
+        return content
+
+    def _on_summary_results_resize(self, event: tk.Event) -> None:
+        """Keep summary content full-width and stack plot pairs when space is tight."""
+        width = max(int(event.width), 1)
+        self.summary_scroll_canvas.itemconfigure(self.summary_scroll_window, width=width)
+        stacked = width < RESULTS_PLOT_STACK_BREAKPOINT
+        if self._summary_results_stacked == stacked:
+            return
+        self._summary_results_stacked = stacked
+
+        for widget in (
+            self.curve_canvas,
+            self.tank_canvas,
+            self.histogram_canvas,
+            self.yearly_reliability_canvas,
+            self.results_tree,
+            self.results_scroll_y,
+            self.results_scroll_x,
+        ):
+            widget.grid_forget()
+
+        if stacked:
+            plot_layout = (
+                (self.curve_canvas, 1, (8, 8)),
+                (self.tank_canvas, 2, (0, 8)),
+                (self.histogram_canvas, 3, (0, 8)),
+                (self.yearly_reliability_canvas, 4, (0, 8)),
+            )
+            for canvas, row, pady in plot_layout:
+                canvas.grid(
+                    row=row, column=0, columnspan=2, sticky="ew", pady=pady
+                )
+            results_row = 5
+        else:
+            self.curve_canvas.grid(
+                row=1, column=0, sticky="ew", pady=(8, 8), padx=(0, 5)
+            )
+            self.tank_canvas.grid(
+                row=1, column=1, sticky="ew", pady=(8, 8), padx=(5, 0)
+            )
+            self.histogram_canvas.grid(
+                row=2, column=0, sticky="ew", pady=(0, 8), padx=(0, 5)
+            )
+            self.yearly_reliability_canvas.grid(
+                row=2, column=1, sticky="ew", pady=(0, 8), padx=(5, 0)
+            )
+            results_row = 3
+
+        self.results_tree.grid(
+            row=results_row, column=0, columnspan=2, sticky="ew"
+        )
+        self.results_scroll_y.grid(row=results_row, column=2, sticky="ns")
+        self.results_scroll_x.grid(
+            row=results_row + 1, column=0, columnspan=2, sticky="ew"
+        )
+        self.after_idle(
+            lambda: self.summary_scroll_canvas.configure(
+                scrollregion=self.summary_scroll_canvas.bbox("all")
+            )
+        )
+
+    def _set_tank_chart_controls_visible(self, visible: bool) -> None:
+        if visible:
+            self.tank_points_check.place(x=58, rely=1, y=-4, anchor="sw")
+            self.tank_year_controls.place(
+                relx=1, rely=1, x=-8, y=-4, anchor="se"
+            )
+            self.tank_range_controls.place(x=58, rely=1, y=-30, anchor="sw")
+            return
+        self.tank_points_check.place_forget()
+        self.tank_year_controls.place_forget()
+        self.tank_range_controls.place_forget()
 
     def _labeled_entry(self, parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, unit_var: tk.StringVar | None = None) -> None:
         ttk.Label(parent, text=label).grid(row=row, column=0, sticky="w", pady=2)
@@ -9187,6 +9329,16 @@ class RainwaterTkApp(tk.Tk):
         )
         self.surface_tree.delete(*self.surface_tree.get_children())
         for i, surface in enumerate(self.config_model.surfaces):
+            template = DEFAULT_SURFACES[i] if i < len(DEFAULT_SURFACES) else None
+            is_untouched_template = (
+                template is not None
+                and surface.area <= 0.0
+                and surface.name.casefold() == template.name.casefold()
+                and surface.runoff_coefficient == template.runoff_coefficient
+                and surface.first_flush_depth_inches == template.first_flush_depth_inches
+            )
+            if is_untouched_template:
+                continue
             self.surface_tree.insert(
                 "",
                 "end",
@@ -11594,14 +11746,21 @@ class RainwaterTkApp(tk.Tk):
             self._populate_surfaces()
 
     def add_surface(self) -> None:
-        dialog = SurfaceDialog(self, Surface("Custom surface", 0.0, Surface(name="Default").runoff_coefficient), self.config_model)
+        library_dialog = SurfaceLibraryDialog(self)
+        self.wait_window(library_dialog)
+        if library_dialog.result is None:
+            return
+
+        dialog = SurfaceDialog(self, library_dialog.result, self.config_model)
         self.wait_window(dialog)
         if dialog.result:
             self.config_model.surfaces.append(dialog.result)
+            selected_index = len(self.config_model.surfaces) - 1
             self._populate_surfaces()
-            new_index = str(len(self.config_model.surfaces) - 1)
-            self.surface_tree.selection_set(new_index)
-            self.surface_tree.focus(new_index)
+            item_id = str(selected_index)
+            self.surface_tree.selection_set(item_id)
+            self.surface_tree.focus(item_id)
+            self.surface_tree.see(item_id)
 
     def _edit_surface_from_event(self, event: tk.Event) -> str:
         row_id = self.surface_tree.identify_row(event.y)
@@ -13970,6 +14129,7 @@ class RainwaterTkApp(tk.Tk):
 
     def _clear_results(self) -> None:
         self.comparison_results = {}
+        self._set_tank_chart_controls_visible(False)
         self.tank_chart_year = None
         self.tank_chart_year_var.set("--")
         self.tank_chart_range_initialized = False
@@ -14039,6 +14199,7 @@ class RainwaterTkApp(tk.Tk):
         )
 
     def _draw_tank_chart(self) -> None:
+        self._set_tank_chart_controls_visible(False)
         if self.results_df.empty:
             return
         dates = pd.to_datetime(self.results_df["Date"], errors="coerce")
@@ -14106,6 +14267,7 @@ class RainwaterTkApp(tk.Tk):
             show_points=self.show_tank_points_var.get(),
             bottom_padding=78,
         )
+        self._set_tank_chart_controls_visible(bool(x and y))
 
     def _tank_range_slider_changed(self, changed: str) -> None:
         if self.tank_chart_range_mode_var.get() != "range":
@@ -14585,6 +14747,107 @@ class RainwaterTkApp(tk.Tk):
 
     def _hide_chart_hover(self, event: tk.Event) -> None:
         event.widget.delete("hover")
+
+
+class SurfaceLibraryDialog(tk.Toplevel):
+    """Offer the built-in collection surfaces only when a user asks to add one."""
+
+    def __init__(self, parent: RainwaterTkApp) -> None:
+        super().__init__(parent)
+        self.title("Add collection surface")
+        self.resizable(False, False)
+        self.result: Surface | None = None
+
+        body = ttk.Frame(self, padding=12)
+        body.grid(sticky="nsew")
+        ttk.Label(
+            body,
+            text="Collection surface library",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            body,
+            text="Choose a common surface, then enter its area and other details.",
+            foreground="#667278",
+        ).grid(row=1, column=0, sticky="w", pady=(2, 8))
+
+        self.surface_tree = ttk.Treeview(
+            body,
+            columns=("surface", "runoff"),
+            show="headings",
+            height=7,
+            selectmode="browse",
+        )
+        self.surface_tree.heading("surface", text="Surface")
+        self.surface_tree.heading("runoff", text="Default runoff coeff.")
+        self.surface_tree.column("surface", width=280)
+        self.surface_tree.column("runoff", width=150, anchor="e")
+        self.surface_tree.grid(row=2, column=0, sticky="nsew")
+        for index, surface in enumerate(DEFAULT_SURFACES):
+            self.surface_tree.insert(
+                "",
+                "end",
+                iid=str(index),
+                values=(surface.name, f"{surface.runoff_coefficient:.2f}"),
+            )
+        if DEFAULT_SURFACES:
+            self.surface_tree.selection_set("0")
+            self.surface_tree.focus("0")
+
+        buttons = ttk.Frame(body)
+        buttons.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            buttons, text="Custom surface...", command=self._choose_custom
+        ).pack(side="left")
+        ttk.Button(buttons, text="Cancel", command=self.destroy).pack(
+            side="right", padx=(6, 0)
+        )
+        ttk.Button(buttons, text="Add selected", command=self._choose_selected).pack(
+            side="right"
+        )
+
+        self.transient(parent)
+        self.grab_set()
+        self.bind("<Escape>", lambda _event: self.destroy())
+        self.surface_tree.bind("<Double-1>", self._choose_selected)
+        self.surface_tree.bind("<Return>", self._choose_selected)
+        self.after_idle(self._focus_dialog)
+
+    @staticmethod
+    def _copy_surface(surface: Surface) -> Surface:
+        return Surface(
+            surface.name,
+            surface.area,
+            surface.runoff_coefficient,
+            surface.first_flush_depth_inches,
+        )
+
+    def _choose_selected(self, _event: tk.Event | None = None) -> None:
+        selected = self.surface_tree.selection()
+        if not selected:
+            return
+        self.result = self._copy_surface(DEFAULT_SURFACES[int(selected[0])])
+        self.destroy()
+
+    def _choose_custom(self) -> None:
+        self.result = Surface(
+            "Custom surface",
+            0.0,
+            Surface(name="Default").runoff_coefficient,
+        )
+        self.destroy()
+
+    def _focus_dialog(self) -> None:
+        self.update_idletasks()
+        parent = self.master
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        self.geometry(f"{width}x{height}{x:+d}{y:+d}")
+        self.deiconify()
+        self.lift()
+        self.surface_tree.focus_set()
 
 
 class SurfaceDialog(tk.Toplevel):

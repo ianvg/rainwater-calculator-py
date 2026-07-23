@@ -71,6 +71,10 @@ US_STATE_CODES = frozenset(
 _annual_value_cache_lock = threading.Lock()
 
 
+class ClimateNormalRequestCancelled(RuntimeError):
+    """Raised when the user cancels an in-progress Climate Normals request."""
+
+
 class _NceiKeepAliveClient:
     """Serialize small NCEI requests over a reusable HTTPS connection."""
 
@@ -78,7 +82,12 @@ class _NceiKeepAliveClient:
         self._connection: http.client.HTTPSConnection | None = None
         self._lock = threading.Lock()
 
-    def get_json(self, url: str, timeout: int) -> object:
+    def get_json(
+        self,
+        url: str,
+        timeout: int,
+        cancel_event: threading.Event | None = None,
+    ) -> object:
         target = urlsplit(url)
         if target.scheme != "https" or not target.hostname:
             raise ValueError("NOAA request URL must use HTTPS.")
@@ -86,6 +95,8 @@ class _NceiKeepAliveClient:
         if target.query:
             path = f"{path}?{target.query}"
         with self._lock:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ClimateNormalRequestCancelled("Climate Normals data search canceled.")
             connection = self._connection
             if connection is None or connection.host != target.hostname:
                 self._close_unlocked()
@@ -107,8 +118,12 @@ class _NceiKeepAliveClient:
                         "User-Agent": USER_AGENT,
                     },
                 )
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ClimateNormalRequestCancelled("Climate Normals data search canceled.")
                 response = connection.getresponse()
                 body = response.read().decode("utf-8")
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ClimateNormalRequestCancelled("Climate Normals data search canceled.")
                 if response.status < 200 or response.status >= 300:
                     raise RuntimeError(f"NOAA request failed (HTTP {response.status}).")
                 if response.will_close:
@@ -119,7 +134,21 @@ class _NceiKeepAliveClient:
                 raise ValueError("NOAA returned an invalid JSON response.") from exc
             except (OSError, http.client.HTTPException):
                 self._close_unlocked()
+                if cancel_event is not None and cancel_event.is_set():
+                    raise ClimateNormalRequestCancelled(
+                        "Climate Normals data search canceled."
+                    )
                 raise
+
+    def cancel_active_request(self) -> None:
+        """Close the active socket without waiting for the request lock."""
+        connection = self._connection
+        if connection is None:
+            return
+        try:
+            connection.close()
+        except OSError:
+            pass
 
     def close(self) -> None:
         with self._lock:
@@ -263,14 +292,17 @@ def fetch_annual_precipitation_normal(
     *,
     cache_dir: Path = DEFAULT_CACHE_DIR,
     progress_callback: Callable[[str], None] | None = None,
+    cancel_event: threading.Event | None = None,
 ) -> dict[str, Any]:
     """Return one station's NOAA 1991-2020 annual and seasonal precipitation normals."""
     station_id = str(station.get("station_id") or "").strip().upper()
     if not _STATION_ID_PATTERN.fullmatch(station_id):
         raise ValueError("The selected NOAA station identifier is invalid.")
+    _raise_if_cancelled(cancel_event)
     cached_values = _read_cached_precipitation_values(cache_dir, station_id)
     if cached_values is not None:
         return _annual_normal_record(station, station_id, cached_values)
+    _raise_if_cancelled(cancel_event)
     archived_record = _read_annual_normal_from_bulk_archive(cache_dir, station_id)
     if archived_record is not None:
         precipitation_values, attributes = archived_record
@@ -289,7 +321,8 @@ def fetch_annual_precipitation_normal(
         "dataTypes": ",".join(field for _season, field in PRECIPITATION_NORMAL_FIELDS),
     }
     url = f"{NCEI_ACCESS_DATA_URL}?{parse.urlencode(parameters)}"
-    payload = _request_annual_normal_payload(url, progress_callback)
+    _raise_if_cancelled(cancel_event)
+    payload = _request_annual_normal_payload(url, progress_callback, cancel_event)
     if isinstance(payload, dict) and payload.get("errorMessage"):
         raise RuntimeError(str(payload["errorMessage"]))
     if not isinstance(payload, list) or not payload:
@@ -383,18 +416,25 @@ def _precipitation_values_from_row(row: dict[str, Any]) -> dict[str, float] | No
 
 
 def _request_annual_normal_payload(
-    url: str, progress_callback: Callable[[str], None] | None
+    url: str,
+    progress_callback: Callable[[str], None] | None,
+    cancel_event: threading.Event | None = None,
 ) -> object:
     last_error: Exception | None = None
     attempt_count = len(ANNUAL_REQUEST_TIMEOUTS_SECONDS)
     for attempt, timeout in enumerate(ANNUAL_REQUEST_TIMEOUTS_SECONDS, start=1):
+        _raise_if_cancelled(cancel_event)
         if progress_callback is not None:
             progress_callback(
                 f"Connecting to NOAA (attempt {attempt} of {attempt_count}; "
                 f"timeout {timeout} seconds)..."
             )
         try:
-            return _annual_normal_http_client.get_json(url, timeout)
+            if cancel_event is None:
+                return _annual_normal_http_client.get_json(url, timeout)
+            return _annual_normal_http_client.get_json(url, timeout, cancel_event)
+        except ClimateNormalRequestCancelled:
+            raise
         except (OSError, http.client.HTTPException, RuntimeError) as exc:
             last_error = exc
             if attempt < attempt_count and progress_callback is not None:
@@ -402,6 +442,16 @@ def _request_annual_normal_payload(
     raise RuntimeError(
         "NOAA did not respond after two attempts. Try the station again later."
     ) from last_error
+
+
+def cancel_annual_precipitation_normal_request() -> None:
+    """Interrupt the active online Climate Normals request, if any."""
+    _annual_normal_http_client.cancel_active_request()
+
+
+def _raise_if_cancelled(cancel_event: threading.Event | None) -> None:
+    if cancel_event is not None and cancel_event.is_set():
+        raise ClimateNormalRequestCancelled("Climate Normals data search canceled.")
 
 
 def filter_climate_normal_stations(

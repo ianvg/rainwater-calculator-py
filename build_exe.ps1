@@ -1,7 +1,3 @@
-param(
-    [switch]$InstallBuildTools
-)
-
 $ErrorActionPreference = "Stop"
 $python = Join-Path $PSScriptRoot ".venv\Scripts\python.exe"
 
@@ -20,15 +16,13 @@ if (-not (Test-Path $python)) {
     Invoke-Checked "python" @("-m", "venv", (Join-Path $PSScriptRoot ".venv"))
 }
 
-Invoke-Checked $python @("-m", "pip", "install", "--upgrade", "pip")
-Invoke-Checked $python @("-m", "pip", "install", "-e", ".[desktop-build,docs]")
-
-if ($InstallBuildTools) {
-    Invoke-Checked $python @("-m", "pip", "install", "pyinstaller")
-}
+Invoke-Checked $python @("-m", "pip", "install", "--require-hashes", "-r", (Join-Path $PSScriptRoot "requirements\desktop-build.txt"))
+Invoke-Checked $python @("-m", "pip", "install", "--no-build-isolation", "--no-deps", "-e", $PSScriptRoot)
 
 Invoke-Checked $python @("-m", "mkdocs", "build", "--clean", "--strict")
+Invoke-Checked $python @("-m", "pip_audit", "--strict", "--progress-spinner", "off")
 Invoke-Checked $python @("-m", "PyInstaller", "--clean", "--noconfirm", "RainwaterCalculator.spec")
+Invoke-Checked $python @("-m", "cyclonedx_py", "environment", "--pyproject", (Join-Path $PSScriptRoot "pyproject.toml"), "--output-reproducible", "--output-format", "JSON", "--output-file", (Join-Path $PSScriptRoot "dist\RainwaterCalculator.cdx.json"))
 
 Write-Host ""
 Write-Host "Built executable:"
