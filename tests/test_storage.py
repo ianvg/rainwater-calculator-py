@@ -204,6 +204,16 @@ def test_system_component_parameters_are_loaded() -> None:
     assert config.system_parameters.municipal_backup_enabled is False
 
 
+def test_legacy_transfer_flow_is_mapped_to_supported_filtration_system_size() -> None:
+    config = SQLiteStore._config_from_dict({
+        "name": "Legacy nonstandard transfer flow",
+        "system_parameters": {"filtration_pump_capacity_gallons_per_hour": 1900.0},
+    })
+
+    assert config.system_parameters.filtration_system_flow_gpm == 30
+    assert config.system_parameters.filtration_pump_capacity_gallons_per_hour == 1800.0
+
+
 def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -> None:
     config = SQLiteStore._config_from_dict({
         "name": "First flush project",

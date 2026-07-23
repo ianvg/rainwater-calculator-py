@@ -1,6 +1,6 @@
 # Equipment catalog roadmap
 
-The first equipment-library release establishes stable product IDs, a reusable user-level library, project snapshots and overrides, candidate/fixed/excluded dispositions, structured project constraints, required companion categories, and optional pump-to-filtration-unit flow-range checking.
+The first equipment-library release establishes stable product IDs, a reusable user-level library, project snapshots and overrides, candidate/fixed/excluded dispositions, structured project constraints, required companion categories, and mandatory transfer-pump-to-filtration-system flow matching.
 
 ## Implemented foundation
 
@@ -8,12 +8,12 @@ The first equipment-library release establishes stable product IDs, a reusable u
 - Explicit **Add/update starter products** operation; existing project snapshots remain unchanged.
 - Explicit **Update from library** operation for selected project snapshots.
 - Project overrides that survive library updates and can be cleared independently.
-- Four optimization categories: primary tank, filtration pump, filtration unit, and buffer tank.
+- Four optimization categories: primary tank, transfer pump, filtration system, and buffer tank.
 - Approved-vendor, required-tag, and required-standard eligibility.
 - Voltage, phase, pressure-class, and connection-size requirements.
 - Optional length, width, height, footprint, and access-clearance constraints.
 - Missing constrained values pass with a warning by default, with a project option to require them.
-- Optional filtration flow-range compatibility and required companion categories.
+- Mandatory matching of transfer-pump and filtration-system nominal flow, plus required companion categories.
 - Compatibility review with rejection and warning reasons.
 
 ## Next rule capabilities

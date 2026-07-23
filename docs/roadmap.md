@@ -61,6 +61,10 @@ Lifecycle economics are implemented for selected tanks, reliability-curve candid
 
 The remaining roadmap work includes tiered and time-varying tariffs, component-specific maintenance schedules, financing, taxes, depreciation, and terminal residual value.
 
+## Filtration-system flexibility
+
+The current filtration skid is selected as a single fixed-flow system whose transfer pump is linked to the skid's nominal flow. Future work will allow users to modify the filtration skid's subsystem components individually and will support adding multiple filtration systems in parallel. Parallel systems will require explicit rules for flow sharing, staging, redundancy, combined capacity, energy use, and failure behavior before they are enabled in simulation or optimization.
+
 Implementation requirements include:
 
 - [Implemented] Add project-model fields for currency, water and sewer rates with explicit billing units, installed cost, fixed and percentage maintenance costs, incentives, and analysis period.
@@ -74,9 +78,9 @@ Implementation requirements include:
 
 ## Payback-driven indirect-system optimization
 
-Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, filtration pump, filtration unit, and buffer tank together. These variables interact: primary storage controls available rainwater, the filtration pump and filtration unit constrain transfer, and the buffer tank serves peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
+Add an optimization workflow for indirect systems that can minimize simple payback while sizing the primary tank, transfer pump, filtration system, and buffer tank together. These variables interact: primary storage controls available rainwater, the transfer pump and filtration system constrain transfer, and the buffer tank serves peak end-use demand. The least-cost or shortest-payback values therefore cannot be selected reliably in isolation.
 
-**Implemented:** Analysis settings includes a deterministic exhaustive search using a shared equipment library and project-specific candidate snapshots. Users can maintain four product categories, fix or exclude project products, apply structured eligibility constraints, optionally enforce pump-to-filtration-unit flow ranges, review rejected combinations, choose the ranking objective, and constrain financial and hydraulic outcomes. The workflow reuses the hourly indirect-system and lifecycle financial inputs, estimates filtration-pump energy, and saves project snapshots and overrides. See the [equipment catalog roadmap](equipment-catalog-roadmap.md) for deferred compatibility-rule capabilities.
+**Implemented:** Analysis settings includes a deterministic exhaustive search using a shared equipment library and project-specific candidate snapshots. Users can maintain four product categories, fix or exclude project products, apply structured eligibility constraints, optionally enforce pump-to-filtration-system flow ranges, review rejected combinations, choose the ranking objective, and constrain financial and hydraulic outcomes. The workflow reuses the hourly indirect-system and lifecycle financial inputs, estimates transfer-pump energy, and saves project snapshots and overrides. See the [equipment catalog roadmap](equipment-catalog-roadmap.md) for deferred compatibility-rule capabilities.
 
 The objective should be based on complete lifecycle drivers rather than hydraulic performance alone:
 
@@ -86,7 +90,7 @@ simple payback
     / (annual utility savings - annual maintenance - annual energy cost)
 ```
 
-Before optimization is enabled, add component cost curves for primary tanks, filtration pumps, and buffer tanks; pump head and efficiency; electricity tariffs; component-specific maintenance; and replacement assumptions. Without size-dependent costs and energy, an optimizer would incorrectly favor oversized equipment whenever it produces even a small increase in rainwater delivery.
+Before optimization is enabled, add component cost curves for primary tanks, transfer pumps, and buffer tanks; pump head and efficiency; electricity tariffs; component-specific maintenance; and replacement assumptions. Without size-dependent costs and energy, an optimizer would incorrectly favor oversized equipment whenever it produces even a small increase in rainwater delivery.
 
 The optimizer should minimize payback subject to explicit engineering constraints, including:
 
@@ -99,11 +103,11 @@ The optimizer should minimize payback subject to explicit engineering constraint
 - Acceptable pump cycling and water residence time.
 - Positive net annual savings; otherwise payback is not achieved.
 
-A brute-force search can become expensive because candidate counts multiply. For example, 30 primary tank sizes, 15 filtration-pump sizes, and 15 buffer-tank sizes require 6,750 full hourly simulations. Use a staged, coarse-to-fine workflow instead:
+A brute-force search can become expensive because candidate counts multiply. For example, 30 primary tank sizes, 15 transfer-pump sizes, and 15 buffer-tank sizes require 6,750 full hourly simulations. Use a staged, coarse-to-fine workflow instead:
 
 1. Run the daily model across primary-tank sizes and remove clearly uneconomic or hydraulically unsuitable capacities.
 2. Retain a small group near the reliability and savings knee.
-3. Derive feasible filtration-pump ranges from peak flow and refill-time requirements.
+3. Derive feasible transfer-pump ranges from peak flow and refill-time requirements.
 4. Eliminate buffer sizes that cannot satisfy peak-period demand.
 5. Run aggregate-only hourly simulations for the surviving combinations.
 6. Run detailed timestep simulations only for shortlisted designs.
@@ -167,11 +171,18 @@ Implementation requirements include:
 
 ## Multi-site weather comparison
 
-[Implemented] A **Multi-site comparison** sub-tab under **Rainwater Data** provides NOAA Quick Access-style state browsing and a nationwide station-name search for fixed 1991-2020 precipitation normals. A clustered, navigable OpenStreetMap view shows the applicable NOAA stations without slowing broad-zoom interaction. Users can add multiple stations to a comparison showing annual and meteorological-season precipitation in the project's current inches or millimeters setting, then export the table to CSV. Values are water equivalent; snowfall depth is intentionally excluded to prevent unlike quantities from being combined.
+[Implemented] A **Multi-site comparison** sub-tab under **Rainwater Data** provides state browsing and a nationwide station-name search for fixed 1991-2020 precipitation normals. A versioned station catalog generated from NOAA's official by-station product is bundled with the application. Explicit user-triggered lookups use direct per-station CSV files with Azure, AWS, NCEI direct-download, optional local-archive, and NCEI query-API failover; a four-worker pool prevents one slow request from serializing the others. Successful values are cached for the product version, and short-lived negative caching avoids repeatedly requesting unavailable stations. A clustered, navigable OpenStreetMap view shows the applicable NOAA stations without slowing broad-zoom interaction. Users can add multiple stations to a comparison showing annual and meteorological-season precipitation in the project's current inches or millimeters setting, then export the table to CSV. Values are water equivalent; snowfall depth is intentionally excluded to prevent unlike quantities from being combined.
 
 The comparison is session-only and does not replace project rainfall or invalidate simulation results. An on-screen disclaimer explains that the simulation average may differ because its station, observation period, precipitation basis, completeness, or provider processing can differ. Network requests run off the Tkinter UI thread, and provider responses, city ranking, station-ID lookup, and comparison ordering have focused tests.
 
 Future work may add preliminary roof-area and runoff-coefficient screening, saved comparison sets, and a deliberate action for copying selected location metadata into a project. Keep these estimates separate from simulated collection, demand satisfaction, storage reliability, first-flush losses, and overflow.
+
+If the direct-file workflow develops coverage, availability, or scaling problems, review these alternatives before changing the product's stated data semantics:
+
+- Validate [NOAA Climate Data Online API v2](https://www.ncei.noaa.gov/cdo-web/webservices/v2) coverage against the exact annual/seasonal v1.0.1 fields, accounting for its per-user token requirement and request limits.
+- Validate [ACIS Web Services](https://docs.rcc-acis.org/acisws/) 1991-2020 normals against representative GHCN, airport, CoCoRaHS, and SNOTEL stations, including completeness flags, seasonal definitions, identifiers, and rounding, before considering it an equivalent source.
+- Evaluate consolidating NOAA's station CSVs into a release-managed GeoParquet or SQLite artifact. The [`stactools` NOAA Climate Normals project](https://github.com/stactools-packages/noaa-climate-normals) demonstrates the GeoParquet approach for repeated analysis, but adopting it would require a documented update and provenance process.
+- Reconsider stable-selection prefetching only if measurements show a material benefit without creating unwanted provider traffic. The current workflow deliberately loads data only after **Add to comparison** is chosen.
 
 ## Multi-project comparison report
 

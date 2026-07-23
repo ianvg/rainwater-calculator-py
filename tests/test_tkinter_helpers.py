@@ -441,11 +441,16 @@ def test_system_object_editor_rejects_invalid_primary_parameters(
 
 def test_system_object_editor_validates_other_visible_parameter_types() -> None:
     assert _system_object_editor_validation(
-        "filtration_pump", {"name": "Pump", "filtration_pump_capacity": "-1"}
-    ) == ["Pump capacity cannot be negative."]
+        "filtration_pump", {"name": "Pump", "transfer_pump_type": "Invalid"}
+    ) == ["Transfer pump type must be External or Submersible."]
     assert _system_object_editor_validation(
-        "filtration_system", {"name": "Filter", "filter_recovery": "101"}
+        "filtration_system",
+        {"name": "Filter", "filtration_system_flow_gpm": "20", "filter_recovery": "101"},
     ) == ["Filter recovery must be between 0 and 100%."]
+    assert _system_object_editor_validation(
+        "filtration_system",
+        {"name": "Filter", "filtration_system_flow_gpm": "25", "filter_recovery": "95"},
+    ) == ["Filtration system flow must be 15, 20, 30, 40, or 50 GPM."]
 
 
 @pytest.mark.parametrize(
@@ -852,7 +857,7 @@ def test_multi_site_tab_info_icon_opens_help_without_selecting_tab() -> None:
     assert scheduled == [app._show_multi_site_comparison_info]
 
 
-def test_climate_normal_selection_does_not_duplicate_pending_request() -> None:
+def test_climate_normal_selection_is_passive_until_add_is_chosen() -> None:
     class Variable:
         def __init__(self, value: str = "") -> None:
             self.value = value
@@ -869,8 +874,10 @@ def test_climate_normal_selection_does_not_duplicate_pending_request() -> None:
             return (0,)
 
     class Button:
-        def configure(self, **_kwargs: str) -> None:
-            pass
+        state = "disabled"
+
+        def configure(self, **kwargs: str) -> None:
+            self.state = kwargs.get("state", self.state)
 
     app = object.__new__(RainwaterTkApp)
     app.climate_normal_station_list = StationList()
@@ -880,14 +887,74 @@ def test_climate_normal_selection_does_not_duplicate_pending_request() -> None:
     app.climate_normal_station_var = Variable()
     app.climate_normal_status_var = Variable()
     app.add_climate_normal_button = Button()
-    app.climate_normal_detail_in_flight_ids = {"USW00013873"}
+    app.cancel_climate_normal_search_button = Button()
     app._update_climate_normal_map_selection = lambda: None
 
     app._climate_normal_station_selected()
 
     assert app.climate_normal_station_var.get() == "USW00013873"
     assert app.climate_normal_status_var.get() == (
-        "The precipitation normals for ATHENS BEN EPPS AP are already loading."
+        "Selected ATHENS BEN EPPS AP. Choose Add to comparison to load its "
+        "annual and seasonal precipitation normals."
+    )
+    assert app.add_climate_normal_button.state == "normal"
+
+
+def test_cancel_climate_normal_data_search_clears_active_request(monkeypatch) -> None:
+    class Variable:
+        def __init__(self, value: str = "") -> None:
+            self.value = value
+
+        def get(self) -> str:
+            return self.value
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+    class Button:
+        state = "normal"
+
+        def configure(self, **kwargs: str) -> None:
+            self.state = kwargs.get("state", self.state)
+
+    app = object.__new__(RainwaterTkApp)
+    app.climate_normal_detail_request_id = 4
+    app.climate_normal_detail_request_station_id = "USW00013873"
+    app.climate_normal_detail_cancel_event = tkinter_app.threading.Event()
+    app.climate_normal_detail_in_flight_ids = {"USW00013873"}
+    app.climate_normal_detail_in_flight = 1
+    app.climate_normal_detail_requests = {
+        4: ("USW00013873", app.climate_normal_detail_cancel_event)
+    }
+    app.climate_normal_detail_request_by_station = {"USW00013873": 4}
+    app.climate_normal_station_var = Variable("USW00013873")
+    app.climate_normal_status_var = Variable()
+    app.climate_normal_catalog = [
+        {"station_id": "USW00013873", "name": "ATHENS BEN EPPS AP"}
+    ]
+    app.add_climate_normal_button = Button()
+    app.cancel_climate_normal_search_button = Button()
+    canceled: list[bool] = []
+    monkeypatch.setattr(
+        tkinter_app,
+        "cancel_annual_precipitation_normal_request",
+        lambda: canceled.append(True),
+    )
+
+    cancel_event = app.climate_normal_detail_cancel_event
+    app.cancel_climate_normal_data_search()
+
+    assert cancel_event.is_set()
+    assert canceled == [True]
+    assert app.climate_normal_detail_request_id is None
+    assert app.climate_normal_detail_request_station_id == ""
+    assert app.climate_normal_detail_in_flight == 0
+    assert app.climate_normal_detail_requests == {}
+    assert app.climate_normal_detail_request_by_station == {}
+    assert app.add_climate_normal_button.state == "normal"
+    assert app.cancel_climate_normal_search_button.state == "disabled"
+    assert app.climate_normal_status_var.get() == (
+        "Canceled data search for ATHENS BEN EPPS AP."
     )
 
 
@@ -1188,7 +1255,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "<h2>Tank summary</h2>" in html
     assert 'id="system-visualization"' in html
     assert "System visualization - Indirect system" in html
-    assert "Filtration pump" in html
+    assert "Transfer pump" in html
     assert "Booster pump" in html
     assert "Municipal water backup" in html
     assert 'id="project-location-map"' in html

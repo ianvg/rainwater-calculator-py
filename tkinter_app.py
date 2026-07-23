@@ -20,6 +20,7 @@ import tempfile
 import threading
 import time
 import webbrowser
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
@@ -44,9 +45,11 @@ from rainwater_app.app_paths import (
     user_data_dir,
 )
 from rainwater_app.climate_normals import (
+    ClimateNormalRequestCancelled,
     NCEI_CLIMATE_NORMALS_URL,
     NCEI_BULK_ARCHIVE_SIZE_BYTES,
     PRECIPITATION_NORMAL_RECORD_KEYS,
+    cancel_annual_precipitation_normal_request,
     climate_normals_bulk_archive_installed,
     climate_normals_bulk_archive_path,
     download_climate_normals_bulk_archive,
@@ -97,7 +100,9 @@ from rainwater_app.models import (
     DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY,
     DEFAULT_TOILET_VOLUME_GALLONS_PER_FLUSH,
     FRACTIONAL_SCHEDULE_TYPE,
+    FILTRATION_SYSTEM_FLOW_RATES_GPM,
     OCCUPANCY_SCHEDULE_TYPE,
+    TRANSFER_PUMP_TYPES,
     UNIT_SYSTEMS,
     DemandObject,
     MONTH_KEYS,
@@ -113,6 +118,7 @@ from rainwater_app.models import (
     fixture_daily_demand_gallons,
     migrate_legacy_demand_inputs,
     normalize_schedule_type,
+    normalize_filtration_system_flow_gpm,
     normalize_unit_system,
     purge_unused_hourly_schedules,
     unused_hourly_schedule_names,
@@ -298,7 +304,7 @@ OPTIMIZATION_SECTION_HELP = {
         "savings are optional constraints."
     ),
     "Catalog": (
-        "The shared library supplies reusable primary tanks, filtration pumps, filtration units, and buffer "
+        "The shared library supplies reusable primary tanks, transfer pumps, filtration systems, and buffer "
         "tanks. Applying a product creates a project snapshot. Project eligibility and compatibility determine "
         "which combinations the optimizer may evaluate. Starter values are illustrative, not vendor quotations."
     ),
@@ -869,6 +875,8 @@ class RainwaterTkApp(tk.Tk):
         self.current_system_type_var = tk.StringVar(value=f"Current system type: {self.config_model.system_type}")
         self.pump_capacity_var = tk.StringVar(value="0")
         self.filtration_pump_capacity_var = tk.StringVar(value="20")
+        self.filtration_system_flow_gpm_var = tk.StringVar(value="20")
+        self.transfer_pump_type_var = tk.StringVar(value="External")
         self.filter_recovery_var = tk.StringVar(value="100")
         self.booster_tank_size_var = tk.StringVar(value="0")
         self.booster_initial_fill_var = tk.StringVar(value="0")
@@ -1011,9 +1019,7 @@ class RainwaterTkApp(tk.Tk):
         self.equipment_require_values_var = tk.BooleanVar(
             value=bool(equipment_constraints["require_constraint_values"])
         )
-        self.equipment_flow_compatibility_var = tk.BooleanVar(
-            value=bool(equipment_constraints["enforce_flow_compatibility"])
-        )
+        self.equipment_flow_compatibility_var = tk.BooleanVar(value=True)
         self.equipment_constraint_vars = {
             key: tk.StringVar(value=_constraint_display_value(equipment_constraints.get(key)))
             for key in (
@@ -1103,8 +1109,19 @@ class RainwaterTkApp(tk.Tk):
         self.climate_normal_detail_queue: queue.Queue = queue.Queue()
         self.climate_normal_detail_poll_after_id: str | None = None
         self.climate_normal_detail_request_station_id = ""
+        self.climate_normal_detail_request_id: int | None = None
+        self.climate_normal_detail_request_serial = 0
+        self.climate_normal_detail_cancel_event: threading.Event | None = None
         self.climate_normal_detail_in_flight = 0
         self.climate_normal_detail_in_flight_ids: set[str] = set()
+        self.climate_normal_detail_requests: dict[
+            int, tuple[str, threading.Event]
+        ] = {}
+        self.climate_normal_detail_request_by_station: dict[str, int] = {}
+        self.climate_normal_detail_executor = ThreadPoolExecutor(
+            max_workers=4,
+            thread_name_prefix="rwh-climate-normal",
+        )
         self.climate_normal_archive_queue: queue.Queue = queue.Queue()
         self.climate_normal_archive_poll_after_id: str | None = None
         self.optimization_result_queue: queue.Queue = queue.Queue()
@@ -2544,7 +2561,8 @@ class RainwaterTkApp(tk.Tk):
             "graph_end": tk.StringVar(),
             "graph_step": tk.StringVar(),
             "graph_auto_step_count": tk.StringVar(),
-            "filtration_pump_capacity": tk.StringVar(),
+            "filtration_system_flow_gpm": tk.StringVar(),
+            "transfer_pump_type": tk.StringVar(),
             "filter_recovery": tk.StringVar(),
             "booster_tank_size": tk.StringVar(),
             "booster_initial_fill": tk.StringVar(),
@@ -2574,9 +2592,6 @@ class RainwaterTkApp(tk.Tk):
                 ("Graph start tank size", editor_vars["graph_start"], self.tank_size_unit_var),
                 ("Graph end tank size", editor_vars["graph_end"], self.tank_size_unit_var),
                 ("Graph step", editor_vars["graph_step"], self.tank_size_unit_var),
-            ],
-            "filtration_pump": [
-                ("Pump capacity (0 = unlimited)", editor_vars["filtration_pump_capacity"], self.pump_capacity_unit_var),
             ],
             "filtration_system": [
                 ("Filter recovery", editor_vars["filter_recovery"], self.percent_unit_var),
@@ -2611,6 +2626,31 @@ class RainwaterTkApp(tk.Tk):
                 ).grid(row=len(specs) + 1, column=1, sticky="w", pady=2)
             self.system_parameter_frames[component_type] = frame
             frame.grid_remove()
+        transfer_pump_frame = ttk.Frame(self.system_component_parameters_editor)
+        transfer_pump_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+        transfer_pump_frame.columnconfigure(1, weight=1)
+        ttk.Label(transfer_pump_frame, text="Pump type").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            transfer_pump_frame, textvariable=editor_vars["transfer_pump_type"],
+            values=TRANSFER_PUMP_TYPES, state="readonly", width=14,
+        ).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(transfer_pump_frame, text="Linked flow").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Label(
+            transfer_pump_frame, textvariable=editor_vars["filtration_system_flow_gpm"]
+        ).grid(row=1, column=1, sticky="w", pady=2)
+        ttk.Label(transfer_pump_frame, text="GPM").grid(row=1, column=2, sticky="w", pady=2)
+        self.system_parameter_frames["filtration_pump"] = transfer_pump_frame
+        transfer_pump_frame.grid_remove()
+        filtration_frame = self.system_parameter_frames["filtration_system"]
+        for child in filtration_frame.grid_slaves():
+            child.grid_configure(row=int(child.grid_info()["row"]) + 1)
+        ttk.Label(filtration_frame, text="Nominal skid flow").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Combobox(
+            filtration_frame, textvariable=editor_vars["filtration_system_flow_gpm"],
+            values=tuple(str(value) for value in FILTRATION_SYSTEM_FLOW_RATES_GPM),
+            state="readonly", width=8,
+        ).grid(row=0, column=1, sticky="ew", pady=2)
+        ttk.Label(filtration_frame, text="GPM").grid(row=0, column=2, sticky="w", pady=2)
         self.system_municipal_backup_editor = ttk.Frame(self.system_component_parameters_editor)
         self.system_municipal_backup_editor.grid(row=1, column=0, columnspan=2, sticky="ew")
         ttk.Checkbutton(
@@ -2712,7 +2752,7 @@ class RainwaterTkApp(tk.Tk):
         return {
             "rainwater_input": "Rainwater input",
             "primary_tank": "Primary tank",
-            "filtration_pump": "Filtration pump",
+            "filtration_pump": "Transfer pump",
             "filtration_system": "Filtration system",
             "booster_tank": "Buffer tank",
             "booster_pump": "Booster pump",
@@ -3551,7 +3591,8 @@ class RainwaterTkApp(tk.Tk):
         self.equipment_library_tree.bind("<<TreeviewSelect>>", lambda _event: self._load_library_editor())
         self.library_editor_vars = {key: tk.StringVar() for key in (
             "id", "category", "manufacturer", "model", "capacity", "installed_cost", "power_kw",
-            "minimum_flow_gpm", "maximum_flow_gpm", "voltage", "phase", "pressure_class",
+            "rated_flow_gpm", "pump_type", "minimum_flow_gpm", "maximum_flow_gpm",
+            "voltage", "phase", "pressure_class",
             "connection_size", "length", "width", "height", "access_clearance", "tags",
             "required_companion_categories", "standards",
         )}
@@ -3560,7 +3601,8 @@ class RainwaterTkApp(tk.Tk):
         fields = (
             ("id", "Stable ID"), ("category", "Category"), ("manufacturer", "Manufacturer"),
             ("model", "Model"), ("capacity", "Capacity"), ("installed_cost", "Cost"),
-            ("power_kw", "Power kW"), ("minimum_flow_gpm", "Min flow GPM"),
+            ("power_kw", "Power kW"), ("rated_flow_gpm", "Rated flow GPM"),
+            ("pump_type", "Pump type"), ("minimum_flow_gpm", "Min flow GPM"),
             ("maximum_flow_gpm", "Max flow GPM"), ("voltage", "Voltage"), ("phase", "Phase"),
             ("pressure_class", "Pressure class"), ("connection_size", "Connection size"),
             ("length", "Length (in)"), ("width", "Width (in)"), ("height", "Height (in)"),
@@ -3584,8 +3626,10 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(actions, text="Add/update starter products", command=self._update_shared_library).pack(side="left")
 
     def _build_equipment_constraints_tab(self, parent: ttk.Frame) -> None:
-        ttk.Checkbutton(parent, text="Enforce pump-to-filtration-unit flow ranges",
-                        variable=self.equipment_flow_compatibility_var).grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Checkbutton(
+            parent, text="Transfer-pump and filtration-system flows must match",
+            variable=self.equipment_flow_compatibility_var, state="disabled",
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Checkbutton(
             parent,
             text="Require values for active constraints (otherwise missing values pass with a warning)",
@@ -3761,10 +3805,10 @@ class RainwaterTkApp(tk.Tk):
             raise ValueError("Enter a stable product ID.")
         properties = {
             key: self._optional_editor_number(self.library_editor_vars[key].get())
-            for key in ("power_kw", "minimum_flow_gpm", "maximum_flow_gpm")
+            for key in ("power_kw", "rated_flow_gpm", "minimum_flow_gpm", "maximum_flow_gpm")
         }
         properties.update({key: self.library_editor_vars[key].get().strip() for key in (
-            "voltage", "phase", "pressure_class", "connection_size",
+            "pump_type", "voltage", "phase", "pressure_class", "connection_size",
         )})
         properties["required_companion_categories"] = [
             value.strip() for value in self.library_editor_vars["required_companion_categories"].get().split(",") if value.strip()
@@ -4341,7 +4385,16 @@ class RainwaterTkApp(tk.Tk):
                 loaded_layout, loaded_connections
             )
             if isinstance(payload.get("system_parameters"), dict):
-                cfg.system_parameters = SystemComponentParameters(**payload["system_parameters"])
+                system_payload = dict(payload["system_parameters"])
+                if "filtration_system_flow_gpm" not in system_payload:
+                    legacy_capacity = float(
+                        system_payload.get("filtration_pump_capacity_gallons_per_hour", 1200.0)
+                    )
+                    system_payload["filtration_system_flow_gpm"] = (
+                        normalize_filtration_system_flow_gpm(legacy_capacity / 60.0)
+                    )
+                cfg.system_parameters = SystemComponentParameters(**system_payload)
+                cfg.system_parameters.synchronize_filtration_flow()
             if isinstance(payload.get("tank_parameters"), dict):
                 cfg.tank_parameters = TankParameters(**payload["tank_parameters"])
             if "selected_tank_size_gal" in payload:
@@ -4415,7 +4468,7 @@ class RainwaterTkApp(tk.Tk):
             components = [
                 ("rainwater_input", "Rainwater input", 85, 100),
                 ("primary_tank", "Primary tank", 235, 100),
-                ("filtration_pump", "Filtration pump", 385, 100),
+                ("filtration_pump", "Transfer pump", 385, 100),
                 ("filtration_system", "Filtration system", 535, 100),
                 ("booster_tank", "Buffer tank", 685, 100),
                 ("municipal_backup", "Municipal water backup", 535, 235),
@@ -5351,8 +5404,8 @@ class RainwaterTkApp(tk.Tk):
                 "selected_tank_size", "initial_fill", "reserve", "graph_start",
                 "graph_end", "graph_step", "graph_auto_step_count",
             ),
-            "filtration_pump": ("filtration_pump_capacity",),
-            "filtration_system": ("filter_recovery",),
+            "filtration_pump": ("transfer_pump_type", "filtration_system_flow_gpm"),
+            "filtration_system": ("filtration_system_flow_gpm", "filter_recovery"),
             "booster_tank": (
                 "booster_tank_size", "booster_initial_fill", "booster_refill_level",
             ),
@@ -5386,10 +5439,14 @@ class RainwaterTkApp(tk.Tk):
                 "graph_auto_step_count": str(cfg.graph_auto_step_count),
             })
         elif component_type == "filtration_pump":
-            values["filtration_pump_capacity"] = (
-                f"{volume_to_display(cfg.system_parameters.filtration_pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+            values["transfer_pump_type"] = cfg.system_parameters.transfer_pump_type
+            values["filtration_system_flow_gpm"] = str(
+                cfg.system_parameters.filtration_system_flow_gpm
             )
         elif component_type == "filtration_system":
+            values["filtration_system_flow_gpm"] = str(
+                cfg.system_parameters.filtration_system_flow_gpm
+            )
             values["filter_recovery"] = f"{cfg.system_parameters.filter_recovery_percent:.2f}"
         elif component_type == "booster_tank":
             values.update({
@@ -5618,11 +5675,20 @@ class RainwaterTkApp(tk.Tk):
             self.graph_step_var.set(str(values["graph_step"]))
             self.graph_auto_step_count_var.set(str(values["graph_auto_step_count"]))
         elif component_type == "filtration_pump":
-            cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = volume_to_internal(
-                number("filtration_pump_capacity") * 60.0, cfg
-            )
-            self.filtration_pump_capacity_var.set(str(values["filtration_pump_capacity"]))
+            cfg.system_parameters.transfer_pump_type = str(values["transfer_pump_type"])
+            cfg.system_parameters.synchronize_filtration_flow()
+            self.transfer_pump_type_var.set(cfg.system_parameters.transfer_pump_type)
         elif component_type == "filtration_system":
+            cfg.system_parameters.filtration_system_flow_gpm = int(
+                number("filtration_system_flow_gpm")
+            )
+            cfg.system_parameters.synchronize_filtration_flow()
+            self.filtration_system_flow_gpm_var.set(
+                str(cfg.system_parameters.filtration_system_flow_gpm)
+            )
+            self.filtration_pump_capacity_var.set(
+                str(cfg.system_parameters.filtration_system_flow_gpm)
+            )
             cfg.system_parameters.filter_recovery_percent = number("filter_recovery")
             self.filter_recovery_var.set(str(values["filter_recovery"]))
         elif component_type == "booster_tank":
@@ -6024,7 +6090,7 @@ class RainwaterTkApp(tk.Tk):
         canvas.create_line(260, 150, 330, 150, fill="black", width=4)
         canvas.create_oval(330, 115, 400, 185, outline="black", width=4)
         canvas.create_polygon(400, 150, 347.5, 180.31, 347.5, 119.69, outline="black", fill="", width=4)
-        canvas.create_text(365, 210, text="Filtration pump", font=("Segoe UI", 11, "bold"))
+        canvas.create_text(365, 210, text="Transfer pump", font=("Segoe UI", 11, "bold"))
         canvas.create_line(400, 150, 460, 150, fill="black", width=4)
         canvas.create_rectangle(460, 120, 600, 180, outline="black", width=4)
         canvas.create_text(530, 150, text="Filtration", font=("Segoe UI", 11, "bold"))
@@ -6487,13 +6553,22 @@ class RainwaterTkApp(tk.Tk):
         station_actions = ttk.Frame(search_frame)
         station_actions.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         station_actions.columnconfigure(0, weight=1)
+        self.cancel_climate_normal_search_button = ttk.Button(
+            station_actions,
+            text="Cancel data search",
+            command=self.cancel_climate_normal_data_search,
+            state="disabled",
+        )
+        self.cancel_climate_normal_search_button.grid(
+            row=0, column=1, sticky="e", padx=(8, 0)
+        )
         self.add_climate_normal_button = ttk.Button(
             station_actions,
             text="Add to comparison",
             command=self.add_selected_climate_normal,
             state="disabled",
         )
-        self.add_climate_normal_button.grid(row=0, column=1, sticky="e")
+        self.add_climate_normal_button.grid(row=0, column=2, sticky="e", padx=(8, 0))
         ttk.Label(
             station_actions,
             textvariable=self.climate_normal_status_var,
@@ -7464,8 +7539,8 @@ class RainwaterTkApp(tk.Tk):
             show="headings", height=4,
         )
         headings = (
-            ("rank", "Rank", 45), ("tank", "Primary tank", 100), ("pump", "Filter pump", 100),
-            ("filter", "Filtration unit", 105),
+            ("rank", "Rank", 45), ("tank", "Primary tank", 100), ("pump", "Transfer pump", 100),
+            ("filter", "Filtration system", 105),
             ("booster", "Buffer tank", 100), ("reliability", "Reliability", 85),
             ("makeup", "Municipal/year", 100),
             ("energy", "Energy/year", 90), ("cost", "Installed cost", 105),
@@ -7518,8 +7593,8 @@ class RainwaterTkApp(tk.Tk):
         )
         rows = [
             ("Design variable", "Primary tank product", f"{counts['Primary tank']} catalog choices", "Optimization catalog"),
-            ("Design variable", "Filtration pump product", f"{counts['Filtration pump']} catalog choices", "Optimization catalog"),
-            ("Design variable", "Filtration unit product", f"{counts['Filtration unit']} catalog choices", "Optimization catalog"),
+            ("Design variable", "Transfer pump product", f"{counts['Transfer pump']} catalog choices", "Optimization catalog"),
+            ("Design variable", "Filtration system product", f"{counts['Filtration system']} catalog choices", "Optimization catalog"),
             ("Design variable", "Buffer tank product", f"{counts['Buffer tank']} catalog choices", "Optimization catalog"),
             ("Fixed input", "Rainfall record", rainfall_value, "Rainwater Data"),
             ("Fixed input", "Collection surfaces", f"{len(cfg.surfaces)} surfaces; {area_to_display(collection_area, cfg):,.0f} {area_unit(cfg)}", "Collection surfaces"),
@@ -8991,8 +9066,10 @@ class RainwaterTkApp(tk.Tk):
             f"{volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
         )
         self.filtration_pump_capacity_var.set(
-            f"{volume_to_display(cfg.system_parameters.filtration_pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+            str(cfg.system_parameters.filtration_system_flow_gpm)
         )
+        self.filtration_system_flow_gpm_var.set(str(cfg.system_parameters.filtration_system_flow_gpm))
+        self.transfer_pump_type_var.set(cfg.system_parameters.transfer_pump_type)
         self.filter_recovery_var.set(f"{cfg.system_parameters.filter_recovery_percent:.2f}")
         self.booster_tank_size_var.set(
             f"{volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg):.2f}"
@@ -9049,7 +9126,7 @@ class RainwaterTkApp(tk.Tk):
         self.optimization_positive_savings_var.set(optimization.require_positive_net_savings)
         equipment_constraints = normalized_constraints(optimization.equipment_constraints)
         self.equipment_require_values_var.set(bool(equipment_constraints["require_constraint_values"]))
-        self.equipment_flow_compatibility_var.set(bool(equipment_constraints["enforce_flow_compatibility"]))
+        self.equipment_flow_compatibility_var.set(True)
         for key, variable in self.equipment_constraint_vars.items():
             variable.set(_constraint_display_value(equipment_constraints.get(key)))
         self._render_system_builder()
@@ -9193,9 +9270,11 @@ class RainwaterTkApp(tk.Tk):
         cfg.system_parameters.pump_capacity_gallons_per_hour = max(
             0.0, volume_to_internal(_float(self.pump_capacity_var.get(), 0.0) * 60.0, cfg)
         )
-        cfg.system_parameters.filtration_pump_capacity_gallons_per_hour = max(
-            0.0, volume_to_internal(_float(self.filtration_pump_capacity_var.get(), 20.0) * 60.0, cfg)
+        cfg.system_parameters.filtration_system_flow_gpm = int(
+            _float(self.filtration_system_flow_gpm_var.get(), 20.0)
         )
+        cfg.system_parameters.transfer_pump_type = self.transfer_pump_type_var.get()
+        cfg.system_parameters.synchronize_filtration_flow()
         cfg.system_parameters.filter_recovery_percent = min(
             max(_float(self.filter_recovery_var.get(), 100.0), 0.0), 100.0
         )
@@ -9228,7 +9307,7 @@ class RainwaterTkApp(tk.Tk):
         )
         current_constraints = normalized_constraints(cfg.optimization_parameters.equipment_constraints)
         current_constraints["require_constraint_values"] = self.equipment_require_values_var.get()
-        current_constraints["enforce_flow_compatibility"] = self.equipment_flow_compatibility_var.get()
+        current_constraints["enforce_flow_compatibility"] = True
         current_constraints["approved_vendors"] = [
             value.strip() for value in self.equipment_constraint_vars["approved_vendors"].get().split(",") if value.strip()
         ]
@@ -9531,6 +9610,8 @@ class RainwaterTkApp(tk.Tk):
                 self.first_flush_antecedent_unit_var,
                 self.pump_capacity_var,
                 self.filtration_pump_capacity_var,
+                self.filtration_system_flow_gpm_var,
+                self.transfer_pump_type_var,
                 self.filter_recovery_var,
                 self.booster_tank_size_var,
                 self.booster_initial_fill_var,
@@ -10628,13 +10709,13 @@ class RainwaterTkApp(tk.Tk):
         archive_size_mb = NCEI_BULK_ARCHIVE_SIZE_BYTES / 1_000_000
         if installed:
             self.climate_normal_archive_status_var.set(
-                f"Installed ({archive_size_mb:.1f} MB). New station lookups use the local "
-                f"NOAA archive at {archive_path}."
+                f"Installed ({archive_size_mb:.1f} MB) as an offline fallback at "
+                f"{archive_path}. Normal lookups use NOAA's per-station mirrors first."
             )
         else:
             self.climate_normal_archive_status_var.set(
                 f"Not installed. Download the {archive_size_mb:.1f} MB official NOAA "
-                "1991-2020 annual/seasonal archive for local station lookups."
+                "1991-2020 annual/seasonal archive only if an offline fallback is needed."
             )
         if hasattr(self, "download_climate_normal_archive_button"):
             self.download_climate_normal_archive_button.configure(
@@ -10713,13 +10794,11 @@ class RainwaterTkApp(tk.Tk):
                 "Climate normals", f"Installed NOAA bulk archive at {result[1]}."
             )
             self._refresh_climate_normal_archive_status()
-            self.climate_normal_catalog = []
-            self.climate_normal_search_results = []
-            self._start_climate_normal_catalog_load()
             messagebox.showinfo(
                 APP_TITLE,
                 "The NOAA 1991-2020 Climate Normals archive is installed. "
-                "The station list is being refreshed from the local archive.",
+                "It will be used only as an offline fallback after the direct "
+                "per-station mirrors are unavailable.",
                 parent=self,
             )
         else:
@@ -10873,6 +10952,7 @@ class RainwaterTkApp(tk.Tk):
             )
         self.climate_normal_station_var.set("")
         self.add_climate_normal_button.configure(state="disabled")
+        self.cancel_climate_normal_search_button.configure(state="disabled")
         if query:
             context = f'name containing "{query}" nationwide'
         elif state_code:
@@ -10901,6 +10981,7 @@ class RainwaterTkApp(tk.Tk):
         if not selection:
             self.climate_normal_station_var.set("")
             self.add_climate_normal_button.configure(state="disabled")
+            self.cancel_climate_normal_search_button.configure(state="disabled")
             self._update_climate_normal_map_selection()
             return
         index = int(selection[0])
@@ -10910,6 +10991,17 @@ class RainwaterTkApp(tk.Tk):
         self.climate_normal_station_var.set(station_id)
         self._update_climate_normal_map_selection()
         record = self.climate_normal_search_results[index]
+        request_by_station = self.__dict__.get(
+            "climate_normal_detail_request_by_station", {}
+        )
+        if station_id in request_by_station:
+            self.add_climate_normal_button.configure(state="disabled")
+            self.cancel_climate_normal_search_button.configure(state="normal")
+            self.climate_normal_status_var.set(
+                f"The precipitation normals for {record['name']} are loading."
+            )
+            return
+        self.cancel_climate_normal_search_button.configure(state="disabled")
         if all(key in record for key in PRECIPITATION_NORMAL_RECORD_KEYS):
             self.add_climate_normal_button.configure(state="normal")
             self.climate_normal_status_var.set(
@@ -10917,54 +11009,158 @@ class RainwaterTkApp(tk.Tk):
                 f"{float(record['annual_precipitation_inches']):.2f} in annually."
             )
             return
-        self.add_climate_normal_button.configure(state="disabled")
-        if station_id in self.climate_normal_detail_in_flight_ids:
+        self.add_climate_normal_button.configure(state="normal")
+        self.climate_normal_status_var.set(
+            f"Selected {record['name']}. Choose Add to comparison to load its "
+            "annual and seasonal precipitation normals."
+        )
+
+    def _start_climate_normal_detail_search(self, record: dict[str, object]) -> None:
+        station_id = str(record.get("station_id", ""))
+        if station_id in self.climate_normal_detail_request_by_station:
             self.climate_normal_status_var.set(
                 f"The precipitation normals for {record['name']} are already loading."
             )
             return
+        if len(self.climate_normal_detail_requests) >= 4:
+            self.climate_normal_status_var.set(
+                "Four Climate Normals data searches are already running. "
+                "Wait for one to finish before starting another."
+            )
+            return
+        self.climate_normal_detail_request_serial += 1
+        request_id = self.climate_normal_detail_request_serial
+        cancel_event = threading.Event()
+        self.climate_normal_detail_requests[request_id] = (station_id, cancel_event)
+        self.climate_normal_detail_request_by_station[station_id] = request_id
+        self.climate_normal_detail_request_id = request_id
         self.climate_normal_detail_request_station_id = station_id
+        self.climate_normal_detail_cancel_event = cancel_event
+        self.climate_normal_detail_in_flight_ids.add(station_id)
+        self.climate_normal_detail_in_flight = len(self.climate_normal_detail_requests)
+        self.add_climate_normal_button.configure(state="disabled")
+        self.cancel_climate_normal_search_button.configure(state="normal")
         self.climate_normal_status_var.set(
             f"Loading annual and seasonal precipitation normals for {record['name']}..."
         )
-        self.climate_normal_detail_in_flight_ids.add(station_id)
-        self.climate_normal_detail_in_flight = len(
-            self.climate_normal_detail_in_flight_ids
+        self.climate_normal_detail_executor.submit(
+            self._climate_normal_detail_worker,
+            dict(record),
+            request_id,
+            cancel_event,
         )
-        threading.Thread(
-            target=self._climate_normal_detail_worker,
-            args=(dict(record),),
-            name="rwh-climate-normal-detail",
-            daemon=True,
-        ).start()
         if self.climate_normal_detail_poll_after_id is None:
             self.climate_normal_detail_poll_after_id = self.after(
                 100, self._poll_climate_normal_detail
             )
 
-    def _climate_normal_detail_worker(self, station: dict[str, object]) -> None:
+    def _climate_normal_detail_worker(
+        self,
+        station: dict[str, object],
+        request_id: int,
+        cancel_event: threading.Event,
+    ) -> None:
         station_id = str(station.get("station_id", ""))
+
         def report_progress(message: str) -> None:
-            self.climate_normal_detail_queue.put(("progress", station_id, message))
+            if not cancel_event.is_set():
+                self.climate_normal_detail_queue.put(
+                    ("progress", request_id, station_id, message)
+                )
 
         try:
             record = fetch_annual_precipitation_normal(
-                station, progress_callback=report_progress
+                station,
+                progress_callback=report_progress,
+                cancel_event=cancel_event,
             )
-            self.climate_normal_detail_queue.put(("success", station_id, record))
+            if not cancel_event.is_set():
+                self.climate_normal_detail_queue.put(
+                    ("success", request_id, station_id, record)
+                )
+        except ClimateNormalRequestCancelled:
+            self.climate_normal_detail_queue.put(
+                ("cancelled", request_id, station_id, "Data search canceled.")
+            )
         except Exception as exc:  # noqa: BLE001
-            self.climate_normal_detail_queue.put(("error", station_id, str(exc)))
+            if not cancel_event.is_set():
+                self.climate_normal_detail_queue.put(
+                    ("error", request_id, station_id, str(exc))
+                )
+
+    def cancel_climate_normal_data_search(self) -> None:
+        station_id = self.climate_normal_station_var.get()
+        request_id = self.climate_normal_detail_request_by_station.get(station_id)
+        request_details = self.climate_normal_detail_requests.get(request_id or -1)
+        if request_id is None or request_details is None:
+            return
+        _request_station_id, cancel_event = request_details
+        cancel_event.set()
+        if len(self.climate_normal_detail_requests) == 1:
+            cancel_annual_precipitation_normal_request()
+        self._finish_climate_normal_detail_request(request_id, station_id)
+        selected_station_id = self.climate_normal_station_var.get()
+        self.add_climate_normal_button.configure(
+            state="normal" if selected_station_id else "disabled"
+        )
+        station = next(
+            (
+                item
+                for item in self.climate_normal_catalog
+                if str(item.get("station_id", "")) == station_id
+            ),
+            None,
+        )
+        station_name = str(station.get("name", station_id)) if station else station_id
+        self.climate_normal_status_var.set(f"Canceled data search for {station_name}.")
+
+    def _finish_climate_normal_detail_request(
+        self, request_id: int, station_id: str
+    ) -> None:
+        if request_id not in self.climate_normal_detail_requests:
+            return
+        self.climate_normal_detail_requests.pop(request_id, None)
+        self.climate_normal_detail_request_by_station.pop(station_id, None)
+        self.climate_normal_detail_in_flight_ids.discard(station_id)
+        self.climate_normal_detail_in_flight = len(self.climate_normal_detail_requests)
+        if self.climate_normal_detail_requests:
+            latest_id = max(self.climate_normal_detail_requests)
+            latest_station_id, latest_event = self.climate_normal_detail_requests[latest_id]
+            self.climate_normal_detail_request_id = latest_id
+            self.climate_normal_detail_request_station_id = latest_station_id
+            self.climate_normal_detail_cancel_event = latest_event
+        else:
+            self.climate_normal_detail_request_id = None
+            self.climate_normal_detail_request_station_id = ""
+            self.climate_normal_detail_cancel_event = None
+        selected_station_id = self.climate_normal_station_var.get()
+        self.cancel_climate_normal_search_button.configure(
+            state=(
+                "normal"
+                if selected_station_id in self.climate_normal_detail_request_by_station
+                else "disabled"
+            )
+        )
 
     def _poll_climate_normal_detail(self) -> None:
         self.climate_normal_detail_poll_after_id = None
         try:
-            result, station_id, payload = self.climate_normal_detail_queue.get_nowait()
-        except queue.Empty:
-            self.climate_normal_detail_poll_after_id = self.after(
-                100, self._poll_climate_normal_detail
+            result, request_id, station_id, payload = (
+                self.climate_normal_detail_queue.get_nowait()
             )
+        except queue.Empty:
+            if self.climate_normal_detail_requests:
+                self.climate_normal_detail_poll_after_id = self.after(
+                    100, self._poll_climate_normal_detail
+                )
             return
 
+        if request_id not in self.climate_normal_detail_requests:
+            if self.climate_normal_detail_requests or not self.climate_normal_detail_queue.empty():
+                self.climate_normal_detail_poll_after_id = self.after(
+                    0, self._poll_climate_normal_detail
+                )
+            return
         if result == "progress":
             if self.climate_normal_station_var.get() == station_id:
                 self.climate_normal_status_var.set(str(payload))
@@ -10973,10 +11169,7 @@ class RainwaterTkApp(tk.Tk):
             )
             return
 
-        self.climate_normal_detail_in_flight_ids.discard(station_id)
-        self.climate_normal_detail_in_flight = len(
-            self.climate_normal_detail_in_flight_ids
-        )
+        self._finish_climate_normal_detail_request(request_id, station_id)
         if result == "success":
             updated_record = dict(payload)
             for collection in (
@@ -10986,17 +11179,31 @@ class RainwaterTkApp(tk.Tk):
                 for index, record in enumerate(collection):
                     if str(record.get("station_id", "")) == station_id:
                         collection[index] = dict(updated_record)
-            if self.climate_normal_station_var.get() == station_id:
-                self.add_climate_normal_button.configure(state="normal")
-                self.climate_normal_status_var.set(
-                    f"Selected {updated_record['name']}: "
-                    f"{float(updated_record['annual_precipitation_inches']):.2f} in annually; "
-                    "seasonal normals loaded."
+            self._add_climate_normal_record(updated_record)
+            selected_station_id = self.climate_normal_station_var.get()
+            self.add_climate_normal_button.configure(
+                state=(
+                    "normal"
+                    if selected_station_id
+                    and selected_station_id
+                    not in self.climate_normal_detail_request_by_station
+                    else "disabled"
                 )
-        elif self.climate_normal_station_var.get() == station_id:
-            self.add_climate_normal_button.configure(state="disabled")
-            self.climate_normal_status_var.set(str(payload))
-        if self.climate_normal_detail_in_flight or not self.climate_normal_detail_queue.empty():
+            )
+        elif result == "error":
+            selected_station_id = self.climate_normal_station_var.get()
+            self.add_climate_normal_button.configure(
+                state=(
+                    "normal"
+                    if selected_station_id
+                    and selected_station_id
+                    not in self.climate_normal_detail_request_by_station
+                    else "disabled"
+                )
+            )
+            if selected_station_id == station_id:
+                self.climate_normal_status_var.set(str(payload))
+        if self.climate_normal_detail_requests or not self.climate_normal_detail_queue.empty():
             self.climate_normal_detail_poll_after_id = self.after(
                 100, self._poll_climate_normal_detail
             )
@@ -11011,18 +11218,21 @@ class RainwaterTkApp(tk.Tk):
             return
         record = dict(self.climate_normal_search_results[index])
         if not all(key in record for key in PRECIPITATION_NORMAL_RECORD_KEYS):
-            messagebox.showinfo(
-                APP_TITLE,
-                "Wait for the station's annual and seasonal precipitation normals "
-                "to finish loading.",
-                parent=self,
+            query = self._climate_normal_name_query()
+            state_code = self._selected_climate_normal_state_code()
+            record["searched_location"] = (
+                query or STATE_NAME_BY_CODE.get(state_code, "United States")
             )
+            self._start_climate_normal_detail_search(record)
             return
         query = self._climate_normal_name_query()
         state_code = self._selected_climate_normal_state_code()
         record["searched_location"] = (
             query or STATE_NAME_BY_CODE.get(state_code, "United States")
         )
+        self._add_climate_normal_record(record)
+
+    def _add_climate_normal_record(self, record: dict[str, object]) -> None:
         station_id = str(record["station_id"])
         self.climate_normal_comparison_rows[station_id] = record
         self._refresh_climate_normal_comparison()
@@ -13112,6 +13322,9 @@ class RainwaterTkApp(tk.Tk):
         for preview in self.report_preview_directories:
             preview.cleanup()
         self.report_preview_directories.clear()
+        climate_normal_executor = getattr(self, "climate_normal_detail_executor", None)
+        if climate_normal_executor is not None:
+            climate_normal_executor.shutdown(wait=False, cancel_futures=True)
         if hasattr(self, "station_map") and self.station_map.winfo_exists():
             self.station_map.destroy()
         super().destroy()
@@ -13579,6 +13792,8 @@ class RainwaterTkApp(tk.Tk):
                 "initial_tank_fill_percent": cfg.tank_parameters.initial_fill_percent,
                 "municipal_backup": "Enabled" if cfg.system_parameters.municipal_backup_enabled else "Disabled",
                 "filter_recovery_percent": cfg.system_parameters.filter_recovery_percent,
+                "filtration_system_flow_gpm": cfg.system_parameters.filtration_system_flow_gpm,
+                "transfer_pump_type": cfg.system_parameters.transfer_pump_type,
                 "system_type": cfg.system_type,
                 "application_version": application_version,
                 "algorithm_version": ANALYSIS_ALGORITHM_VERSION,

@@ -24,6 +24,8 @@ from .models import (
     FinancialParameters,
     OCCUPANCY_SCHEDULE_TYPE,
     normalize_unit_system,
+    normalize_filtration_system_flow_gpm,
+    normalize_transfer_pump_type,
     OptimizationParameters,
     ProjectConfig,
     Surface,
@@ -36,7 +38,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 10
+PROJECT_SCHEMA_VERSION = 11
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -578,7 +580,23 @@ class SQLiteStore:
                 tank_payload.get("minimum_operating_volume_percent", 0.0)
             ),
         )
-        system_params = SystemComponentParameters(**payload.get("system_parameters", {}))
+        system_payload = dict(payload.get("system_parameters", {}))
+        if "filtration_system_flow_gpm" not in system_payload:
+            legacy_capacity = float(
+                system_payload.get("filtration_pump_capacity_gallons_per_hour", 1200.0)
+            )
+            system_payload["filtration_system_flow_gpm"] = normalize_filtration_system_flow_gpm(
+                legacy_capacity / 60.0
+            )
+        else:
+            system_payload["filtration_system_flow_gpm"] = normalize_filtration_system_flow_gpm(
+                system_payload["filtration_system_flow_gpm"]
+            )
+        system_payload["transfer_pump_type"] = normalize_transfer_pump_type(
+            system_payload.get("transfer_pump_type")
+        )
+        system_params = SystemComponentParameters(**system_payload)
+        system_params.synchronize_filtration_flow()
         financial_params = FinancialParameters(**payload.get("financial_parameters", {}))
         optimization_payload = dict(payload.get("optimization_parameters", {}))
         if not optimization_payload.get("equipment_candidates") and optimization_payload.get("catalog"):

@@ -8,8 +8,8 @@ from typing import Any, Iterable
 
 EQUIPMENT_CATEGORIES = (
     "Primary tank",
-    "Filtration pump",
-    "Filtration unit",
+    "Transfer pump",
+    "Filtration system",
     "Buffer tank",
 )
 CANDIDATE_DISPOSITIONS = ("Candidate", "Fixed", "Excluded")
@@ -22,18 +22,25 @@ def built_in_equipment_library() -> list[dict[str, Any]]:
         _product("builtin-primary-1000", "Primary tank", "PT-1000", 1_000, 4_000),
         _product("builtin-primary-2500", "Primary tank", "PT-2500", 2_500, 6_500),
         _product("builtin-primary-5000", "Primary tank", "PT-5000", 5_000, 9_500),
-        _product("builtin-pump-5", "Filtration pump", "FP-5", 300, 1_200, power_kw=.37,
-                 rated_flow_gpm=5, required_companion_categories=["Filtration unit"]),
-        _product("builtin-pump-10", "Filtration pump", "FP-10", 600, 1_700, power_kw=.55,
-                 rated_flow_gpm=10, required_companion_categories=["Filtration unit"]),
-        _product("builtin-pump-20", "Filtration pump", "FP-20", 1_200, 2_500, power_kw=1.1,
-                 rated_flow_gpm=20, required_companion_categories=["Filtration unit"]),
-        _product("builtin-filter-5-15", "Filtration unit", "FU-5-15", 900, 1_100,
-                 minimum_flow_gpm=5, maximum_flow_gpm=15,
-                 required_companion_categories=["Filtration pump"]),
-        _product("builtin-filter-10-25", "Filtration unit", "FU-10-25", 1_500, 1_650,
-                 minimum_flow_gpm=10, maximum_flow_gpm=25,
-                 required_companion_categories=["Filtration pump"]),
+        *[
+            _product(
+                f"builtin-transfer-{flow}", "Transfer pump", f"TP-{flow}", flow * 60,
+                cost, power_kw=power, rated_flow_gpm=flow, pump_type="External",
+                required_companion_categories=["Filtration system"],
+            )
+            for flow, cost, power in (
+                (15, 2_100, .75), (20, 2_500, 1.1), (30, 3_100, 1.5),
+                (40, 3_800, 2.2), (50, 4_500, 3.0),
+            )
+        ],
+        *[
+            _product(
+                f"builtin-filtration-{flow}", "Filtration system", f"FS-{flow}", flow * 60,
+                cost, rated_flow_gpm=flow, minimum_flow_gpm=flow, maximum_flow_gpm=flow,
+                required_companion_categories=["Transfer pump"],
+            )
+            for flow, cost in ((15, 1_300), (20, 1_650), (30, 2_100), (40, 2_650), (50, 3_200))
+        ],
         _product("builtin-buffer-50", "Buffer tank", "BT-50", 50, 700),
         _product("builtin-buffer-100", "Buffer tank", "BT-100", 100, 1_000),
         _product("builtin-buffer-250", "Buffer tank", "BT-250", 250, 1_600),
@@ -67,12 +74,23 @@ def normalize_product(product: dict[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(product)
     result["id"] = str(result.get("id") or "").strip()
     result["category"] = str(result.get("category") or "").strip()
+    result["category"] = {
+        "Filtration pump": "Transfer pump",
+        "Filtration unit": "Filtration system",
+    }.get(result["category"], result["category"])
     result["manufacturer"] = str(result.get("manufacturer") or "").strip()
     result["model"] = str(result.get("model") or result.get("name") or "").strip()
     result["description"] = str(result.get("description") or "").strip()
     result["capacity"] = float(result.get("capacity", 0.0))
     result["installed_cost"] = float(result.get("installed_cost", result.get("cost", 0.0)))
     result["properties"] = dict(result.get("properties") or {})
+    companions = result["properties"].get("required_companion_categories", [])
+    result["properties"]["required_companion_categories"] = [
+        {"Filtration pump": "Transfer pump", "Filtration unit": "Filtration system"}.get(
+            str(value), str(value)
+        )
+        for value in companions
+    ]
     if "power_kw" in result:
         result["properties"].setdefault("power_kw", float(result.get("power_kw", 0.0)))
     result["dimensions"] = dict(result.get("dimensions") or {})
@@ -169,12 +187,12 @@ def migrate_legacy_catalog(catalog: Iterable[dict[str, Any]]) -> list[dict[str, 
         })
         candidates.append(candidate_from_product(product))
     if candidates and not any(
-        effective_candidate_product(item)["category"] == "Filtration unit" for item in candidates
+        effective_candidate_product(item)["category"] == "Filtration system" for item in candidates
     ):
         neutral = _product(
-            "legacy-neutral-filter", "Filtration unit", "Existing project filtration", 1_000_000_000,
-            0, minimum_flow_gpm=0, maximum_flow_gpm=1_000_000_000,
-            required_companion_categories=["Filtration pump"],
+            "legacy-neutral-filter", "Filtration system", "Existing project filtration", 1_200,
+            0, rated_flow_gpm=20, minimum_flow_gpm=20, maximum_flow_gpm=20,
+            required_companion_categories=["Transfer pump"],
         )
         candidates.append(candidate_from_product(neutral))
     return candidates
@@ -182,7 +200,7 @@ def migrate_legacy_catalog(catalog: Iterable[dict[str, Any]]) -> list[dict[str, 
 
 def default_equipment_constraints() -> dict[str, Any]:
     return {
-        "enforce_flow_compatibility": False,
+        "enforce_flow_compatibility": True,
         "require_constraint_values": False,
         "approved_vendors": [],
         "required_tags": [],
@@ -245,10 +263,20 @@ def evaluate_product_eligibility(
             "Missing required standard(s): " + ", ".join(missing_standards)
         )
     props = item["properties"]
-    if item["category"] == "Filtration pump":
+    if item["category"] == "Transfer pump":
+        flow = props.get("rated_flow_gpm", item["capacity"] / 60.0)
+        if float(flow) not in {15.0, 20.0, 30.0, 40.0, 50.0}:
+            failures.append("Rated flow must be 15, 20, 30, 40, or 50 GPM")
+        pump_type = str(props.get("pump_type", "External"))
+        if pump_type not in {"External", "Submersible"}:
+            failures.append("Pump type must be External or Submersible")
         compare_required("voltage", props.get("voltage"), rules["required_voltage"])
         compare_required("phase", props.get("phase"), rules["required_phase"])
-    if item["category"] in {"Filtration pump", "Filtration unit"}:
+    if item["category"] == "Filtration system":
+        flow = props.get("rated_flow_gpm", item["capacity"] / 60.0)
+        if float(flow) not in {15.0, 20.0, 30.0, 40.0, 50.0}:
+            failures.append("Rated flow must be 15, 20, 30, 40, or 50 GPM")
+    if item["category"] in {"Transfer pump", "Filtration system"}:
         compare_required("pressure class", props.get("pressure_class"), rules["required_pressure_class"])
         compare_required("connection size", props.get("connection_size"), rules["required_connection_size"])
 
@@ -294,18 +322,23 @@ def evaluate_combination_compatibility(
         for required in item["properties"].get("required_companion_categories", []):
             if required not in categories:
                 failures.append(f"{item['model']} requires a {required}")
-    if rules["enforce_flow_compatibility"]:
-        pump = next((item for item in items if item["category"] == "Filtration pump"), None)
-        filtration = next((item for item in items if item["category"] == "Filtration unit"), None)
+    if rules["enforce_flow_compatibility"] or {
+        "Transfer pump", "Filtration system"
+    }.issubset(categories):
+        pump = next((item for item in items if item["category"] == "Transfer pump"), None)
+        filtration = next((item for item in items if item["category"] == "Filtration system"), None)
         if pump and filtration:
             flow = pump["properties"].get("rated_flow_gpm", pump["capacity"] / 60.0)
-            minimum = filtration["properties"].get("minimum_flow_gpm")
-            maximum = filtration["properties"].get("maximum_flow_gpm")
+            filtration_flow = filtration["properties"].get(
+                "rated_flow_gpm", filtration["capacity"] / 60.0
+            )
+            minimum = filtration["properties"].get("minimum_flow_gpm", filtration_flow)
+            maximum = filtration["properties"].get("maximum_flow_gpm", filtration_flow)
             if minimum in (None, "") or maximum in (None, ""):
-                (failures if strict else warnings).append("Missing filtration-unit compatible flow range")
-            elif not float(minimum) <= float(flow) <= float(maximum):
+                failures.append("Missing filtration-system nominal flow")
+            elif float(flow) != float(filtration_flow):
                 failures.append(
-                    f"{pump['model']} flow ({float(flow):g} GPM) is outside {filtration['model']} range "
-                    f"({float(minimum):g}–{float(maximum):g} GPM)"
+                    f"{pump['model']} flow ({float(flow):g} GPM) does not match {filtration['model']} "
+                    f"({float(filtration_flow):g} GPM)"
                 )
     return not failures, [*failures, *warnings]

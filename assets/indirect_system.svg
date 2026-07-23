@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 250" role="img" aria-labelledby="title desc">
   <title id="title">Indirect rainwater system schematic</title>
-  <desc id="desc">A primary tank supplies a filtration pump and filtration system connected to a buffer tank with municipal backup and a booster pump.</desc>
+  <desc id="desc">A primary tank supplies a transfer pump and filtration system connected to a buffer tank with municipal backup and a booster pump.</desc>
   <g fill="none" stroke="#000" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
     <rect x="40" y="30" width="220" height="160" />
     <path d="M42 110 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q8 8 16 0 q8 -8 16 0 q6 8 12 0" />
@@ -23,7 +23,7 @@
   <g fill="#000" font-family="Arial, sans-serif" text-anchor="middle">
     <text x="150" y="57" font-size="18" font-weight="700">Primary tank</text>
     <text x="150" y="80" font-size="12">Primary analysis size: 5,000 gal</text>
-    <text x="365" y="210" font-size="16" font-weight="700">Filtration pump</text>
+    <text x="365" y="210" font-size="16" font-weight="700">Transfer pump</text>
     <text x="530" y="156" font-size="16" font-weight="700">Filtration</text>
     <text x="765" y="80" font-size="18" font-weight="700">Buffer tank</text>
     <text x="650" y="18" font-size="14" font-weight="700">Municipal water backup</text>

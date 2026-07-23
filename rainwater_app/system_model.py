@@ -387,7 +387,7 @@ def validate_builder_system(
     for filter_id in ids_of("filtration_system"):
         if not can_reach_id(filtration_pumps, filter_id):
             warnings.append(
-                f"{filter_id} must be downstream of a filtration pump."
+                f"{filter_id} must be downstream of a transfer pump."
             )
     booster_pumps = ids_of("booster_pump")
     end_use_ids = ids_of("end_uses")
@@ -471,7 +471,7 @@ def build_system_template(system_type: str) -> RWHSystem:
     if normalized_type == "Indirect system":
         components.update(
             {
-                "filtration_pump": _component("filtration_pump", "pump", "Filtration pump"),
+                "filtration_pump": _component("filtration_pump", "pump", "Transfer pump"),
                 "filtration": _component("filtration", "filter", "Filtration"),
                 "booster": _component("booster", "booster_tank", "Buffer tank"),
                 "booster_pump": _component("booster_pump", "pump", "Booster pump"),

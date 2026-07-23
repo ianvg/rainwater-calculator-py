@@ -422,7 +422,7 @@ legend style={{at={{(0.5,-0.25)}}, anchor=north, legend columns=3}},
             equipment = r"""
 \draw (2.2,1.0) -- (2.9,1.0); \draw (3.25,1.0) circle (0.35);
 \draw (3.60,1.0) -- (3.075,1.303) -- (3.075,0.697) -- cycle;
-\node[below] at (3.25,0.55) {Filtration pump};
+\node[below] at (3.25,0.55) {Transfer pump};
 \draw (3.60,1.0) -- (4.2,1.0); \draw (4.2,0.7) rectangle (5.5,1.3);
 \node at (4.85,1.0) {Filtration}; \draw (5.5,1.0) -- (6.1,1.0);
 \draw (6.1,0.35) rectangle (7.7,1.65); \node at (6.9,1.4) {Buffer tank};
@@ -740,7 +740,7 @@ def _build_system_visualization_html(report: dict[str, object]) -> str:
     if system_type == "Indirect system":
         equipment = """
 <line x1="250" y1="130" x2="315" y2="130"/><circle cx="350" cy="130" r="35"/>
-<polygon points="385,130 332.5,160.31 332.5,99.69"/><text x="350" y="185">Filtration pump</text>
+<polygon points="385,130 332.5,160.31 332.5,99.69"/><text x="350" y="185">Transfer pump</text>
 <line x1="385" y1="130" x2="445" y2="130"/><rect x="445" y="100" width="130" height="60"/>
 <text x="510" y="135">Filtration</text><line x1="575" y1="130" x2="640" y2="130"/>
 <rect x="640" y="45" width="160" height="130"/><text x="720" y="72">Buffer tank</text>
@@ -1227,6 +1227,8 @@ def render_html(
             ("System", f'{provenance.get("system_type", "Not specified")}; municipal backup {str(provenance.get("municipal_backup", "Not specified")).lower()}'),
             ("Initial tank fill", f'{float(provenance.get("initial_tank_fill_percent", 0.0)):g}%'),
             ("Filter recovery", f'{float(provenance.get("filter_recovery_percent", 100.0)):g}%'),
+            ("Filtration system flow", f'{float(provenance.get("filtration_system_flow_gpm", 20.0)):g} GPM'),
+            ("Transfer pump type", str(provenance.get("transfer_pump_type", "External"))),
             ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
             ("Report schema", provenance.get("report_schema_version", report["schema_version"])),
             ("Analysis input signature", provenance.get("analysis_input_signature", "Not stored")),
