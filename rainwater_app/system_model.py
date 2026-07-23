@@ -96,7 +96,7 @@ BUILDER_COMPONENT_PORTS: dict[str, tuple[bool, bool]] = {
     "booster_pump": (True, True),
     "municipal_backup": (False, True),
     "end_uses": (True, False),
-    "first_flush_diversion": (True, False),
+    "first_flush_diversion": (True, True),
     "overflow_pipe": (True, False),
 }
 
@@ -108,6 +108,51 @@ def ensure_primary_overflow_paths(
     """Migrate builder layouts so every primary tank has a dedicated overflow pipe."""
     items = [dict(item) for item in layout]
     links = [{str(key): str(value) for key, value in item.items()} for item in connections]
+    types = {
+        str(item.get("id", "")): str(item.get("component_type", ""))
+        for item in items
+    }
+
+    # Versions before the inline device routed first-flush loss from a second
+    # primary-tank outlet into a terminal sink. Preserve those projects by
+    # moving the device into the collection line. Graphs that intentionally
+    # omit a device are left untouched.
+    for flush_id, component_type in types.items():
+        if component_type != "first_flush_diversion":
+            continue
+        legacy_links = [
+            link for link in links
+            if link.get("target_component") == flush_id
+            and types.get(link.get("source_component", "")) == "primary_tank"
+            and link.get("source_port", "out") == "out2"
+        ]
+        if not legacy_links:
+            continue
+        primary_id = legacy_links[0]["source_component"]
+        collection_links = [
+            link for link in links
+            if link.get("target_component") == primary_id
+            and types.get(link.get("source_component", "")) == "rainwater_input"
+        ]
+        links = [link for link in links if link not in legacy_links]
+        if collection_links:
+            collection_link = collection_links[0]
+            links.remove(collection_link)
+            links.extend([
+                {
+                    "source_component": collection_link["source_component"],
+                    "source_port": collection_link.get("source_port", "out"),
+                    "target_component": flush_id,
+                },
+                {
+                    "source_component": flush_id,
+                    "target_component": primary_id,
+                    "target_port": collection_link.get("target_port", "in"),
+                },
+            ])
+        for item in items:
+            if str(item.get("id", "")) == primary_id:
+                item.pop("extra_output_node", None)
     existing_ids = {str(item.get("id", "")) for item in items}
     primary_items = [
         item for item in items if str(item.get("component_type", "")) == "primary_tank"
@@ -167,6 +212,7 @@ class ExecutableSystem:
     filtration_path: bool
     booster_storage_path: bool
     distribution_pump_path: bool
+    first_flush_path: bool
     display_type: str
 
 
@@ -193,6 +239,7 @@ def compile_builder_system(
             filtration_path=indirect,
             booster_storage_path=indirect,
             distribution_pump_path=not indirect,
+            first_flush_path=True,
             display_type="Indirect system" if indirect else "Direct system",
         )
 
@@ -240,6 +287,10 @@ def compile_builder_system(
         for path_types in supply_types
     )
     indirect = filtration_path or booster_path
+    first_flush_path = any(
+        any(types[item_id] == "first_flush_diversion" for item_id in path)
+        for path in rain_paths
+    )
     return ExecutableSystem(
         uses_builder_graph=True,
         rain_reaches_primary=bool(rain_paths),
@@ -249,6 +300,7 @@ def compile_builder_system(
         filtration_path=filtration_path,
         booster_storage_path=booster_path,
         distribution_pump_path=direct_pump_path,
+        first_flush_path=first_flush_path,
         display_type="Custom indirect system" if indirect else "Custom direct system",
     )
 
@@ -417,15 +469,9 @@ def validate_builder_system(
     for item_id, component_type in types.items():
         if component_type not in {"rainwater_input", "municipal_backup"} and incoming[item_id] == 0:
             warnings.append(f"{item_id} has no incoming connection.")
-        if component_type not in {"end_uses", "first_flush_diversion", "overflow_pipe"} and not adjacency[item_id]:
+        if component_type not in {"end_uses", "overflow_pipe"} and not adjacency[item_id]:
             warnings.append(f"{item_id} has no outgoing connection.")
     for source, target, source_port, _target_port in valid_connections:
-        if source_port == "out2" and types.get(source) == "primary_tank" and types.get(target) != "first_flush_diversion":
-            warnings.append("The primary tank's second outlet must connect to first-flush diversion.")
-        if types.get(target) == "first_flush_diversion" and not (
-            types.get(source) == "primary_tank" and source_port == "out2"
-        ):
-            warnings.append("First-flush diversion must connect from the primary tank's second outlet.")
         if source_port == "overflow" and not (
             types.get(source) == "primary_tank" and types.get(target) == "overflow_pipe"
         ):
@@ -436,9 +482,6 @@ def validate_builder_system(
             warnings.append("An overflow pipe must connect directly from a primary tank overflow outlet.")
     by_id = {str(item.get("id", "")): item for item in items}
     for item_id, item in by_id.items():
-        if item.get("component_type") == "primary_tank" and item.get("extra_output_node"):
-            if not any(source == item_id and source_port == "out2" for source, _target, source_port, _port in valid_connections):
-                warnings.append("Connect or remove the primary tank's second outlet.")
         if item.get("component_type") == "booster_tank" and item.get("extra_input_node"):
             if not any(target == item_id and target_port == "in2" for _source, target, _port, target_port in valid_connections):
                 warnings.append("Connect or remove the buffer tank's second inlet.")
@@ -457,6 +500,9 @@ def _component(component_id: str, component_type: str, name: str, *, inlet: bool
 def build_system_template(system_type: str) -> RWHSystem:
     components = {
         "collection": _component("collection", "collection", "Collection surfaces", inlet=False),
+        "first_flush": _component(
+            "first_flush", "first_flush_diversion", "First-flush device"
+        ),
         "primary": _component("primary", "primary_tank", "Primary tank"),
         "overflow": _component("overflow", "overflow_pipe", "Overflow pipe", outlet=False),
         "end_uses": _component("end_uses", "end_uses", "End uses", outlet=False),
@@ -464,7 +510,8 @@ def build_system_template(system_type: str) -> RWHSystem:
     }
     components["primary"].ports["overflow"] = Port("overflow", "out")
     connections = [
-        Connection("collection", "out", "primary", "in"),
+        Connection("collection", "out", "first_flush", "in"),
+        Connection("first_flush", "out", "primary", "in"),
         Connection("primary", "overflow", "overflow", "in"),
     ]
     normalized_type = "Indirect system" if system_type == "Indirect system" else "Direct system"

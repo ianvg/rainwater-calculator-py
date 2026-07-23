@@ -14,6 +14,11 @@ from rainwater_app.models import (
     purge_unused_hourly_schedules,
     unused_hourly_schedule_names,
 )
+from rainwater_app.number_formatting import (
+    EUROPEAN_NUMBER_FORMAT,
+    US_NUMBER_FORMAT,
+    set_active_number_format,
+)
 from rainwater_app.reporting import (
     ReportModel,
     report_average_annual_precipitation as _report_average_annual_precipitation,
@@ -44,6 +49,42 @@ from tkinter_app import (
 from tkinter_app import DemandObjectDialog
 
 
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("block-graph", "block-graph"),
+        ("icon-graph", "icon-graph"),
+        ("unsupported", "icon-graph"),
+        (None, "icon-graph"),
+    ],
+)
+def test_system_builder_view_normalization(value: object, expected: str) -> None:
+    assert RainwaterTkApp._normalized_system_builder_view(value) == expected
+
+
+def test_demand_quantity_summary_uses_selected_number_format() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    demand_object = DemandObject(
+        "Process demand",
+        demand_mode="recurring_daily",
+        recurring_daily_gallons=129_600.0,
+    )
+
+    try:
+        set_active_number_format(US_NUMBER_FORMAT)
+        assert app._demand_object_quantity_summary(demand_object) == (
+            "129,600 gal/occupied day"
+        )
+
+        set_active_number_format(EUROPEAN_NUMBER_FORMAT)
+        assert app._demand_object_quantity_summary(demand_object) == (
+            "129.600 gal/occupied day"
+        )
+    finally:
+        set_active_number_format(US_NUMBER_FORMAT)
+
+
 class _VariableStub:
     def __init__(self, value=None) -> None:
         self.value = value
@@ -53,6 +94,43 @@ class _VariableStub:
 
     def set(self, value) -> None:
         self.value = value
+
+
+def test_acis_import_shows_selected_station_in_bottom_status_before_fetch(monkeypatch) -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.station_var = _VariableStub("Selected station")
+    app.station_options = [{"name": "Test Station", "sid": "TEST001"}]
+    app._station_label = lambda _station: "Selected station"
+    app.weather_years_var = _VariableStub("30")
+    app.canadian_precip_var = _VariableStub("Total precipitation")
+    app.status_var = _VariableStub("Ready")
+
+    class ExecutionLogStub:
+        def info(self, *_args, **_kwargs) -> None:
+            pass
+
+        def diagnostic(self, *_args, **_kwargs) -> None:
+            pass
+
+        def error(self, *_args, **_kwargs) -> None:
+            pass
+
+    app.execution_log = ExecutionLogStub()
+    app._drain_execution_log_to_window = lambda: None
+    app.update_idletasks = lambda: None
+
+    status_during_fetch = []
+
+    def fetch_stub(*_args, **_kwargs):
+        status_during_fetch.append(app.status_var.get())
+        raise RuntimeError("stop after observing status")
+
+    monkeypatch.setattr(tkinter_app, "fetch_daily_station_data", fetch_stub)
+    monkeypatch.setattr(tkinter_app.messagebox, "showerror", lambda *_args, **_kwargs: None)
+
+    app.import_acis_weather()
+
+    assert status_during_fetch == ["Importing station Test Station (TEST001)..."]
 
 
 @pytest.mark.parametrize(
@@ -228,6 +306,22 @@ def test_occupational_modes_only_list_binary_occupancy_schedules() -> None:
     ]
 
 
+def test_fractional_schedule_controls_use_one_as_max_and_two_decimals() -> None:
+    dialog = object.__new__(tkinter_app.HourlyDemandScheduleDialog)
+    dialog.schedule_type = tkinter_app.FRACTIONAL_SCHEDULE_TYPE
+    dialog.vars = {
+        ("mon", 0): _VariableStub("0.25"),
+        ("mon", 1): _VariableStub("0.50"),
+    }
+
+    dialog._set_even()
+
+    assert dialog.FRACTIONAL_MAX_VALUE == 1.0
+    assert dialog.FRACTIONAL_INCREMENT == 0.01
+    assert dialog.FRACTIONAL_FORMAT == "%.2f"
+    assert [variable.get() for variable in dialog.vars.values()] == ["1.00", "1.00"]
+
+
 def test_occupational_demand_modes_have_clear_visible_prefix() -> None:
     assert DemandObjectDialog.MODE_LABELS[
         "Occupational - Fixture use (people x uses)"
@@ -308,17 +402,21 @@ def _analysis_settings_app(*, hourly: bool, synthetic: bool, generated: bool):
     return app
 
 
-def test_applied_analysis_settings_describe_daily_only_mode() -> None:
+def test_applied_analysis_settings_describe_daily_demand_timing() -> None:
     app = _analysis_settings_app(hourly=False, synthetic=True, generated=True)
 
     app._refresh_applied_analysis_settings()
 
-    assert app.applied_analysis_resolution_var.get() == "Daily only"
+    assert app.applied_analysis_resolution_var.get() == "Daily mass balance only"
     assert app.applied_rainfall_source_var.get() == "Loaded daily rainfall record"
-    assert app.applied_demand_timing_var.get() == "Daily totals (hourly simulation is off)"
-    assert app.applied_rainfall_timing_var.get() == "Daily totals"
-    assert app.synthetic_hourly_rainfall_radio.last_state == ["disabled"]
-    assert app.analysis_generate_hourly_rainfall_button.last_state == ["disabled"]
+    assert app.applied_demand_timing_var.get() == (
+        "Daily demand totals; hourly profile is preserved but not simulated"
+    )
+    assert app.applied_rainfall_timing_var.get() == (
+        "Hourly rainfall timing is not simulated; daily source totals are used"
+    )
+    assert app.synthetic_hourly_rainfall_radio.last_state == ["!disabled"]
+    assert app.analysis_generate_hourly_rainfall_button.last_state == ["!disabled"]
 
 
 @pytest.mark.parametrize(
@@ -343,10 +441,10 @@ def test_applied_analysis_settings_describe_hourly_timing(
     app._refresh_applied_analysis_settings()
 
     assert app.applied_analysis_resolution_var.get() == (
-        "Daily + hourly (the daily analysis is always included)"
+        "Daily mass balance for sizing + full hourly selected-tank simulation"
     )
     assert app.applied_demand_timing_var.get() == (
-        "Hourly schedules (project default: Office week)"
+        "Hourly profile applied hour by hour (schedule: Office week)"
     )
     assert app.applied_rainfall_timing_var.get() == expected_rainfall_timing
     assert app.synthetic_hourly_rainfall_radio.last_state == (
@@ -485,6 +583,22 @@ def test_system_object_editor_rejects_invalid_primary_parameters(
 
 
 def test_system_object_editor_validates_other_visible_parameter_types() -> None:
+    assert _system_object_editor_validation(
+        "first_flush_diversion",
+        {
+            "name": "First-flush device",
+            "first_flush_antecedent": "12",
+            "first_flush_antecedent_unit": "hours",
+        },
+    ) == []
+    assert _system_object_editor_validation(
+        "first_flush_diversion",
+        {
+            "name": "First-flush device",
+            "first_flush_antecedent": "-1",
+            "first_flush_antecedent_unit": "days",
+        },
+    ) == ["Antecedent dry period cannot be negative."]
     assert _system_object_editor_validation(
         "filtration_pump", {"name": "Pump", "transfer_pump_type": "Invalid"}
     ) == ["Transfer pump type must be External or Submersible."]
@@ -827,11 +941,11 @@ def test_climate_normal_comparison_displays_seasons_in_project_units() -> None:
             "USW00013873",
             (
                 "ATHENS BEN EPPS AP [USW00013873]",
-                "25.40",
-                "50.80",
-                "76.20",
-                "101.60",
-                "127.00",
+                    "25.4",
+                    "50.8",
+                    "76.2",
+                    "101.6",
+                    "127",
             ),
         )
     ]
@@ -1339,7 +1453,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Financial assumptions and results" in html
     assert "Lifecycle net present value" in html
     assert "Internal rate of return" in html
-    assert "420.0 kWh/year" in html
+    assert "420 kWh/year" in html
     assert "Annual lifecycle cash flow" in html
     assert "Cumulative discounted cash flow" in html
     assert "Annual lifecycle cash flow" in latex
@@ -1404,7 +1518,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Yearly demand reliability - 750 gal tank" in html
     assert "Demand not met" in html
     assert "2024: demand met 300 days (81.97%); demand not met 66 days (18.03%)" in html
-    assert "Average tank reliability over 2 years: 65.00%" in html
+    assert "Average tank reliability over 2 years: 65%" in html
     assert "Yearly Demand Reliability - 1,500 gal tank" in html
     assert "Average tank reliability over 1 year: 87.43%" in html
     assert 'id="chart-tooltip"' in html
@@ -1426,7 +1540,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "data-range-start" in html
     assert "data-range-end" in html
     assert 'class="tank-history-point"' in html
-    assert 'data-tooltip="1,000 gal; 2024, day 1: 100.00 gal"' in html
+    assert 'data-tooltip="1,000 gal; 2024, day 1: 100 gal"' in html
     assert ".tank-history-point:hover" in html
     assert html.index('id="yearly-demand-reliability"') < html.index('id="tank-level-distribution"')
     assert "mark=o, red" in latex
@@ -1457,7 +1571,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert r"\section{System Visualization - Indirect system}" in latex
     assert "Precipitation basis & Rain only" in latex_executive
     assert "Selected tank & 750 gal" in latex_executive
-    assert "Selected reliability & 65.00\\%" in latex_executive
+    assert "Selected reliability & 65\\%" in latex_executive
     assert "Average annual precipitation & 42.38 in" in latex_executive
     assert "Precipitation basis" not in latex_project_information
     assert "Average annual precipitation" not in latex_project_information
@@ -1531,7 +1645,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "America/New_York" in pdf_text
     assert "Precipitation basis: Rain only" in pdf_executive
     assert "Selected tank: 750 gal" in pdf_executive
-    assert "Selected reliability: 65.00%" in pdf_executive
+    assert "Selected reliability: 65%" in pdf_executive
     assert "Average annual precipitation: 42.38 in" in pdf_executive
     assert "Precipitation basis" not in pdf_project_information
     assert "Average annual precipitation" not in pdf_project_information
@@ -1713,7 +1827,7 @@ def test_animation_overflow_connection_and_pipe_flow_labels() -> None:
     assert RainwaterTkApp._system_animation_connection_flow_gallons(
         "primary_tank", "overflow_pipe", row
     ) == pytest.approx(120.0)
-    assert RainwaterTkApp._system_animation_pipe_flow_label(60.0, imperial) == "1.0 GPM"
+    assert RainwaterTkApp._system_animation_pipe_flow_label(60.0, imperial) == "1 GPM"
     assert RainwaterTkApp._system_animation_pipe_flow_label(60.0, metric) == "3.8 LPM"
 
 
@@ -1823,8 +1937,8 @@ def test_primary_output_nodes_disconnect_independently() -> None:
     ) == [connections[0]]
 
 
-def test_first_flush_diversion_has_an_input_only() -> None:
-    assert RainwaterTkApp._system_component_ports("first_flush_diversion") == (True, False)
+def test_first_flush_device_is_an_inline_component() -> None:
+    assert RainwaterTkApp._system_component_ports("first_flush_diversion") == (True, True)
 
 
 def test_system_builder_zoom_moves_in_ten_percent_steps_with_three_step_limits() -> None:
@@ -1865,6 +1979,7 @@ def test_system_builder_canvas_keeps_its_useful_minimum_size() -> None:
 
 def test_animation_flow_activity_uses_hourly_component_results() -> None:
     row = pd.Series({
+        "GrossCollectedGallons": 12.0,
         "CollectedGallons": 10.0,
         "PumpFlowGallons": 5.0,
         "FilterThroughputGallons": 4.0,
@@ -1885,9 +2000,18 @@ def test_animation_flow_activity_uses_hourly_component_results() -> None:
     assert RainwaterTkApp._system_animation_connection_active(
         "booster_pump", "end_uses", row
     )
-    assert not RainwaterTkApp._system_animation_connection_active(
-        "primary_tank", "first_flush_diversion", row
+    assert RainwaterTkApp._system_animation_connection_active(
+        "rainwater_input", "first_flush_diversion", row
     )
+    assert RainwaterTkApp._system_animation_connection_active(
+        "first_flush_diversion", "primary_tank", row
+    )
+    assert RainwaterTkApp._system_animation_connection_flow_gallons(
+        "rainwater_input", "first_flush_diversion", row
+    ) == pytest.approx(12.0)
+    assert RainwaterTkApp._system_animation_connection_flow_gallons(
+        "first_flush_diversion", "primary_tank", row
+    ) == pytest.approx(10.0)
 
 
 def test_animation_weather_uses_collected_rainwater_for_current_hour() -> None:

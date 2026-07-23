@@ -84,6 +84,7 @@ def test_hourly_fixture_demand_distributes_the_calculated_daily_volume() -> None
 
 def test_hourly_fixture_demand_is_evenly_divided_across_occupied_hours() -> None:
     config = default_project_config()
+    config.demand.hourly_schedule_enabled = True
     config.demand.hourly_schedule_library["Two occupied hours"] = {
         day: [0.0] * 8 + [1.0, 1.0] + [0.0] * 14
         for day in ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -110,6 +111,7 @@ def test_hourly_fixture_demand_is_evenly_divided_across_occupied_hours() -> None
 
 def test_monthly_volume_without_schedule_is_uniform_across_24_hours() -> None:
     config = default_project_config()
+    config.demand.hourly_schedule_enabled = True
     config.demand.demand_objects = [DemandObject(
         "Monthly process",
         "Other indoor",

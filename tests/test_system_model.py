@@ -10,6 +10,9 @@ def test_direct_system_template_is_valid() -> None:
     assert system.validate() == []
     assert system.components["distribution_pump"].component_type == "pump"
     assert system.components["overflow"].component_type == "overflow_pipe"
+    assert system.components["first_flush"].component_type == "first_flush_diversion"
+    assert Connection("collection", "out", "first_flush", "in") in system.connections
+    assert Connection("first_flush", "out", "primary", "in") in system.connections
     assert "filtration" not in system.components
 
 
@@ -93,6 +96,32 @@ def test_builder_graph_accepts_first_flush_diversion_sink() -> None:
     assert not compiled.primary_reaches_end_uses
 
 
+def test_builder_compiles_optional_inline_first_flush_path() -> None:
+    layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "flush", "component_type": "first_flush_diversion"},
+        {"id": "tank", "component_type": "primary_tank"},
+    ]
+    with_device = compile_builder_system(
+        "Direct system",
+        layout,
+        [
+            {"source_component": "rain", "target_component": "flush"},
+            {"source_component": "flush", "target_component": "tank"},
+        ],
+    )
+    without_device = compile_builder_system(
+        "Direct system",
+        [layout[0], layout[2]],
+        [{"source_component": "rain", "target_component": "tank"}],
+    )
+
+    assert with_device.rain_reaches_primary
+    assert with_device.first_flush_path
+    assert without_device.rain_reaches_primary
+    assert not without_device.first_flush_path
+
+
 def test_builder_validation_reports_missing_required_flow_paths() -> None:
     warnings = validate_builder_system(
         [
@@ -165,6 +194,44 @@ def test_existing_builder_layout_is_migrated_with_overflow_pipe() -> None:
         "source_port": "overflow",
         "target_component": layout[-1]["id"],
     }]
+
+
+def test_legacy_terminal_first_flush_is_migrated_inline() -> None:
+    layout, connections = ensure_primary_overflow_paths(
+        [
+            {"id": "rain", "component_type": "rainwater_input"},
+            {
+                "id": "tank", "component_type": "primary_tank",
+                "extra_output_node": True,
+            },
+            {"id": "flush", "component_type": "first_flush_diversion"},
+            {"id": "overflow", "component_type": "overflow_pipe"},
+        ],
+        [
+            {"source_component": "rain", "target_component": "tank"},
+            {
+                "source_component": "tank", "source_port": "out2",
+                "target_component": "flush",
+            },
+            {
+                "source_component": "tank", "source_port": "overflow",
+                "target_component": "overflow",
+            },
+        ],
+    )
+
+    assert "extra_output_node" not in next(
+        item for item in layout if item["id"] == "tank"
+    )
+    assert {
+        "source_component": "rain", "source_port": "out",
+        "target_component": "flush",
+    } in connections
+    assert {
+        "source_component": "flush", "target_component": "tank",
+        "target_port": "in",
+    } in connections
+    assert not any(link.get("source_port") == "out2" for link in connections)
 
 
 def test_builder_validation_requires_a_valid_demand_assignment_for_each_end_use() -> None:

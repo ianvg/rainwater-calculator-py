@@ -249,50 +249,55 @@ def collection_balance_series(config: ProjectConfig, rainfall_df: pd.DataFrame) 
     data = _validate_rainfall(rainfall_df)
     areas = np.array([max(0.0, s.area) for s in config.surfaces], dtype=float)
     coeffs = np.array([min(max(0.0, s.runoff_coefficient), 1.0) for s in config.surfaces], dtype=float)
+    system = compile_builder_system(
+        config.system_type, config.system_layout, config.system_connections
+    )
     diversion_depths = np.array(
-        [max(float(s.first_flush_depth_inches), 0.0) for s in config.surfaces], dtype=float
+        [
+            max(float(s.first_flush_depth_inches), 0.0)
+            if system.first_flush_path else 0.0
+            for s in config.surfaces
+        ],
+        dtype=float,
     )
     diversion_allowances = (
         areas * coeffs * diversion_depths / 12.0 * GAL_PER_CUBIC_FOOT
     )
     antecedent = pd.Timedelta(days=max(float(config.first_flush_antecedent_dry_days), 0.0))
-    last_wet_time: pd.Timestamp | None = None
-    event_id = 0
-    gross_values: list[float] = []
-    loss_values: list[float] = []
-    net_values: list[float] = []
-    event_ids: list[int | None] = []
-    event_starts: list[bool] = []
-    precip = data["Precipitation"].to_numpy(dtype=float)
-    for index, precipitation in enumerate(precip):
-        timestamp = pd.Timestamp(data["Date"].iloc[index])
-        wet = precipitation > 0.0
-        starts_event = bool(
-            wet and (last_wet_time is None or timestamp - last_wet_time > antecedent)
-        )
-        if starts_event:
-            event_id += 1
-        surface_runoff = areas * coeffs * max(float(precipitation), 0.0) / 12.0 * GAL_PER_CUBIC_FOOT
-        surface_loss = (
-            np.minimum(surface_runoff, diversion_allowances)
-            if starts_event
-            else np.zeros_like(areas)
-        )
-        gross = float(surface_runoff.sum())
-        loss = float(surface_loss.sum())
-        gross_values.append(gross)
-        loss_values.append(loss)
-        net_values.append(max(gross - loss, 0.0))
-        event_ids.append(event_id if wet else None)
-        event_starts.append(starts_event)
-        if wet:
-            last_wet_time = timestamp
+    dates = data["Date"].to_numpy(dtype="datetime64[ns]", copy=False)
+    precip = np.maximum(data["Precipitation"].to_numpy(dtype=float), 0.0)
+    wet = precip > 0.0
+    wet_indices = np.flatnonzero(wet)
+    event_starts = np.zeros(len(data), dtype=bool)
+    if wet_indices.size:
+        wet_dates = dates[wet_indices]
+        wet_starts = np.ones(wet_indices.size, dtype=bool)
+        if wet_indices.size > 1:
+            wet_starts[1:] = np.diff(wet_dates) > antecedent.to_timedelta64()
+        event_starts[wet_indices] = wet_starts
+
+    event_numbers = np.cumsum(event_starts, dtype=np.int64)
+    event_ids = pd.array(
+        np.where(wet, event_numbers, 0), dtype="Int64"
+    )
+    event_ids[~wet] = pd.NA
+
+    runoff_factors = areas * coeffs / 12.0 * GAL_PER_CUBIC_FOOT
+    gross_values = precip * float(runoff_factors.sum())
+    loss_values = np.zeros(len(data), dtype=float)
+    start_indices = np.flatnonzero(event_starts)
+    if start_indices.size and runoff_factors.size:
+        start_runoff = precip[start_indices, None] * runoff_factors[None, :]
+        loss_values[start_indices] = np.minimum(
+            start_runoff, diversion_allowances[None, :]
+        ).sum(axis=1)
+    net_values = np.maximum(gross_values - loss_values, 0.0)
     return pd.DataFrame(
         {
             "GrossCollectedGallons": gross_values,
             "FirstFlushLossGallons": loss_values,
             "CollectedGallons": net_values,
-            "RainfallEventId": pd.array(event_ids, dtype="Int64"),
+            "RainfallEventId": event_ids,
             "RainfallEventStart": event_starts,
         },
         index=data.index,
@@ -325,6 +330,69 @@ def sewer_eligible_demand_series(
 
 
 @dataclass(frozen=True)
+class PreparedDailyInputs:
+    """Candidate-independent arrays shared by daily tank simulations."""
+
+    dates: np.ndarray
+    precipitation: np.ndarray
+    gross_collected_gallons: np.ndarray
+    first_flush_loss_gallons: np.ndarray
+    collected_gallons: np.ndarray
+    rainfall_event_ids: np.ndarray
+    rainfall_event_starts: np.ndarray
+    demand_gallons: np.ndarray
+    sewer_eligible_demand_gallons: np.ndarray
+    year_count: int
+
+
+def prepare_daily_inputs(
+    config: ProjectConfig, rainfall_df: pd.DataFrame
+) -> PreparedDailyInputs:
+    """Validate and calculate all daily inputs that do not depend on tank size."""
+    data = _validate_rainfall(rainfall_df)
+    collection = collection_balance_series(config, data)
+    dates = data["Date"].to_numpy(dtype="datetime64[ns]", copy=True)
+    demand = np.fromiter(
+        (_daily_demand_for_date(config.demand, pd.Timestamp(date)) for date in dates),
+        dtype=np.float64,
+        count=len(dates),
+    )
+    sewer_eligible = np.fromiter(
+        (
+            _sewer_eligible_daily_demand_for_date(
+                config.demand,
+                pd.Timestamp(date),
+                config.financial_parameters.sewer_eligible_percent,
+            )
+            for date in dates
+        ),
+        dtype=np.float64,
+        count=len(dates),
+    )
+    years = pd.DatetimeIndex(dates).year
+    return PreparedDailyInputs(
+        dates=dates,
+        precipitation=data["Precipitation"].to_numpy(dtype=float, copy=True),
+        gross_collected_gallons=collection["GrossCollectedGallons"].to_numpy(
+            dtype=float, copy=True
+        ),
+        first_flush_loss_gallons=collection["FirstFlushLossGallons"].to_numpy(
+            dtype=float, copy=True
+        ),
+        collected_gallons=collection["CollectedGallons"].to_numpy(
+            dtype=float, copy=True
+        ),
+        rainfall_event_ids=collection["RainfallEventId"].to_numpy(copy=True),
+        rainfall_event_starts=collection["RainfallEventStart"].to_numpy(
+            dtype=bool, copy=True
+        ),
+        demand_gallons=demand,
+        sewer_eligible_demand_gallons=sewer_eligible,
+        year_count=max(int(pd.Index(years).nunique()), 1),
+    )
+
+
+@dataclass(frozen=True)
 class PreparedHourlyInputs:
     demand_gallons: np.ndarray
     sewer_eligible_demand_gallons: np.ndarray
@@ -344,7 +412,11 @@ class HourlySimulationAggregates:
 
 
 def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> PreparedHourlyInputs:
-    """Precompute candidate-independent hourly demand, collection, and year arrays."""
+    """Precompute candidate-independent demand, collection, and year arrays.
+
+    Hourly demand timing follows the saved profile.  Daily demand timing retains
+    that profile, sums its 24 values, and applies the total at 12:00.
+    """
     data = _validate_rainfall(rainfall_df)
     hourly_rainfall = expand_hourly_rainfall(
         data, use_synthetic=config.use_synthetic_hourly_rainfall
@@ -376,14 +448,22 @@ def prepare_hourly_inputs(config: ProjectConfig, rainfall_df: pd.DataFrame) -> P
         start = day_index * 24
         legacy_daily = max(_base_daily_demand_for_date(config.demand, timestamp), 0.0)
         fraction_values = np.asarray(fractions)
-        demand_values[start:start + 24] = legacy_daily * fraction_values + object_demands
-        sewer_eligible_demand_values[start:start + 24] = (
+        daily_demand_values = legacy_daily * fraction_values + object_demands
+        daily_sewer_eligible_values = (
             legacy_daily
             * min(max(config.financial_parameters.sewer_eligible_percent, 0.0), 100.0)
             / 100.0
             * fraction_values
             + sewer_eligible_object_demands
         )
+        if config.demand.hourly_schedule_enabled:
+            demand_values[start:start + 24] = daily_demand_values
+            sewer_eligible_demand_values[start:start + 24] = daily_sewer_eligible_values
+        else:
+            demand_values[start + 12] = float(daily_demand_values.sum())
+            sewer_eligible_demand_values[start + 12] = float(
+                daily_sewer_eligible_values.sum()
+            )
         collected_values[start:start + 24] = hourly_collected[start:start + 24]
         years[start:start + 24] = timestamp.year
     _unique_years, year_indices = np.unique(years, return_inverse=True)
@@ -499,23 +579,49 @@ def simulate_tank(
     tank_size_gallons: float,
     tank_parameters: TankParameters | None = None,
     cancel_callback: Callable[[], bool] | None = None,
+    prepared_inputs: PreparedDailyInputs | None = None,
 ) -> pd.DataFrame:
     if tank_size_gallons <= 0:
         raise ValueError("Tank size must be greater than zero.")
 
     params = tank_parameters or config.tank_parameters
-    data = _validate_rainfall(rainfall_df)
+    if prepared_inputs is None:
+        data = _validate_rainfall(rainfall_df)
+        collection = collection_balance_series(config, data)
+        demand = demand_series(config, data)
+        sewer_eligible_demand = sewer_eligible_demand_series(config, data)
+    else:
+        prepared = prepared_inputs
+        data = pd.DataFrame(
+            {
+                "Date": prepared.dates,
+                "Precipitation": prepared.precipitation,
+            }
+        )
+        collection = pd.DataFrame(
+            {
+                "GrossCollectedGallons": prepared.gross_collected_gallons,
+                "FirstFlushLossGallons": prepared.first_flush_loss_gallons,
+                "CollectedGallons": prepared.collected_gallons,
+                "RainfallEventId": pd.array(
+                    prepared.rainfall_event_ids, dtype="Int64"
+                ),
+                "RainfallEventStart": prepared.rainfall_event_starts,
+            }
+        )
+        demand = pd.Series(prepared.demand_gallons, name="demand_gallons")
+        sewer_eligible_demand = pd.Series(
+            prepared.sewer_eligible_demand_gallons,
+            name="sewer_eligible_demand_gallons",
+        )
     system = compile_builder_system(
         config.system_type, config.system_layout, config.system_connections
     )
-    collection = collection_balance_series(config, data)
     if not system.rain_reaches_primary:
         collection.loc[:, [
             "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons"
         ]] = 0.0
     collected = collection["CollectedGallons"]
-    demand = demand_series(config, data)
-    sewer_eligible_demand = sewer_eligible_demand_series(config, data)
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
     minimum_operating_fraction = min(
@@ -648,7 +754,11 @@ def simulate_hourly_tank(
     cancel_callback: Callable[[], bool] | None = None,
     result_start_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
-    """Simulate hourly demand using synthetic profiles or the 23:00 fallback.
+    """Simulate timing-sensitive demand and rainfall on an hourly timestep.
+
+    Hourly demand timing follows the saved profile. Daily demand timing sums the
+    profile for each calendar day and applies the total at 12:00. The source
+    profile is never rewritten by this aggregation.
 
     When ``result_start_date`` is provided, earlier rows still warm up the tank
     state but are omitted from the returned frame.
@@ -685,10 +795,27 @@ def simulate_hourly_tank(
         collection.loc[:, [
             "GrossCollectedGallons", "FirstFlushLossGallons", "CollectedGallons"
         ]] = 0.0
+    hourly_precipitation = hourly_rainfall["Precipitation"].to_numpy(
+        dtype=float, copy=False
+    )
+    gross_collected_values = collection["GrossCollectedGallons"].to_numpy(
+        dtype=float, copy=False
+    )
+    first_flush_loss_values = collection["FirstFlushLossGallons"].to_numpy(
+        dtype=float, copy=False
+    )
+    collected_values = collection["CollectedGallons"].to_numpy(
+        dtype=float, copy=False
+    )
+    event_id_values = collection["RainfallEventId"].to_numpy(copy=False)
+    event_start_values = collection["RainfallEventStart"].to_numpy(
+        dtype=bool, copy=False
+    )
     base_daily_demand = pd.Series(
         [_base_daily_demand_for_date(config.demand, date) for date in data["Date"]],
         index=data.index,
     )
+    base_daily_demand_values = base_daily_demand.to_numpy(dtype=float, copy=False)
     legacy_sewer_eligible_fraction = (
         min(max(config.financial_parameters.sewer_eligible_percent, 0.0), 100.0) / 100.0
     )
@@ -732,25 +859,49 @@ def simulate_hourly_tank(
                         config.financial_parameters.sewer_eligible_percent,
                     )
                 )
-        for hour, fraction in enumerate(fractions):
-            hourly_index = day_index * 24 + hour
-            primary_tank_beginning = water
-            booster_tank_beginning = booster_water
-            overflow_beginning_cumulative = cumulative_overflow
-            demand_hour = max(
-                float(base_daily_demand.iloc[day_index]) * fraction + object_hourly_demands[hour],
+        demand_by_hour = [
+            max(
+                float(base_daily_demand_values[day_index]) * fraction
+                + object_hourly_demands[hour],
                 0.0,
             )
-            sewer_eligible_demand_hour = min(
+            for hour, fraction in enumerate(fractions)
+        ]
+        sewer_eligible_demand_by_hour = [
+            min(
                 max(
-                    float(base_daily_demand.iloc[day_index])
+                    float(base_daily_demand_values[day_index])
                     * fraction
                     * legacy_sewer_eligible_fraction
                     + sewer_eligible_object_hourly_demands[hour],
                     0.0,
                 ),
-                demand_hour,
+                demand_by_hour[hour],
             )
+            for hour, fraction in enumerate(fractions)
+        ]
+        if not config.demand.hourly_schedule_enabled:
+            demand_by_hour = [0.0] * 24
+            demand_by_hour[12] = sum(
+                max(
+                    float(base_daily_demand_values[day_index]) * fraction
+                    + object_hourly_demands[hour],
+                    0.0,
+                )
+                for hour, fraction in enumerate(fractions)
+            )
+            sewer_eligible_total = sum(sewer_eligible_demand_by_hour)
+            sewer_eligible_demand_by_hour = [0.0] * 24
+            sewer_eligible_demand_by_hour[12] = min(
+                sewer_eligible_total, demand_by_hour[12]
+            )
+        for hour, fraction in enumerate(fractions):
+            hourly_index = day_index * 24 + hour
+            primary_tank_beginning = water
+            booster_tank_beginning = booster_water
+            overflow_beginning_cumulative = cumulative_overflow
+            demand_hour = demand_by_hour[hour]
+            sewer_eligible_demand_hour = sewer_eligible_demand_by_hour[hour]
             pump_flow = 0.0
             filter_throughput = 0.0
             filter_loss = 0.0
@@ -829,13 +980,9 @@ def simulate_hourly_tank(
                 rainwater_supplied * sewer_eligible_demand_hour / demand_hour
                 if demand_hour > 0.0 else 0.0
             )
-            collected_hour = float(collection["CollectedGallons"].iloc[hourly_index])
-            gross_collected_hour = float(
-                collection["GrossCollectedGallons"].iloc[hourly_index]
-            )
-            first_flush_loss_hour = float(
-                collection["FirstFlushLossGallons"].iloc[hourly_index]
-            )
+            collected_hour = float(collected_values[hourly_index])
+            gross_collected_hour = float(gross_collected_values[hourly_index])
+            first_flush_loss_hour = float(first_flush_loss_values[hourly_index])
             water += collected_hour
             overflow = max(water - tank_size_gallons, 0.0)
             water = min(max(water, 0.0), tank_size_gallons)
@@ -848,16 +995,12 @@ def simulate_hourly_tank(
                 {
                     "Date": pd.Timestamp(date) + pd.Timedelta(hours=hour),
                     "SystemType": system.display_type,
-                    "Precipitation": float(
-                        hourly_rainfall["Precipitation"].iloc[hourly_index]
-                    ),
+                    "Precipitation": float(hourly_precipitation[hourly_index]),
                     "GrossCollectedGallons": gross_collected_hour,
                     "FirstFlushLossGallons": first_flush_loss_hour,
                     "CollectedGallons": collected_hour,
-                    "RainfallEventId": collection["RainfallEventId"].iloc[hourly_index],
-                    "RainfallEventStart": bool(
-                        collection["RainfallEventStart"].iloc[hourly_index]
-                    ),
+                    "RainfallEventId": event_id_values[hourly_index],
+                    "RainfallEventStart": bool(event_start_values[hourly_index]),
                     "DemandGallons": demand_hour,
                     "SewerEligibleDemandGallons": sewer_eligible_demand_hour,
                     "DemandMet": met,
@@ -886,6 +1029,143 @@ def simulate_hourly_tank(
     return pd.DataFrame(rows).assign(ReliabilityPercent=reliability)
 
 
+def _daily_curve_from_prepared(
+    config: ProjectConfig,
+    prepared: PreparedDailyInputs,
+    tank_sizes: list[float],
+    tank_parameters: TankParameters,
+    cancel_callback: Callable[[], bool] | None = None,
+) -> pd.DataFrame:
+    """Simulate every daily curve candidate together without timestep frames."""
+    capacities = np.asarray(tank_sizes, dtype=np.float64)
+    if np.any(capacities <= 0.0):
+        raise ValueError("Tank size must be greater than zero.")
+    candidate_count = capacities.size
+    system = compile_builder_system(
+        config.system_type, config.system_layout, config.system_connections
+    )
+    initial_fill = min(max(tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
+    minimum_fraction = min(
+        max(tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    )
+    minimum_volumes = capacities * minimum_fraction
+    water = capacities * initial_fill
+    reliable_days = np.zeros(candidate_count, dtype=np.int64)
+    supplied_total = np.zeros(candidate_count, dtype=np.float64)
+    sewer_supplied_total = np.zeros(candidate_count, dtype=np.float64)
+    unmet_total = np.zeros(candidate_count, dtype=np.float64)
+    makeup_total = np.zeros(candidate_count, dtype=np.float64)
+    system_unmet_total = np.zeros(candidate_count, dtype=np.float64)
+    overflow_total = np.zeros(candidate_count, dtype=np.float64)
+    treatment_loss_total = np.zeros(candidate_count, dtype=np.float64)
+    pump_total = np.zeros(candidate_count, dtype=np.float64)
+    recovery = min(
+        max(config.system_parameters.filter_recovery_percent / 100.0, 0.0), 1.0
+    )
+    transfer_capacity = max(
+        config.system_parameters.transfer_pump_capacity_gallons_per_hour, 0.0
+    ) * 24.0
+    distribution_capacity = max(
+        config.system_parameters.pump_capacity_gallons_per_hour, 0.0
+    ) * 24.0
+    collected = (
+        prepared.collected_gallons
+        if system.rain_reaches_primary
+        else np.zeros_like(prepared.collected_gallons)
+    )
+
+    for index, demand_value in enumerate(prepared.demand_gallons):
+        if cancel_callback is not None and index % 100 == 0 and cancel_callback():
+            raise AnalysisCancelledError("Analysis cancelled by user.")
+        demand_today = max(float(demand_value), 0.0)
+        sewer_demand_today = min(
+            max(float(prepared.sewer_eligible_demand_gallons[index]), 0.0),
+            demand_today,
+        )
+        available = np.maximum(water - minimum_volumes, 0.0)
+        supplied = np.zeros(candidate_count, dtype=np.float64)
+        withdrawn = np.zeros(candidate_count, dtype=np.float64)
+        if system.primary_reaches_end_uses:
+            if system.filtration_path:
+                requested = demand_today / recovery if recovery > 0.0 else 0.0
+                withdrawn = np.minimum(available, requested)
+                if transfer_capacity > 0.0:
+                    withdrawn = np.minimum(withdrawn, transfer_capacity)
+                supplied = np.minimum(withdrawn * recovery, demand_today)
+            else:
+                supplied = np.minimum(available, demand_today)
+                if system.distribution_pump_path and distribution_capacity > 0.0:
+                    supplied = np.minimum(supplied, distribution_capacity)
+                withdrawn = supplied
+        unmet = np.maximum(demand_today - supplied, 0.0)
+        makeup = (
+            unmet
+            if config.system_parameters.municipal_backup_enabled
+            and (system.municipal_reaches_end_uses or system.municipal_reaches_booster)
+            else np.zeros(candidate_count, dtype=np.float64)
+        )
+        system_unmet = np.maximum(unmet - makeup, 0.0)
+        treatment_loss = np.maximum(withdrawn - supplied, 0.0)
+        pump = (
+            withdrawn
+            if system.filtration_path
+            else supplied
+            if system.distribution_pump_path
+            else np.zeros(candidate_count, dtype=np.float64)
+        )
+        sewer_supplied = (
+            supplied * sewer_demand_today / demand_today
+            if demand_today > 0.0
+            else np.zeros(candidate_count, dtype=np.float64)
+        )
+        water = np.maximum(water - withdrawn, 0.0) + float(collected[index])
+        overflow = np.maximum(water - capacities, 0.0)
+        water = np.minimum(np.maximum(water, 0.0), capacities)
+
+        reliable_days += supplied >= demand_today
+        supplied_total += supplied
+        sewer_supplied_total += sewer_supplied
+        unmet_total += unmet
+        makeup_total += makeup
+        system_unmet_total += system_unmet
+        overflow_total += overflow
+        treatment_loss_total += treatment_loss
+        pump_total += pump
+
+    day_count = prepared.demand_gallons.size
+    year_count = prepared.year_count
+    first_flush_total = (
+        float(prepared.first_flush_loss_gallons.sum())
+        if system.rain_reaches_primary
+        else 0.0
+    )
+    return pd.DataFrame(
+        {
+            "TankSizeGallons": capacities,
+            "ReliabilityPercent": (
+                reliable_days / day_count * 100.0
+                if day_count
+                else np.zeros(candidate_count, dtype=np.float64)
+            ),
+            "TotalDemandGallons": float(prepared.demand_gallons.sum()),
+            "RainwaterSuppliedGallons": supplied_total,
+            "AverageAnnualRainwaterSuppliedGallons": supplied_total / year_count,
+            "SewerEligibleRainwaterSuppliedGallons": sewer_supplied_total,
+            "AverageAnnualSewerEligibleRainwaterSuppliedGallons": (
+                sewer_supplied_total / year_count
+            ),
+            "AverageAnnualPumpFlowGallons": pump_total / year_count,
+            "UnmetDemandGallons": unmet_total,
+            "MunicipalMakeupGallons": makeup_total,
+            "SystemUnmetDemandGallons": system_unmet_total,
+            "OverflowGallons": overflow_total,
+            "FirstFlushLossGallons": first_flush_total,
+            "TreatmentLossGallons": treatment_loss_total,
+            "FinalStorageGallons": water,
+        }
+    )
+
+
 def reliability_curve(
     config: ProjectConfig,
     rainfall_df: pd.DataFrame,
@@ -893,51 +1173,19 @@ def reliability_curve(
     tank_parameters: TankParameters | None = None,
     progress_callback: Callable[[int, int, float], None] | None = None,
     cancel_callback: Callable[[], bool] | None = None,
+    prepared_inputs: PreparedDailyInputs | None = None,
 ) -> pd.DataFrame:
-    rows: list[dict[str, float]] = []
     tank_sizes = list(tank_sizes_gallons)
+    prepared = prepared_inputs or prepare_daily_inputs(config, rainfall_df)
+    curve = _daily_curve_from_prepared(
+        config,
+        prepared,
+        tank_sizes,
+        tank_parameters or config.tank_parameters,
+        cancel_callback=cancel_callback,
+    )
     candidate_count = len(tank_sizes)
     for index, tank_size in enumerate(tank_sizes, start=1):
-        if cancel_callback is not None and cancel_callback():
-            raise AnalysisCancelledError("Analysis cancelled by user.")
-        result = simulate_tank(
-            config,
-            rainfall_df,
-            tank_size,
-            tank_parameters=tank_parameters,
-            cancel_callback=cancel_callback,
-        )
-        reliability = float(result["ReliabilityPercent"].iloc[0]) if not result.empty else 0.0
-        dates = pd.to_datetime(result.get("Date", pd.Series(dtype="datetime64[ns]")), errors="coerce")
-        year_count = max(int(dates.dropna().dt.year.nunique()), 1)
-
-        def column_total(column: str) -> float:
-            return float(pd.to_numeric(result.get(column, pd.Series(dtype=float)), errors="coerce").fillna(0.0).sum())
-
-        supplied = column_total("RainwaterSuppliedGallons")
-        sewer_eligible_supplied = column_total("SewerEligibleRainwaterSuppliedGallons")
-        rows.append({
-            "TankSizeGallons": float(tank_size),
-            "ReliabilityPercent": reliability,
-            "TotalDemandGallons": column_total("DemandGallons"),
-            "RainwaterSuppliedGallons": supplied,
-            "AverageAnnualRainwaterSuppliedGallons": supplied / year_count,
-            "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_supplied,
-            "AverageAnnualSewerEligibleRainwaterSuppliedGallons": (
-                sewer_eligible_supplied / year_count
-            ),
-            "AverageAnnualPumpFlowGallons": column_total("PumpFlowGallons") / year_count,
-            "UnmetDemandGallons": column_total("UnmetDemandGallons"),
-            "MunicipalMakeupGallons": column_total("MainsMakeupGallons"),
-            "SystemUnmetDemandGallons": column_total("SystemUnmetDemandGallons"),
-            "OverflowGallons": column_total("OverflowGallons"),
-            "FirstFlushLossGallons": column_total("FirstFlushLossGallons"),
-            "TreatmentLossGallons": column_total("FilterLossGallons"),
-            "FinalStorageGallons": (
-                float(result["WaterInTankGallons"].iloc[-1]) if not result.empty else 0.0
-            ),
-        })
         if progress_callback is not None:
             progress_callback(index, candidate_count, float(tank_size))
-
-    return pd.DataFrame(rows)
+    return curve

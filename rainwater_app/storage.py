@@ -16,6 +16,10 @@ import pandas as pd
 
 from .rainfall import HOURLY_PRECIPITATION_COLUMNS, has_hourly_rainfall
 from .equipment_catalog import migrate_legacy_catalog, normalized_constraints
+from .first_flush import (
+    normalize_first_flush_design_preset,
+    normalize_first_flush_sizing_method,
+)
 from .system_model import ensure_primary_overflow_paths
 from .models import (
     DemandObject,
@@ -39,7 +43,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 12
+PROJECT_SCHEMA_VERSION = 13
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -636,6 +640,12 @@ class SQLiteStore:
             acis_precipitation_field=payload.get("acis_precipitation_field", "TOTAL_PRECIPITATION"),
             canadian_precipitation_field=payload.get("canadian_precipitation_field", "TOTAL_PRECIPITATION"),
             surfaces=surfaces,
+            first_flush_sizing_method=normalize_first_flush_sizing_method(
+                payload.get("first_flush_sizing_method", "manual")
+            ),
+            first_flush_design_preset=normalize_first_flush_design_preset(
+                payload.get("first_flush_design_preset", "code_minimum")
+            ),
             first_flush_antecedent_dry_days=max(
                 float(payload.get("first_flush_antecedent_dry_days", 1.0)), 0.0
             ),

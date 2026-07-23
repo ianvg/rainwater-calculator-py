@@ -14,6 +14,18 @@ from .app_paths import user_cache_dir
 ACIS_STATION_META_URL = "https://data.rcc-acis.org/StnMeta"
 ACIS_STATION_DATA_URL = "https://data.rcc-acis.org/StnData"
 DEFAULT_CACHE_DIR = user_cache_dir() / "weather"
+ACIS_STATION_ID_TYPES = {
+    "1": "WBAN",
+    "2": "COOP",
+    "3": "FAA",
+    "4": "WMO",
+    "5": "ICAO",
+    "6": "GHCN",
+    "7": "NWSLI",
+    "8": "RCC",
+    "9": "ThreadEx",
+    "10": "CoCoRaHS",
+}
 
 
 def default_complete_calendar_range(years: int = 30, today: date | None = None) -> tuple[date, date]:
@@ -35,6 +47,7 @@ def fetch_station_options(state: str, start_date: date, end_date: date) -> list[
         "state": state,
         "sdate": start_date.isoformat(),
         "edate": end_date.isoformat(),
+        "elems": ["pcpn"],
         "meta": ["name", "sids", "state", "ll", "elev"],
     }
     response = _post_json(ACIS_STATION_META_URL, payload)
@@ -49,6 +62,7 @@ def fetch_station_options_bbox(
         "bbox": f"{west:.6f},{south:.6f},{east:.6f},{north:.6f}",
         "sdate": start_date.isoformat(),
         "edate": end_date.isoformat(),
+        "elems": ["pcpn"],
         "meta": ["name", "sids", "state", "ll", "elev"],
     }
     return _station_options_from_meta(_post_json(ACIS_STATION_META_URL, payload))
@@ -70,6 +84,7 @@ def fetch_station_by_id(station_id: str) -> dict[str, Any] | None:
 def _station_options_from_meta(response: dict[str, Any], default_state: str = "") -> list[dict[str, Any]]:
     stations: list[dict[str, Any]] = []
     for item in response.get("meta", []):
+        identifiers = _station_identifiers(item.get("sids", []))
         sid = _primary_station_id(item.get("sids", []))
         if not sid:
             continue
@@ -81,6 +96,7 @@ def _station_options_from_meta(response: dict[str, Any], default_state: str = ""
                 "longitude": _safe_coordinate(item, 0),
                 "latitude": _safe_coordinate(item, 1),
                 "elevation_ft": item.get("elev"),
+                "identifiers": identifiers,
                 "provider": "ACIS",
             }
         )
@@ -141,7 +157,15 @@ def fetch_daily_station_data(
             }
         )
 
-    data = pd.DataFrame(rows).dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
+    columns = [
+        "Date",
+        "MaxTemperature",
+        "MinTemperature",
+        "Precipitation",
+        "Snowfall",
+    ]
+    data = pd.DataFrame(rows, columns=columns)
+    data = data.dropna(subset=["Date"]).sort_values("Date").reset_index(drop=True)
     if data.empty:
         raise ValueError("ACIS returned no valid daily weather rows for this station and date range.")
 
@@ -164,6 +188,17 @@ def _primary_station_id(sids: list[str]) -> str:
         if value:
             return value
     return ""
+
+
+def _station_identifiers(sids: object) -> dict[str, list[str]]:
+    identifiers: dict[str, list[str]] = {}
+    for raw_sid in sids if isinstance(sids, list) else []:
+        parts = str(raw_sid).strip().rsplit(maxsplit=1)
+        value = parts[0].strip() if parts else ""
+        type_name = ACIS_STATION_ID_TYPES.get(parts[1], "Unknown") if len(parts) == 2 else "Unknown"
+        if value and value not in identifiers.setdefault(type_name, []):
+            identifiers[type_name].append(value)
+    return identifiers
 
 
 def _safe_coordinate(item: dict[str, Any], index: int) -> float | None:

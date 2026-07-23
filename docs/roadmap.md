@@ -139,6 +139,8 @@ Implementation requirements include:
 - [Implemented] Divert up to the configured depth on the first wet observation only; unused depth does not carry into a consecutive wet observation.
 - [Implemented per surface] Multiple surfaces have independent diverter allowances. A shared downstream diverter remains planned.
 - [Implemented] Keep first-flush loss separate from runoff coefficient, filter loss, tank overflow, and net collection in calculations and reports.
+- [Implemented] Preserve manual per-surface sizing and add an explicitly applied three-layer planning method: location baseline, design preset, and rainfall-history event definition.
+- [Future] Evaluate event-level carry-over for sub-daily rainfall. Under the current observation-based method, an unused diversion allowance on the first wet observation does not carry into later observations in the same event. Before changing this behavior, validate the physical-device theory and its effect against monitored storms and the cited first-flush models.
 - [Partially implemented] Report diverted volume by timestep and full analysis period, with event identifiers retained in results. Dedicated event and yearly summary tables remain planned.
 - [Implemented] Add tests for rainfall below the diversion threshold, multi-timestep storms, storms spanning midnight, dry-period reset, zero diversion, and persistence compatibility.
 

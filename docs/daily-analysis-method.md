@@ -176,15 +176,19 @@ reliability (%)
 
 ## Multiple tank sizes
 
-The reliability curve and comparison analysis repeat the complete procedure independently for every candidate capacity. Each tank receives the same rainfall, collection surfaces, demand record, initial-fill percentage, and minimum-operating-level percentage. Water does not flow between candidate tanks, and the end state from one candidate is never used to initialize another.
+The reliability curve prepares rainfall, collection, demand, and calendar inputs once, then advances all candidate capacities together through the same daily sequence. Each candidate remains hydraulically independent: water does not flow between candidates, and one candidate's end state never initializes another.
 
-Each reliability-curve row aggregates the candidate's detailed daily result rather than using a separate approximation. The saved candidate dataset retains total demand, rainwater supplied, rainwater shortfall, municipal makeup, system unmet demand, overflow, first-flush loss, treatment loss, final storage, and average annual rainwater supply. The annual value is the basis for candidate savings and payback calculations.
+The curve simulator accumulates the same totals directly without constructing a detailed timestep table for every candidate. Detailed daily rows are retained for the selected tank and explicit comparison tanks. The saved candidate dataset retains total demand, rainwater supplied, rainwater shortfall, municipal makeup, system unmet demand, overflow, first-flush loss, treatment loss, final storage, and average annual rainwater supply. The annual value is the basis for candidate savings and payback calculations.
 
 ## Daily versus hourly system behavior
 
 The daily analysis is a primary-tank storage balance governed by the saved system-builder topology. Collection reaches storage only through a connected rainwater-input-to-primary-tank path, and rainwater reaches demand only through a connected primary-tank-to-end-uses path. A direct pump on that path applies its hourly capacity over 24 hours. A transfer-pump and filtration-system path applies either unlimited flow or the combined capacity of the linked nominal 15, 20, 30, 40, or 50 GPM skids multiplied by their parallel quantity over 24 hours, plus the configured recovery; raw pumped water, including filter loss, is removed from primary storage. Beginning-of-hour booster controls and municipal-backup flow remain exclusive to the hourly simulation because they require subdaily state and flow ordering.
 
-Both resolutions use a conservative end-of-day rainfall convention. The daily analysis adds collected rainfall after the day's demand. The hourly analysis adds the daily rainfall total at hour 23 after that hour's demand. A future true subdaily rainfall workflow will use observed rainfall timestamps rather than this daily allocation assumption.
+The **Daily** analysis setting runs the sizing curve and detailed daily tank results only. It preserves saved hourly profiles but does not generate a full hourly result table. The **Hourly** setting runs the same daily sizing work and additionally generates timing-sensitive hourly results for the selected tank. These resolutions are displayed read-only in Analysis settings.
+
+For rainfall timing, the existing conservative convention is retained: the daily analysis adds collected rainfall after the day's demand, and the hourly simulation adds each daily rainfall total at hour 23 after that hour's demand unless a generated synthetic hourly rainfall profile is selected. A future true subdaily rainfall workflow will use observed rainfall timestamps rather than this daily allocation assumption.
+
+Demand timing can be **Hourly** or **Daily**. Hourly timing applies the saved demand profile hour by hour and generates full hourly selected-tank results. Daily timing uses daily demand totals and skips hourly simulation. Switching modes never rewrites or discards the hourly profile.
 
 ## Daily result columns
 

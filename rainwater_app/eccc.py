@@ -59,6 +59,10 @@ def fetch_canadian_station_by_id(station_id: str) -> dict[str, Any] | None:
             "state": str(properties.get("PROV_STATE_TERR_CODE") or "").strip(),
             "longitude": _coordinate(coordinates, 0),
             "latitude": _coordinate(coordinates, 1),
+            "station_type": str(properties.get("STATION_TYPE") or "").strip(),
+            "tc_identifier": str(properties.get("TC_IDENTIFIER") or "").strip(),
+            "wmo_identifier": str(properties.get("WMO_IDENTIFIER") or "").strip(),
+            "station_operator": str(properties.get("ENG_STN_OPERATOR_NAME") or "").strip(),
             "provider": "ECCC",
         }
     return None
@@ -87,6 +91,10 @@ def _station_options_from_features(
                 "latitude": _coordinate(coordinates, 1),
                 "first_date": first_date.isoformat(),
                 "last_date": last_date.isoformat(),
+                "station_type": str(properties.get("STATION_TYPE") or "").strip(),
+                "tc_identifier": str(properties.get("TC_IDENTIFIER") or "").strip(),
+                "wmo_identifier": str(properties.get("WMO_IDENTIFIER") or "").strip(),
+                "station_operator": str(properties.get("ENG_STN_OPERATOR_NAME") or "").strip(),
                 "provider": "ECCC",
             }
         )

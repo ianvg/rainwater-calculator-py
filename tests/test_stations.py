@@ -1,6 +1,28 @@
 import pytest
 
-from rainwater_app.stations import bounding_box, nearest_stations, station_distance_km
+from rainwater_app.stations import (
+    bounding_box,
+    filter_stations,
+    nearest_stations,
+    station_distance_km,
+)
+
+
+def test_station_filter_matches_any_semicolon_separated_name_or_id() -> None:
+    stations = [
+        {"name": "CITY AIRPORT", "sid": "AIR001"},
+        {"name": "COUNTY AP", "sid": "AP002"},
+        {"name": "DOWNTOWN", "sid": "CITY003"},
+    ]
+
+    assert filter_stations(stations, " AIRPORT; AP ") == stations[:2]
+    assert filter_stations(stations, "city003") == stations[2:]
+
+
+def test_station_filter_ignores_empty_terms_and_preserves_unfiltered_results() -> None:
+    stations = [{"name": "CITY AIRPORT", "sid": "AIR001"}]
+
+    assert filter_stations(stations, " ; ") is stations
 
 
 def test_station_distance_and_ranking_use_great_circle_distance() -> None:

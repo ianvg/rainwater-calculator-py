@@ -52,3 +52,20 @@ def test_analysis_service_honors_cancellation_without_ui_state() -> None:
 
     with pytest.raises(AnalysisCancelledError):
         AnalysisService().run(config, rainfall, cancel_callback=lambda: True)
+
+
+def test_analysis_service_skips_hourly_results_for_daily_analysis() -> None:
+    config = default_project_config("Daily demand timing")
+    config.demand.simple_daily_demand_gallons = 24.0
+    config.demand.hourly_schedule_enabled = False
+    config.graph_start_gal = 100
+    config.graph_end_gal = 200
+    config.graph_step_gal = 100
+    config.selected_tank_size_gal = 100.0
+    rainfall = pd.DataFrame(
+        {"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]}
+    )
+
+    outcome = AnalysisService().run(config, rainfall)
+
+    assert outcome.hourly_selected_tank.empty

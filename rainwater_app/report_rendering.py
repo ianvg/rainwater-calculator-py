@@ -9,6 +9,7 @@ import re
 
 import pandas as pd
 
+from .number_formatting import format_number
 from .reporting import (
     REPORT_SECTION_DEFINITIONS,
     ReportModel,
@@ -71,9 +72,9 @@ def render_latex(
     surface_rows = "\n".join(
         _latex_row(
             surface["name"],
-            f"{surface['area']:,.2f}",
-            f"{surface['runoff_coefficient']:.2f}",
-            f"{surface.get('first_flush_depth', 0.0):.3f}",
+            format_number(surface["area"]),
+            format_number(surface["runoff_coefficient"]),
+            format_number(surface.get("first_flush_depth", 0.0), max_decimal_places=3),
         )
         for surface in report["surfaces"]
     )
@@ -81,7 +82,7 @@ def render_latex(
         surface_rows = _latex_row("No collection surfaces", "0.00", "0.000", "0.000")
     rainfall_volumes = report.get("average_annual_rainfall_volumes", {})
     rainfall_volume_rows_latex = "\n".join(
-        _latex_row(label, f'{float(rainfall_volumes.get(key, 0.0)):,.0f} {volume}/year')
+        _latex_row(label, f'{format_number(float(rainfall_volumes.get(key, 0.0)), max_decimal_places=0)} {volume}/year')
         for label, key in (
             ("Total average rain", "total_average_rain"),
             ("Average first-flush diversion", "average_first_flush_diversion"),
@@ -91,19 +92,19 @@ def render_latex(
     demand_rows = "\n".join(
         _latex_row(
             report["monthly_demand"][index]["month"],
-            f"{report['monthly_demand'][index]['demand_per_day']:,.0f}",
-            f"{report['monthly_demand'][index]['demand_per_month']:,.0f}",
+            format_number(report['monthly_demand'][index]['demand_per_day'], max_decimal_places=0),
+            format_number(report['monthly_demand'][index]['demand_per_month'], max_decimal_places=0),
             report["monthly_demand"][index + 6]["month"],
-            f"{report['monthly_demand'][index + 6]['demand_per_day']:,.0f}",
-            f"{report['monthly_demand'][index + 6]['demand_per_month']:,.0f}",
+            format_number(report['monthly_demand'][index + 6]['demand_per_day'], max_decimal_places=0),
+            format_number(report['monthly_demand'][index + 6]['demand_per_month'], max_decimal_places=0),
         )
         for index in range(6)
     )
     recommendation_rows_latex = "\n".join(
         _latex_row(
             item.get("role", "Recommendation"),
-            f'{float(item.get("tank_size", 0.0)):,.0f} {item.get("volume_unit", volume)}',
-            f'{float(item.get("reliability_percent", 0.0)):.1f}%',
+            f'{format_number(float(item.get("tank_size", 0.0)), max_decimal_places=0)} {item.get("volume_unit", volume)}',
+            f'{format_number(float(item.get("reliability_percent", 0.0)), max_decimal_places=1)}%',
             item.get("detail", ""),
         )
         for item in report.get("recommendations", [])
@@ -114,8 +115,8 @@ def render_latex(
         )
     assumptions = report.get("recommendation_assumptions", {})
     recommendation_assumptions_latex = _latex_escape(
-        f'Reliability target: {float(assumptions.get("reliability_target_percent", 90.0)):.1f}%. '
-        f'Diminishing-return threshold: {float(assumptions.get("marginal_gain_threshold", 1.0)):.2f} '
+        f'Reliability target: {format_number(float(assumptions.get("reliability_target_percent", 90.0)), max_decimal_places=1)}%. '
+        f'Diminishing-return threshold: {format_number(float(assumptions.get("marginal_gain_threshold", 1.0)))} '
         "reliability percentage points per 1,000 gallons."
     )
     warnings_latex = "\n".join(
@@ -127,31 +128,31 @@ def render_latex(
         for label, value in (
             (
                 "Average annual precipitation",
-                f'{float(report["average_annual_precipitation"]):,.2f} {report["precipitation_unit"]}',
+                f'{format_number(float(report["average_annual_precipitation"]))} {report["precipitation_unit"]}',
             ),
             ("Precipitation basis", report["precipitation_basis"]),
-            ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {volume}'),
-            ("Selected reliability", f'{float(report.get("selected_reliability") or 0.0):.2f}%'),
-            ("Average annual rainwater supply", f'{float(executive.get("average_annual_supply", 0.0)):,.0f} {volume}/year'),
-            ("Average annual municipal makeup", f'{float(executive.get("average_annual_municipal_makeup", 0.0)):,.0f} {volume}/year'),
-            ("Average annual overflow", f'{float(executive.get("average_annual_overflow", 0.0)):,.0f} {volume}/year'),
-            ("Net annual savings", f'{report.get("financial_summary", {}).get("currency", "USD")} {float(executive.get("net_annual_savings", 0.0)):,.2f}/year'),
-            ("Simple payback", f'{float(executive["simple_payback_years"]):.1f} years' if executive.get("simple_payback_years") is not None else "Not achieved"),
+            ("Selected tank", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {volume}'),
+            ("Selected reliability", f'{format_number(float(report.get("selected_reliability") or 0.0))}%'),
+            ("Average annual rainwater supply", f'{format_number(float(executive.get("average_annual_supply", 0.0)), max_decimal_places=0)} {volume}/year'),
+            ("Average annual municipal makeup", f'{format_number(float(executive.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {volume}/year'),
+            ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {volume}/year'),
+            ("Net annual savings", f'{report.get("financial_summary", {}).get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
+            ("Simple payback", f'{format_number(float(executive["simple_payback_years"]), max_decimal_places=1)} years' if executive.get("simple_payback_years") is not None else "Not achieved"),
         )
     )
     candidate_rows_latex = "\n".join(
         _latex_row(
-            f'{float(row.get("tank_size", 0.0)):,.0f}',
-            f'{float(row.get("reliability", 0.0)):.1f}%',
-            "--" if row.get("RainwaterSuppliedGallons") is None else f'{float(row["RainwaterSuppliedGallons"]):,.0f}',
-            "--" if row.get("OverflowGallons") is None else f'{float(row["OverflowGallons"]):,.0f}',
-            "--" if row.get("SimplePaybackYears") is None else f'{float(row["SimplePaybackYears"]):.1f} years',
+            format_number(float(row.get("tank_size", 0.0)), max_decimal_places=0),
+            f'{format_number(float(row.get("reliability", 0.0)), max_decimal_places=1)}%',
+            "--" if row.get("RainwaterSuppliedGallons") is None else format_number(float(row["RainwaterSuppliedGallons"]), max_decimal_places=0),
+            "--" if row.get("OverflowGallons") is None else format_number(float(row["OverflowGallons"]), max_decimal_places=0),
+            "--" if row.get("SimplePaybackYears") is None else f'{format_number(float(row["SimplePaybackYears"]), max_decimal_places=1)} years',
         )
         for row in report.get("candidate_performance", [])
     ) or _latex_row("No candidate results", "--", "--", "--", "--")
     balance = report.get("water_balance", {})
     balance_rows_latex = "\n".join(
-        _latex_row(label, f'{float(balance.get(key, 0.0)):,.1f} {volume}')
+        _latex_row(label, f'{format_number(float(balance.get(key, 0.0)), max_decimal_places=1)} {volume}')
         for label, key in (
             ("Potential surface rainfall", "potential_surface_rainfall"),
             ("Gross runoff", "gross_runoff"),
@@ -168,9 +169,9 @@ def render_latex(
         _latex_row(
             row.get("name", ""),
             row.get("type", ""),
-            f'{float(row.get("annual_demand", 0.0)):,.0f}',
-            f'{float(row.get("annual_supply", 0.0)):,.0f}',
-            f'{float(row.get("demand_met_percent", 0.0)):.1f}%',
+            format_number(float(row.get("annual_demand", 0.0)), max_decimal_places=0),
+            format_number(float(row.get("annual_supply", 0.0)), max_decimal_places=0),
+            f'{format_number(float(row.get("demand_met_percent", 0.0)), max_decimal_places=1)}%',
         )
         for row in report.get("end_use_rows", [])
     ) or _latex_row("No demand objects", "--", "--", "--", "--")
@@ -179,15 +180,15 @@ def render_latex(
         _latex_row(label, value)
         for label, value in (
             ("Configured", "Yes" if financial.get("configured") else "No"),
-            ("Water tariff", f'{financial.get("currency", "USD")} {float(financial.get("water_rate", 0.0)):g} {financial.get("tariff_billing_unit", "")}'),
-            ("Sewer tariff", f'{financial.get("currency", "USD")} {float(financial.get("sewer_rate", 0.0)):g} {financial.get("tariff_billing_unit", "")}'),
-            ("Installed cost", f'{financial.get("currency", "USD")} {float(financial.get("installed_cost", 0.0)):,.2f}'),
-            ("Net annual savings", f'{financial.get("currency", "USD")} {float(financial.get("net_annual_savings", 0.0)):,.2f}'),
-            ("Simple payback", f'{float(financial["simple_payback_years"]):.1f} years' if financial.get("simple_payback_years") is not None else "Not achieved"),
-            ("Discount rate", f'{float(financial.get("discount_rate_percent", 0.0)):g}%'),
-            ("Lifecycle NPV", f'{financial.get("currency", "USD")} {float(financial.get("lifecycle_net_present_value", 0.0)):,.2f}'),
-            ("IRR", f'{float(financial["internal_rate_of_return_percent"]):.2f}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
-            ("Discounted payback", f'{float(financial["discounted_payback_years"]):.1f} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
+            ("Water tariff", f'{financial.get("currency", "USD")} {format_number(float(financial.get("water_rate", 0.0)), max_decimal_places=4)} {financial.get("tariff_billing_unit", "")}'),
+            ("Sewer tariff", f'{financial.get("currency", "USD")} {format_number(float(financial.get("sewer_rate", 0.0)), max_decimal_places=4)} {financial.get("tariff_billing_unit", "")}'),
+            ("Installed cost", f'{financial.get("currency", "USD")} {format_number(float(financial.get("installed_cost", 0.0)))}'),
+            ("Net annual savings", f'{financial.get("currency", "USD")} {format_number(float(financial.get("net_annual_savings", 0.0)))}'),
+            ("Simple payback", f'{format_number(float(financial["simple_payback_years"]), max_decimal_places=1)} years' if financial.get("simple_payback_years") is not None else "Not achieved"),
+            ("Discount rate", f'{format_number(float(financial.get("discount_rate_percent", 0.0)))}%'),
+            ("Lifecycle NPV", f'{financial.get("currency", "USD")} {format_number(float(financial.get("lifecycle_net_present_value", 0.0)))}'),
+            ("IRR", f'{format_number(float(financial["internal_rate_of_return_percent"]))}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
+            ("Discounted payback", f'{format_number(float(financial["discounted_payback_years"]), max_decimal_places=1)} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
             ("Methodology", financial.get("methodology", "")),
         )
     )
@@ -201,9 +202,9 @@ def render_latex(
         cash_flow_rows_latex.append(
             _latex_row(
                 year,
-                f'{financial.get("currency", "USD")} {nominal:,.2f}',
-                f'{financial.get("currency", "USD")} {discounted:,.2f}',
-                f'{financial.get("currency", "USD")} {cumulative_discounted:,.2f}',
+                f'{financial.get("currency", "USD")} {format_number(nominal)}',
+                f'{financial.get("currency", "USD")} {format_number(discounted)}',
+                f'{financial.get("currency", "USD")} {format_number(cumulative_discounted)}',
             )
         )
     financial_cash_flow_rows_latex = "\n".join(cash_flow_rows_latex) or _latex_row(
@@ -214,9 +215,9 @@ def render_latex(
     rainfall_quality_rows_latex = "\n".join(
         _latex_row(label, value)
         for label, value in (
-            ("Completeness score", f'{float(rainfall_quality.get("completeness_percent", 0.0)):.2f}% ({rainfall_quality.get("completeness_rating", "Not rated")})'),
-            ("Calendar-day coverage", f'{int(rainfall_quality.get("observed_days", 0)):,} observed of {int(rainfall_quality.get("expected_days", 0)):,} expected'),
-            ("Missing days", f'{int(rainfall_quality.get("missing_days", 0)):,}'),
+            ("Completeness score", f'{format_number(float(rainfall_quality.get("completeness_percent", 0.0)))}% ({rainfall_quality.get("completeness_rating", "Not rated")})'),
+            ("Calendar-day coverage", f'{format_number(int(rainfall_quality.get("observed_days", 0)), max_decimal_places=0)} observed of {format_number(int(rainfall_quality.get("expected_days", 0)), max_decimal_places=0)} expected'),
+            ("Missing days", format_number(int(rainfall_quality.get("missing_days", 0)), max_decimal_places=0)),
             ("Partial/incomplete years", ", ".join(str(value) for value in rainfall_quality.get("partial_years", [])) or "None"),
             ("Duplicate dates", f'{int(rainfall_quality.get("duplicate_dates", 0)):,}'),
             ("Invalid precipitation rows", f'{int(rainfall_quality.get("invalid_precipitation_rows", 0)):,}'),
@@ -231,8 +232,8 @@ def render_latex(
             row.get("year", ""),
             row.get("observed_days", 0),
             row.get("missing_days", 0),
-            f'{float(row.get("completeness_percent", 0.0)):.2f}%',
-            f'{float(row.get("precipitation", 0.0)):,.2f}',
+            f'{format_number(float(row.get("completeness_percent", 0.0)))}%',
+            format_number(float(row.get("precipitation", 0.0))),
             row.get("wet_days", 0),
             "Partial" if row.get("partial_year") else "Complete",
         )
@@ -246,7 +247,7 @@ def render_latex(
             row.get("end", ""),
             row.get("duration_days", 0),
             row.get("wet_days", 0),
-            f'{float(row.get("precipitation", 0.0)):,.3f}',
+            format_number(float(row.get("precipitation", 0.0)), max_decimal_places=3),
         )
         for row in event_summary.get("largest_events", [])
     ) or _latex_row("No wet-weather events", "--", "--", "--", "--", "--")
@@ -263,6 +264,8 @@ def render_latex(
             ("Rainfall timing metadata", provenance.get("rainfall_timing_metadata", "Not specified")),
             ("Rainfall retrieved/imported", provenance.get("rainfall_retrieved_at", "Not recorded")),
             ("Simulation timestep", provenance.get("simulation_timestep", "Daily mass balance")),
+            ("Rainfall timing", provenance.get("rainfall_timing_assumption", "Not specified")),
+            ("Demand timing", provenance.get("demand_timing_assumption", "Not specified")),
             ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
             ("Report schema", provenance.get("report_schema_version", report["schema_version"])),
             ("Analysis signature", provenance.get("analysis_input_signature", "Not stored")),
@@ -330,7 +333,7 @@ def render_latex(
         for index, row in enumerate(report["tank_level_distribution"])
     )
     distribution_labels = ",".join(
-        _latex_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
+        _latex_escape(f"{format_number(float(row['low']), max_decimal_places=0)}-{format_number(float(row['high']), max_decimal_places=0)}")
         for row in report["tank_level_distribution"]
     )
     multitank_latex = ""
@@ -566,7 +569,7 @@ Month & Demand ({_latex_escape(volume)}/day) & Demand ({_latex_escape(volume)}/m
 \midrule
 \addlinespace[1pt]
 \midrule
-\multicolumn{{5}}{{r}}{{\textbf{{Total Annual Demand}}}} & \textbf{{{_latex_escape(f"{float(report['total_annual_demand']):,.0f}")} {_latex_escape(volume)}}} \\
+\multicolumn{{5}}{{r}}{{\textbf{{Total Annual Demand}}}} & \textbf{{{_latex_escape(format_number(float(report['total_annual_demand']), max_decimal_places=0))} {_latex_escape(volume)}}} \\
 \bottomrule
 \end{{tabular}}
 \normalsize
@@ -735,7 +738,7 @@ def _build_system_visualization_html(report: dict[str, object]) -> str:
         return ""
     system_type = str(report.get("system_type", "Direct system"))
     size_label = html.escape(
-        f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}", quote=True
+        f"{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {report['volume_unit']}", quote=True
     )
     if system_type == "Indirect system":
         equipment = """
@@ -899,18 +902,18 @@ def render_html(
         for index, chart in enumerate(report.get("multitank_charts", []), start=1)
     ) if report.get("include_multitank_charts") else ""
     surface_rows = "".join(
-        f"<tr><td>{escape(surface['name'])}</td><td>{surface['area']:,.2f}</td>"
-        f"<td>{surface['runoff_coefficient']:.2f}</td>"
-        f"<td>{float(surface.get('first_flush_depth', 0.0)):.3f}</td></tr>"
+        f"<tr><td>{escape(surface['name'])}</td><td>{format_number(surface['area'])}</td>"
+        f"<td>{format_number(surface['runoff_coefficient'])}</td>"
+        f"<td>{format_number(float(surface.get('first_flush_depth', 0.0)), max_decimal_places=3)}</td></tr>"
         for surface in surfaces
     ) or '<tr><td>No collection surfaces</td><td>0.00</td><td>0.000</td><td>0.000</td></tr>'
     demand_rows = "".join(
         f"<tr><td>{escape(report['monthly_demand'][index]['month'])}</td>"
-        f"<td>{float(report['monthly_demand'][index]['demand_per_day']):,.0f}</td>"
-        f"<td>{float(report['monthly_demand'][index]['demand_per_month']):,.0f}</td>"
+        f"<td>{format_number(float(report['monthly_demand'][index]['demand_per_day']), max_decimal_places=0)}</td>"
+        f"<td>{format_number(float(report['monthly_demand'][index]['demand_per_month']), max_decimal_places=0)}</td>"
         f"<td>{escape(report['monthly_demand'][index + 6]['month'])}</td>"
-        f"<td>{float(report['monthly_demand'][index + 6]['demand_per_day']):,.0f}</td>"
-        f"<td>{float(report['monthly_demand'][index + 6]['demand_per_month']):,.0f}</td></tr>"
+        f"<td>{format_number(float(report['monthly_demand'][index + 6]['demand_per_day']), max_decimal_places=0)}</td>"
+        f"<td>{format_number(float(report['monthly_demand'][index + 6]['demand_per_month']), max_decimal_places=0)}</td></tr>"
         for index in range(6)
     )
 
@@ -937,8 +940,8 @@ def render_html(
     )
     circles = "".join(
         f'<circle cx="{chart_x(float(point["tank_size"])):.2f}" cy="{chart_y(float(point["reliability"])):.2f}" r="4">'
-        f'<title>{float(point["tank_size"]):,.0f} {escape(report["volume_unit"])}: '
-        f'{float(point["reliability"]):.2f}% reliability</title></circle>'
+        f'<title>{format_number(float(point["tank_size"]), max_decimal_places=0)} {escape(report["volume_unit"])}: '
+        f'{format_number(float(point["reliability"]))}% reliability</title></circle>'
         for point in curve
     )
     selected_marker = ""
@@ -947,8 +950,8 @@ def render_html(
         selected_y = chart_y(float(report["selected_reliability"]))
         selected_marker = (
             f'<circle class="selected-tank" cx="{selected_x:.2f}" cy="{selected_y:.2f}" r="10">'
-            f'<title>Selected tank: {float(report["selected_tank_size"]):,.0f} '
-            f'{escape(report["volume_unit"])} at {float(report["selected_reliability"]):.2f}% reliability</title>'
+            f'<title>Selected tank: {format_number(float(report["selected_tank_size"]), max_decimal_places=0)} '
+            f'{escape(report["volume_unit"])} at {format_number(float(report["selected_reliability"]))}% reliability</title>'
             "</circle>"
         )
     y_grid = "".join(
@@ -958,11 +961,11 @@ def render_html(
     )
     x_ticks = "".join(
         f'<line x1="{chart_x(value):.2f}" y1="{top}" x2="{chart_x(value):.2f}" y2="{top + plot_height}" />'
-        f'<text x="{chart_x(value):.2f}" y="{top + plot_height + 26}" text-anchor="middle">{value:,.0f}</text>'
+        f'<text x="{chart_x(value):.2f}" y="{top + plot_height + 26}" text-anchor="middle">{format_number(value, max_decimal_places=0)}</text>'
         for value in [x_min + (x_max - x_min) * index / 4 for index in range(5)]
     )
     selected = report["selected_reliability"]
-    selected_text = "--" if selected is None else f"{selected:.2f}%"
+    selected_text = "--" if selected is None else f"{format_number(selected)}%"
     author_html = ""
     if metadata.get("author_name", "").strip():
         author_html = f'<p class="author">Produced by {escape(metadata["author_name"])}</p>'
@@ -994,8 +997,8 @@ def render_html(
     summary_payback = summary.get("simple_payback_years")
     summary_financial = (
         f'{escape(report.get("financial_summary", {}).get("currency", "USD"))} '
-        f'{float(summary.get("net_annual_savings", 0.0)):,.2f}/year; '
-        + (f'{float(summary_payback):,.1f} years payback' if summary_payback is not None else 'payback not achieved')
+        f'{format_number(float(summary.get("net_annual_savings", 0.0)))}/year; '
+        + (f'{format_number(float(summary_payback), max_decimal_places=1)} years payback' if summary_payback is not None else 'payback not achieved')
         if summary.get("financial_configured") else "Financial assumptions not configured"
     )
     executive_cards = "".join(
@@ -1003,17 +1006,17 @@ def render_html(
         for label, value in (
             (
                 "Average annual precipitation",
-                f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+                f"{format_number(float(report['average_annual_precipitation']))} {report['precipitation_unit']}",
             ),
             ("Precipitation basis", report["precipitation_basis"]),
-            ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
+            ("Selected tank", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {report["volume_unit"]}'),
             ("Reliability", selected_text),
-            ("Average annual supply", f'{float(summary.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("Municipal makeup", f'{float(summary.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("System unmet demand", f'{float(summary.get("average_annual_system_unmet", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("Overflow", f'{float(summary.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("First-flush loss", f'{float(summary.get("average_annual_first_flush_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("Treatment loss", f'{float(summary.get("average_annual_treatment_loss", 0.0)):,.0f} {report["volume_unit"]}/year'),
+            ("Average annual supply", f'{format_number(float(summary.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Municipal makeup", f'{format_number(float(summary.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("System unmet demand", f'{format_number(float(summary.get("average_annual_system_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Overflow", f'{format_number(float(summary.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("First-flush loss", f'{format_number(float(summary.get("average_annual_first_flush_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Treatment loss", f'{format_number(float(summary.get("average_annual_treatment_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("Financial result", summary_financial),
         )
     )
@@ -1044,13 +1047,13 @@ def render_html(
             if value is None:
                 display, sort_value = "--", ""
             elif key == "reliability":
-                display, sort_value = f"{float(value):.1f}%", str(float(value))
+                display, sort_value = f"{format_number(float(value), max_decimal_places=1)}%", str(float(value))
             elif key in {"NetAnnualSavings", "LifecycleNPV"}:
-                display, sort_value = f"{currency} {float(value):,.2f}", str(float(value))
+                display, sort_value = f"{currency} {format_number(float(value))}", str(float(value))
             elif key == "SimplePaybackYears":
-                display, sort_value = f"{float(value):,.1f} years", str(float(value))
+                display, sort_value = f"{format_number(float(value), max_decimal_places=1)} years", str(float(value))
             else:
-                display, sort_value = f"{float(value):,.0f}", str(float(value))
+                display, sort_value = format_number(float(value), max_decimal_places=0), str(float(value))
             cells.append(f'<td data-value="{escape(sort_value)}">{escape(display)}</td>')
         selected_class = ' class="selected-row"' if candidate.get("selected") else ""
         candidate_rows += f'<tr{selected_class}>{"".join(cells)}</tr>'
@@ -1059,15 +1062,15 @@ def render_html(
     recommendation_rows = "".join(
         "<tr>"
         f'<td>{escape(item.get("role", "Recommendation"))}</td>'
-        f'<td>{float(item.get("tank_size", 0.0)):,.0f} {escape(item.get("volume_unit", report["volume_unit"]))}</td>'
-        f'<td>{float(item.get("reliability_percent", 0.0)):.1f}%</td>'
+        f'<td>{format_number(float(item.get("tank_size", 0.0)), max_decimal_places=0)} {escape(item.get("volume_unit", report["volume_unit"]))}</td>'
+        f'<td>{format_number(float(item.get("reliability_percent", 0.0)), max_decimal_places=1)}%</td>'
         f'<td>{escape(item.get("detail", ""))}</td></tr>'
         for item in report.get("recommendations", [])
     ) or '<tr><td colspan="4">No design recommendation could be calculated from the available candidates.</td></tr>'
     assumptions = report.get("recommendation_assumptions", {})
     recommendation_assumptions = (
-        f'Reliability target: {float(assumptions.get("reliability_target_percent", 90.0)):.1f}%. '
-        f'Diminishing-return threshold: {float(assumptions.get("marginal_gain_threshold", 1.0)):.2f} '
+        f'Reliability target: {format_number(float(assumptions.get("reliability_target_percent", 90.0)), max_decimal_places=1)}%. '
+        f'Diminishing-return threshold: {format_number(float(assumptions.get("marginal_gain_threshold", 1.0)))} '
         "reliability percentage points per 1,000 gallons."
     )
     warning_html = "".join(
@@ -1081,7 +1084,7 @@ def render_html(
 
     balance = report.get("water_balance", {})
     def balance_row(label: str, key: str) -> str:
-        return f'<tr><td>{escape(label)}</td><td>{float(balance.get(key, 0.0)):,.1f} {escape(report["volume_unit"])}</td></tr>'
+        return f'<tr><td>{escape(label)}</td><td>{format_number(float(balance.get(key, 0.0)), max_decimal_places=1)} {escape(report["volume_unit"])}</td></tr>'
     collection_balance_rows = "".join((
         balance_row("Potential rainfall volume on collection surfaces", "potential_surface_rainfall"),
         balance_row("Less runoff-coefficient loss", "runoff_coefficient_loss"),
@@ -1103,10 +1106,10 @@ def render_html(
     end_use_rows = "".join(
         "<tr>"
         f'<td>{escape(row["name"])}</td><td>{escape(row["type"])}</td><td>{escape(row["schedule"])}</td>'
-        f'<td>{escape(row["sewer_basis"])}</td><td>{float(row["annual_demand"]):,.0f}</td>'
-        f'<td>{float(row["annual_supply"]):,.0f}</td><td>{float(row["demand_met_percent"]):.1f}%</td>'
-        f'<td>{escape(currency)} {float(row["water_savings"]):,.2f}</td>'
-        f'<td>{escape(currency)} {float(row["sewer_savings"]):,.2f}</td></tr>'
+        f'<td>{escape(row["sewer_basis"])}</td><td>{format_number(float(row["annual_demand"]), max_decimal_places=0)}</td>'
+        f'<td>{format_number(float(row["annual_supply"]), max_decimal_places=0)}</td><td>{format_number(float(row["demand_met_percent"]), max_decimal_places=1)}%</td>'
+        f'<td>{escape(currency)} {format_number(float(row["water_savings"]))}</td>'
+        f'<td>{escape(currency)} {format_number(float(row["sewer_savings"]))}</td></tr>'
         for row in report.get("end_use_rows", [])
     ) or '<tr><td colspan="9">No demand objects were reported.</td></tr>'
 
@@ -1115,29 +1118,29 @@ def render_html(
     financial_rows = "".join(
         f'<tr><td>{escape(label)}</td><td>{escape(value)}</td></tr>'
         for label, value in (
-            ("Water tariff", f'{currency} {float(financial.get("water_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
-            ("Sewer tariff", f'{currency} {float(financial.get("sewer_rate", 0.0)):g} {financial.get("tariff_billing_unit", "") }'),
-            ("Legacy aggregate sewer eligibility", f'{float(financial.get("legacy_sewer_eligible_percent", 0.0)):g}%'),
-            ("Installed cost", f'{currency} {float(financial.get("installed_cost", 0.0)):,.2f}'),
-            ("Incentives", f'{currency} {float(financial.get("incentives", 0.0)):,.2f}'),
-            ("Annual maintenance", f'{currency} {float(financial.get("fixed_annual_maintenance", 0.0)):,.2f} + {float(financial.get("annual_maintenance_percent", 0.0)):g}% of installed cost'),
-            ("Average annual rainwater supplied", f'{float(financial.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("Average annual sewer-eligible supply", f'{float(financial.get("average_annual_sewer_eligible_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-            ("Municipal water savings", f'{currency} {float(financial.get("municipal_water_savings", 0.0)):,.2f}/year'),
-            ("Sewer savings", f'{currency} {float(financial.get("sewer_savings", 0.0)):,.2f}/year'),
-            ("Gross annual savings", f'{currency} {float(financial.get("gross_annual_savings", 0.0)):,.2f}/year'),
-            ("Annual maintenance cost", f'{currency} {float(financial.get("annual_maintenance_cost", 0.0)):,.2f}/year'),
-            ("Pump energy", f'{float(financial.get("average_annual_pump_energy_kwh", 0.0)):,.1f} kWh/year; {currency} {float(financial.get("annual_pump_energy_cost", 0.0)):,.2f}/year'),
-            ("Net annual savings", f'{currency} {float(financial.get("net_annual_savings", 0.0)):,.2f}/year'),
-            ("Net installed cost", f'{currency} {float(financial.get("net_installed_cost", 0.0)):,.2f}'),
-            ("Simple payback", f'{float(payback):,.1f} years' if payback is not None else "Not achieved"),
-            (f'{int(financial.get("analysis_period_years", 0))}-year net benefit', f'{currency} {float(financial.get("analysis_period_net_benefit", 0.0)):,.2f}'),
+            ("Water tariff", f'{currency} {format_number(float(financial.get("water_rate", 0.0)), max_decimal_places=4)} {financial.get("tariff_billing_unit", "") }'),
+            ("Sewer tariff", f'{currency} {format_number(float(financial.get("sewer_rate", 0.0)), max_decimal_places=4)} {financial.get("tariff_billing_unit", "") }'),
+            ("Legacy aggregate sewer eligibility", f'{format_number(float(financial.get("legacy_sewer_eligible_percent", 0.0)))}%'),
+            ("Installed cost", f'{currency} {format_number(float(financial.get("installed_cost", 0.0)))}'),
+            ("Incentives", f'{currency} {format_number(float(financial.get("incentives", 0.0)))}'),
+            ("Annual maintenance", f'{currency} {format_number(float(financial.get("fixed_annual_maintenance", 0.0)))} + {format_number(float(financial.get("annual_maintenance_percent", 0.0)))}% of installed cost'),
+            ("Average annual rainwater supplied", f'{format_number(float(financial.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Average annual sewer-eligible supply", f'{format_number(float(financial.get("average_annual_sewer_eligible_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Municipal water savings", f'{currency} {format_number(float(financial.get("municipal_water_savings", 0.0)))}/year'),
+            ("Sewer savings", f'{currency} {format_number(float(financial.get("sewer_savings", 0.0)))}/year'),
+            ("Gross annual savings", f'{currency} {format_number(float(financial.get("gross_annual_savings", 0.0)))}/year'),
+            ("Annual maintenance cost", f'{currency} {format_number(float(financial.get("annual_maintenance_cost", 0.0)))}/year'),
+            ("Pump energy", f'{format_number(float(financial.get("average_annual_pump_energy_kwh", 0.0)), max_decimal_places=1)} kWh/year; {currency} {format_number(float(financial.get("annual_pump_energy_cost", 0.0)))}/year'),
+            ("Net annual savings", f'{currency} {format_number(float(financial.get("net_annual_savings", 0.0)))}/year'),
+            ("Net installed cost", f'{currency} {format_number(float(financial.get("net_installed_cost", 0.0)))}'),
+            ("Simple payback", f'{format_number(float(payback), max_decimal_places=1)} years' if payback is not None else "Not achieved"),
+            (f'{int(financial.get("analysis_period_years", 0))}-year net benefit', f'{currency} {format_number(float(financial.get("analysis_period_net_benefit", 0.0)))}'),
             ("Utility / maintenance / electricity / replacement escalation", f'{float(financial.get("utility_rate_escalation_percent", 0.0)):g}% / {float(financial.get("maintenance_escalation_percent", 0.0)):g}% / {float(financial.get("electricity_escalation_percent", 0.0)):g}% / {float(financial.get("equipment_replacement_escalation_percent", 0.0)):g}%'),
             ("Discount rate", f'{float(financial.get("discount_rate_percent", 0.0)):g}%'),
-            ("Nominal replacement costs", f'{currency} {float(financial.get("total_replacement_cost", 0.0)):,.2f}'),
-            ("Lifecycle net present value", f'{currency} {float(financial.get("lifecycle_net_present_value", 0.0)):,.2f}'),
-            ("Internal rate of return", f'{float(financial["internal_rate_of_return_percent"]):.2f}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
-            ("Discounted payback", f'{float(financial["discounted_payback_years"]):.1f} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
+            ("Nominal replacement costs", f'{currency} {format_number(float(financial.get("total_replacement_cost", 0.0)))}'),
+            ("Lifecycle net present value", f'{currency} {format_number(float(financial.get("lifecycle_net_present_value", 0.0)))}'),
+            ("Internal rate of return", f'{format_number(float(financial["internal_rate_of_return_percent"]))}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
+            ("Discounted payback", f'{format_number(float(financial["discounted_payback_years"]), max_decimal_places=1)} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
         )
     )
     financial_notice = "" if financial.get("configured") else '<p class="notice">Financial inputs are not configured; zero-value outputs are shown for transparency.</p>'
@@ -1150,9 +1153,9 @@ def render_html(
         cumulative_discounted += discounted
         cash_flow_rows.append(
             "<tr>"
-            f"<td>{year}</td><td>{escape(currency)} {nominal:,.2f}</td>"
-            f"<td>{escape(currency)} {discounted:,.2f}</td>"
-            f"<td>{escape(currency)} {cumulative_discounted:,.2f}</td></tr>"
+            f"<td>{year}</td><td>{escape(currency)} {format_number(nominal)}</td>"
+            f"<td>{escape(currency)} {format_number(discounted)}</td>"
+            f"<td>{escape(currency)} {format_number(cumulative_discounted)}</td></tr>"
         )
     cash_flow_rows_html = "".join(cash_flow_rows) or (
         '<tr><td colspan="4">No lifecycle cash-flow schedule is available.</td></tr>'
@@ -1164,15 +1167,15 @@ def render_html(
         for label, value in (
             (
                 "Completeness score",
-                f'{float(rainfall_quality.get("completeness_percent", 0.0)):.2f}% '
+                f'{format_number(float(rainfall_quality.get("completeness_percent", 0.0)))}% '
                 f'({rainfall_quality.get("completeness_rating", "Not rated")})',
             ),
             (
                 "Calendar-day coverage",
-                f'{int(rainfall_quality.get("observed_days", 0)):,} observed of '
-                f'{int(rainfall_quality.get("expected_days", 0)):,} expected',
+                f'{format_number(int(rainfall_quality.get("observed_days", 0)), max_decimal_places=0)} observed of '
+                f'{format_number(int(rainfall_quality.get("expected_days", 0)), max_decimal_places=0)} expected',
             ),
-            ("Missing days", f'{int(rainfall_quality.get("missing_days", 0)):,}'),
+            ("Missing days", format_number(int(rainfall_quality.get("missing_days", 0)), max_decimal_places=0)),
             (
                 "Partial/incomplete years",
                 ", ".join(str(value) for value in rainfall_quality.get("partial_years", []))
@@ -1194,8 +1197,8 @@ def render_html(
         f'<tr><td>{int(row.get("year", 0))}</td>'
         f'<td>{int(row.get("observed_days", 0)):,}</td>'
         f'<td>{int(row.get("missing_days", 0)):,}</td>'
-        f'<td>{float(row.get("completeness_percent", 0.0)):.2f}%</td>'
-        f'<td>{float(row.get("precipitation", 0.0)):,.2f}</td>'
+        f'<td>{format_number(float(row.get("completeness_percent", 0.0)))}%</td>'
+        f'<td>{format_number(float(row.get("precipitation", 0.0)))}</td>'
         f'<td>{int(row.get("wet_days", 0)):,}</td>'
         f'<td>{"Partial" if row.get("partial_year") else "Complete"}</td></tr>'
         for row in report.get("yearly_rainfall_summary", [])
@@ -1206,7 +1209,7 @@ def render_html(
         f'<td>{escape(row.get("start", ""))}</td><td>{escape(row.get("end", ""))}</td>'
         f'<td>{int(row.get("duration_days", 0)):,}</td>'
         f'<td>{int(row.get("wet_days", 0)):,}</td>'
-        f'<td>{float(row.get("precipitation", 0.0)):,.3f}</td></tr>'
+        f'<td>{format_number(float(row.get("precipitation", 0.0)), max_decimal_places=3)}</td></tr>'
         for row in event_summary.get("largest_events", [])
     ) or '<tr><td colspan="6">No wet-weather events were identified.</td></tr>'
 
@@ -1224,6 +1227,7 @@ def render_html(
             ("Rainfall retrieved/imported", provenance.get("rainfall_retrieved_at", "Not recorded")),
             ("Simulation timestep", provenance.get("simulation_timestep", "Daily mass balance")),
             ("Rainfall timing", provenance.get("rainfall_timing_assumption", "Not specified")),
+            ("Demand timing", provenance.get("demand_timing_assumption", "Not specified")),
             ("System", f'{provenance.get("system_type", "Not specified")}; municipal backup {str(provenance.get("municipal_backup", "Not specified")).lower()}'),
             ("Initial tank fill", f'{float(provenance.get("initial_tank_fill_percent", 0.0)):g}%'),
             ("Filter recovery", f'{float(provenance.get("filter_recovery_percent", 100.0)):g}%'),
@@ -1264,8 +1268,8 @@ def render_html(
             unmet_height = yearly_plot_height - met_height
             tooltip = (
                 f"{int(row['year'])}: demand met {int(row['met_days'])} days "
-                f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
-                f"({float(row['unmet_percent']):.2f}%)"
+                f"({format_number(float(row['met_percent']))}%); demand not met {format_number(int(row['unmet_days']), max_decimal_places=0)} days "
+                f"({format_number(float(row['unmet_percent']))}%)"
             )
             yearly_bars += (
                 f'<rect class="year-met" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
@@ -1279,7 +1283,7 @@ def render_html(
             marker_y = yearly_baseline - met_height
             yearly_markers += (
                 f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
-                f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
+                f'data-tooltip="{int(row["year"])} tank reliability: {format_number(float(row["met_percent"]))}%"></circle>'
             )
             if index % yearly_label_step == 0 or index == len(yearly) - 1:
                 yearly_labels += (
@@ -1292,7 +1296,7 @@ def render_html(
         year_count = len(yearly)
         yearly_markers += (
             f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
-            f'data-tooltip="Average tank reliability over {year_count} years: {average_reliability:.2f}%"></circle>'
+            f'data-tooltip="Average tank reliability over {year_count} years: {format_number(average_reliability)}%"></circle>'
         )
         yearly_labels += (
             f'<text x="{average_x:.2f}" y="{yearly_baseline + 18:.2f}" text-anchor="middle">'
@@ -1320,7 +1324,7 @@ def render_html(
             bar_width = distribution_slot * 0.76
             bar_height = distribution_plot_height * int(row["count"]) / distribution_max
             bar_y = distribution_top + distribution_plot_height - bar_height
-            range_label = f"{float(row['low']):,.0f}-{float(row['high']):,.0f}"
+            range_label = f"{format_number(float(row['low']), max_decimal_places=0)}-{format_number(float(row['high']), max_decimal_places=0)}"
             distribution_bars += (
                 f'<rect class="distribution-bar" x="{bar_x:.2f}" y="{bar_y:.2f}" width="{bar_width:.2f}" '
                 f'height="{bar_height:.2f}"><title>{escape(range_label)} {escape(report["volume_unit"])}: '
@@ -1338,24 +1342,24 @@ def render_html(
         for index in range(5)
     )
     reliability_data_rows = "".join(
-        f'<tr><td>{float(point["tank_size"]):,.0f}</td>'
-        f'<td>{float(point["reliability"]):.2f}%</td></tr>'
+        f'<tr><td>{format_number(float(point["tank_size"]), max_decimal_places=0)}</td>'
+        f'<td>{format_number(float(point["reliability"]))}%</td></tr>'
         for point in curve
     )
     yearly_data_rows = "".join(
         f'<tr><td>{int(row["year"])}</td><td>{int(row["met_days"]):,}</td>'
-        f'<td>{float(row["met_percent"]):.2f}%</td><td>{int(row["unmet_days"]):,}</td>'
-        f'<td>{float(row["unmet_percent"]):.2f}%</td></tr>'
+        f'<td>{format_number(float(row["met_percent"]))}%</td><td>{format_number(int(row["unmet_days"]), max_decimal_places=0)}</td>'
+        f'<td>{format_number(float(row["unmet_percent"]))}%</td></tr>'
         for row in yearly
     )
     distribution_data_rows = "".join(
-        f'<tr><td>{float(row["low"]):,.0f}-{float(row["high"]):,.0f}</td>'
+        f'<tr><td>{format_number(float(row["low"]), max_decimal_places=0)}-{format_number(float(row["high"]), max_decimal_places=0)}</td>'
         f'<td>{int(row["count"]):,}</td></tr>'
         for row in distribution
     )
     rainfall_volumes = report.get("average_annual_rainfall_volumes", {})
     rainfall_volume_rows = "".join(
-        f'<tr><td>{escape(label)}</td><td>{float(rainfall_volumes.get(key, 0.0)):,.0f} '
+        f'<tr><td>{escape(label)}</td><td>{format_number(float(rainfall_volumes.get(key, 0.0)), max_decimal_places=0)} '
         f'{escape(report["volume_unit"])}/year</td></tr>'
         for label, key in (
             ("Total average rain", "total_average_rain"),
@@ -1405,25 +1409,25 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="design-recommendations"><h2>Design recommendations and review conditions</h2><p>{escape(recommendation_assumptions)}</p><p>These are decision aids based on the simulated candidates and stated assumptions, not a universal optimum.</p><div class="table-scroll"><table><thead><tr><th>Decision aid</th><th>Tank size</th><th>Reliability</th><th>Basis and tradeoff</th></tr></thead><tbody>{recommendation_rows}</tbody></table></div>{warnings_section}</section>
-<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))):g} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {int(report.get('first_flush_event_count', 0)):,}. Diverted volume: {float(report.get('first_flush_loss', 0.0)):,.1f} {escape(report['volume_unit'])}.</p></section>
+<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {format_number(float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))))} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {format_number(int(report.get('first_flush_event_count', 0)), max_decimal_places=0)}. Diverted volume: {format_number(float(report.get('first_flush_loss', 0.0)), max_decimal_places=1)} {escape(report['volume_unit'])}.</p></section>
 <section id="rainfall-volume-summary"><h2>Rainfall volume summary</h2><p>Average annual volumes are calculated from the simulated calendar-year totals. Total average rain is gross runoff after surface runoff coefficients and before first flush. Total usable average rain is net collected volume after first-flush diversion.</p><table><thead><tr><th>Average annual volume</th><th>Value</th></tr></thead><tbody>{rainfall_volume_rows}</tbody></table></section>
-<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{float(report.get('minimum_operating_level_percent', 0.0)):,.1f}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{float(report.get('minimum_operating_volume', 0.0)):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{format_number(float(report.get('minimum_operating_level_percent', 0.0)), max_decimal_places=1)}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{format_number(float(report.get('minimum_operating_volume', 0.0)), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
 {system_visualization_html}
-<section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{float(report['total_annual_demand']):,.0f} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{format_number(float(report['total_annual_demand']), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="end-use-performance"><h2>End-use demand and savings</h2><p>Rainwater supply is allocated proportionally among the demand objects active on each simulated day. Sewer savings follow each object's eligibility setting; migrated legacy objects use the legacy aggregate percentage.</p><div class="table-scroll"><table><thead><tr><th>End use</th><th>Type</th><th>Schedule</th><th>Sewer basis</th><th>Demand ({escape(report['volume_unit'])}/year)</th><th>Supply ({escape(report['volume_unit'])}/year)</th><th>Demand met</th><th>Water savings/year</th><th>Sewer savings/year</th></tr></thead><tbody>{end_use_rows}</tbody></table></div></section>
 <section id="financial-analysis"><h2>Financial assumptions and results</h2>{financial_notice}<p>{escape(financial.get('methodology', 'Discounted lifecycle cash-flow estimate.'))}</p><table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>{financial_rows}</tbody></table><h3>Annual lifecycle cash flow</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Nominal net cash flow</th><th>Discounted cash flow</th><th>Cumulative discounted cash flow</th></tr></thead><tbody>{cash_flow_rows_html}</tbody></table></div></section>
 <section id="rainfall-quality"><h2>Rainfall quality and completeness</h2><dl>{rainfall_quality_rows}</dl><h3>Missing periods</h3><p>Up to 20 missing periods are shown, including partial-year boundary periods.</p><table><thead><tr><th>Start</th><th>End</th><th>Days</th></tr></thead><tbody>{missing_period_rows}</tbody></table></section>
 <section id="yearly-rainfall"><h2>Yearly rainfall summary</h2><div class="table-scroll"><table><thead><tr><th>Year</th><th>Observed days</th><th>Missing days</th><th>Completeness</th><th>Precipitation ({escape(report['precipitation_unit'])})</th><th>Wet days</th><th>Status</th></tr></thead><tbody>{yearly_rainfall_rows}</tbody></table></div></section>
-<section id="rainfall-events"><h2>Rainfall-event summary</h2><p>{int(event_summary.get('event_count', 0)):,} event(s) were identified using an antecedent dry threshold of {float(event_summary.get('antecedent_dry_days', 1.0)):g} day(s). Average event precipitation: {float(event_summary.get('average_event_precipitation', 0.0)):,.3f} {escape(report['precipitation_unit'])}; largest event: {float(event_summary.get('largest_event_precipitation', 0.0)):,.3f} {escape(report['precipitation_unit'])}. The table lists up to the 10 largest events.</p><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Duration (days)</th><th>Wet days</th><th>Precipitation ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{rainfall_event_rows}</tbody></table></div></section>
+<section id="rainfall-events"><h2>Rainfall-event summary</h2><p>{format_number(int(event_summary.get('event_count', 0)), max_decimal_places=0)} event(s) were identified using an antecedent dry threshold of {format_number(float(event_summary.get('antecedent_dry_days', 1.0)))} day(s). Average event precipitation: {format_number(float(event_summary.get('average_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}; largest event: {format_number(float(event_summary.get('largest_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}. The table lists up to the 10 largest events.</p><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Duration (days)</th><th>Wet days</th><th>Precipitation ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{rainfall_event_rows}</tbody></table></div></section>
 <section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
 <g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
 <text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
 </svg></div><div class="chart-legend"><span><i class="swatch primary-tank"></i>Primary tank size</span></div><div class="table-scroll"><table class="chart-data"><caption>Reliability curve data</caption><thead><tr><th>Tank size ({escape(report['volume_unit'])})</th><th>Reliability</th></tr></thead><tbody>{reliability_data_rows}</tbody></table></div></section>
-<section id="yearly-demand-reliability"><h2>Yearly demand reliability - {float(report['selected_tank_size']):,.0f} {escape(report['volume_unit'])} tank</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
+<section id="yearly-demand-reliability"><h2>Yearly demand reliability - {format_number(float(report['selected_tank_size']), max_decimal_places=0)} {escape(report['volume_unit'])} tank</h2><div class="chart"><svg viewBox="0 0 {yearly_chart_width:.0f} {yearly_chart_height:.0f}" role="img" aria-label="Yearly percentage of days demand was met or not met">
 <g class="grid">{yearly_grid}{yearly_labels}</g>{yearly_bars}{yearly_markers}
 <text class="axis-label" x="{yearly_left + yearly_plot_width / 2:.2f}" y="{yearly_chart_height - 10:.2f}" text-anchor="middle">Year</text>
 <text class="axis-label" transform="translate(18 {yearly_top + yearly_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days (%)</text>
@@ -1600,7 +1604,7 @@ def _build_multitank_report_html(report: dict[str, object]) -> str:
 
         grid = "".join(
             f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
-            f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
+            f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" text-anchor="end">{format_number(y_max * (4 - tick) / 4, max_decimal_places=0)}</text>'
             for tick in range(5)
         )
         polylines = []
@@ -1627,7 +1631,7 @@ def _build_multitank_report_html(report: dict[str, object]) -> str:
                     f'{label}</span>'
                 )
             data_rows.extend(
-                f'<tr><td>{label}</td><td>{float(x):,.2f}</td><td>{float(y):,.2f}</td></tr>'
+                f'<tr><td>{label}</td><td>{format_number(float(x))}</td><td>{format_number(float(y))}</td></tr>'
                 for x, y in series["points"]
             )
         section_id = f"multitank-chart-{chart_index + 1}"
@@ -1670,8 +1674,8 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
         marker_y = baseline - met_height
         tooltip = (
             f"{int(row['year'])}: demand met {int(row['met_days'])} days "
-            f"({float(row['met_percent']):.2f}%); demand not met {int(row['unmet_days'])} days "
-            f"({float(row['unmet_percent']):.2f}%)"
+            f"({format_number(float(row['met_percent']))}%); demand not met {format_number(int(row['unmet_days']), max_decimal_places=0)} days "
+            f"({format_number(float(row['unmet_percent']))}%)"
         )
         bars.append(
             f'<rect class="year-met" x="{bar_x:.2f}" y="{marker_y:.2f}" width="{bar_width:.2f}" '
@@ -1681,7 +1685,7 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
         )
         markers.append(
             f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
-            f'data-tooltip="{int(row["year"])} tank reliability: {float(row["met_percent"]):.2f}%"></circle>'
+            f'data-tooltip="{int(row["year"])} tank reliability: {format_number(float(row["met_percent"]))}%"></circle>'
         )
         if index % label_step == 0 or index == len(yearly) - 1:
             labels.append(
@@ -1694,7 +1698,7 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
     average_y = baseline - plot_height * average / 100.0
     markers.append(
         f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
-        f'data-tooltip="Average tank reliability over {year_count_text}: {average:.2f}%"></circle>'
+        f'data-tooltip="Average tank reliability over {year_count_text}: {format_number(average)}%"></circle>'
     )
     labels.append(
         f'<text x="{average_x:.2f}" y="{baseline + 18:.2f}" text-anchor="middle">'
@@ -1710,8 +1714,8 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
     )
     data_rows = "".join(
         f'<tr><td>{int(row["year"])}</td><td>{int(row["met_days"]):,}</td>'
-        f'<td>{float(row["met_percent"]):.2f}%</td><td>{int(row["unmet_days"]):,}</td>'
-        f'<td>{float(row["unmet_percent"]):.2f}%</td></tr>'
+        f'<td>{format_number(float(row["met_percent"]))}%</td><td>{format_number(int(row["unmet_days"]), max_decimal_places=0)}</td>'
+        f'<td>{format_number(float(row["unmet_percent"]))}%</td></tr>'
         for row in yearly
     )
     return (
@@ -1776,7 +1780,7 @@ def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) 
         f'<line x1="{left}" y1="{top + plot_height * tick / 4:.2f}" '
         f'x2="{left + plot_width}" y2="{top + plot_height * tick / 4:.2f}" />'
         f'<text x="{left - 12}" y="{top + plot_height * tick / 4 + 4:.2f}" '
-        f'text-anchor="end">{y_max * (4 - tick) / 4:.0f}</text>'
+        f'text-anchor="end">{format_number(y_max * (4 - tick) / 4, max_decimal_places=0)}</text>'
         for tick in range(5)
     ) + "".join(
         f'<line x1="{sx(day):.2f}" y1="{top}" x2="{sx(day):.2f}" y2="{top + plot_height}" />'
@@ -1802,7 +1806,7 @@ def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) 
                     f'<circle class="tank-history-point" data-history-series="{series_index}" '
                     f'cx="{sx(float(day)):.2f}" cy="{sy(float(level)):.2f}" r="7" '
                     f'style="color:{color}" data-tooltip="{html.escape(str(series["label"]))}; '
-                    f'{year}, day {float(day):g}: {float(level):,.2f} '
+                    f'{year}, day {format_number(float(day), max_decimal_places=0)}: {format_number(float(level))} '
                     f'{html.escape(str(chart["y_label"]))}"></circle>'
                     for day, level in points
                 )
@@ -1827,7 +1831,7 @@ def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) 
             f'cx="{left + (date - first_month.start_time).total_seconds() / range_span * plot_width:.2f}" '
             f'cy="{sy(level):.2f}" r="7" style="color:{color}" '
             f'data-tooltip="{html.escape(str(series["label"]))}; {date:%Y-%m-%d}: '
-            f'{level:,.2f} {html.escape(str(chart["y_label"]))}"></circle>'
+            f'{format_number(level)} {html.escape(str(chart["y_label"]))}"></circle>'
             for date, level in points
         )
         range_series.append(
@@ -1843,7 +1847,7 @@ def _build_tank_history_report_html(chart: dict[str, object], chart_index: int) 
     )
     data_rows = "".join(
         f'<tr><td>{html.escape(str(series["label"]))}</td><td>{html.escape(str(date))}</td>'
-        f'<td>{float(level):,.2f}</td></tr>'
+        f'<td>{format_number(float(level))}</td></tr>'
         for series in series_list
         for date, level in series.get("dated_points", [])
     )

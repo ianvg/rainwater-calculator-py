@@ -18,6 +18,8 @@ When project latitude and longitude are available, select **Find Nearest 10** to
 
 The analysis uses daily precipitation records. Longer, representative periods generally provide a more meaningful reliability estimate than short records.
 
+Choose **Find Nearest 5 Airports** to restrict the geographic search to airport weather stations. In the United States, candidates must have an ACIS FAA or ICAO identifier and that identifier must match the official AviationWeather.gov airport-information service. Confirmed airport records are cached for 30 days and unmatched identifiers for one day, limiting repeated requests. In Canada, the search uses ECCC's authoritative `STATION_TYPE` aviation classification together with its Transport Canada and WMO metadata. Station names are not used to decide whether a station qualifies. The resulting five stations are ranked by distance and can be mapped, selected, and imported like other weather stations.
+
 ## Import from ACIS
 
 Set the project country to **USA - United States** to use ACIS importing.
@@ -72,6 +74,14 @@ Date,Precipitation
 ```
 
 Review the rainfall summary after importing. Confirm that the date range, row count, units, and source are reasonable before running an analysis.
+
+### Reopen or pin rainfall CSV files
+
+Use **Quick Access** beside **Load Rainfall CSV** to reopen any of the eight most recently loaded daily rainfall files. The attached menu opens when the pointer hovers over the button. Pin files that should remain available independently of the recent-file list; up to 1,000 CSV paths can be pinned. Large collections are divided into groups of 50 in the menu. Use **Manage pinned files** to load or remove selected entries, and **Remove missing entries** after files have been moved or deleted. Quick Access is an application preference and is available across projects.
+
+### Save the active daily rainfall
+
+After any precipitation source has been loaded—including a CSV, ACIS or ECCC import, or rainfall restored with a project—choose **Save Rainfall CSV** to export the active daily totals. The output contains reloadable `Date` and `Precipitation` columns. Values use the project's current precipitation unit: inches for English (I-P) projects or millimetres for Metric (SI) projects. Generated or observed hourly columns are intentionally omitted from this daily export.
 
 ## Quality and provenance
 

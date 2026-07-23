@@ -8,6 +8,7 @@ import pandas as pd
 
 from .financial_service import FinancialAnalysisService
 from .models import ProjectConfig
+from .number_formatting import format_number
 from .units import volume_to_display, volume_unit
 
 
@@ -107,14 +108,18 @@ class CandidateAnalysisService:
                     display.append("--")
                 elif column in volume_columns:
                     display.append(
-                        f"{volume_to_display(float(value), self.config):,.0f}"
+                        format_number(
+                            volume_to_display(float(value), self.config),
+                            self.config,
+                            max_decimal_places=0,
+                        )
                     )
                 elif column == "ReliabilityPercent":
-                    display.append(f"{float(value):.1f}")
+                    display.append(format_number(float(value), self.config))
                 elif column in {"NetAnnualSavings", "LifecycleNPV"}:
-                    display.append(f"{float(value):,.2f}")
+                    display.append(format_number(float(value), self.config))
                 elif column == "SimplePaybackYears":
-                    display.append(f"{float(value):.1f}")
+                    display.append(format_number(float(value), self.config))
                 else:
                     display.append(str(value))
             rows.append(display)

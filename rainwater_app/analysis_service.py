@@ -9,6 +9,7 @@ import pandas as pd
 
 from .engine import (
     AnalysisCancelledError,
+    prepare_daily_inputs,
     reliability_curve,
     simulate_hourly_tank,
     simulate_tank,
@@ -77,12 +78,14 @@ class AnalysisService:
         def curve_progress(index: int, total: int, tank_size: float) -> None:
             report(AnalysisProgressEvent("reliability_curve", index, total, tank_size))
 
+        prepared_daily = prepare_daily_inputs(config, rainfall_df)
         curve = reliability_curve(
             config,
             rainfall_df,
             tank_sizes,
             progress_callback=curve_progress,
             cancel_callback=cancelled,
+            prepared_inputs=prepared_daily,
         )
         if cancelled():
             raise AnalysisCancelledError("Analysis cancelled by user.")
@@ -92,6 +95,7 @@ class AnalysisService:
             rainfall_df,
             config.selected_tank_size_gal,
             cancel_callback=cancelled,
+            prepared_inputs=prepared_daily,
         )
         hourly = (
             simulate_hourly_tank(
@@ -125,6 +129,7 @@ class AnalysisService:
                     rainfall_df,
                     tank_size,
                     cancel_callback=cancelled,
+                    prepared_inputs=prepared_daily,
                 )
             )
         if cancelled():

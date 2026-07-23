@@ -31,6 +31,7 @@ def test_candidate_service_adds_financials_and_stably_sorts_missing_values() -> 
 def test_candidate_service_formats_units_and_export_columns() -> None:
     config = default_project_config("Metric candidates")
     config.unit_system = "Metric"
+    config.country_code = "CAN"
     service = CandidateAnalysisService(config)
     data = pd.DataFrame(
         {"TankSizeGallons": [1_000.0], "ReliabilityPercent": [90.0]}
@@ -39,5 +40,5 @@ def test_candidate_service_formats_units_and_export_columns() -> None:
     rows = service.display_rows(data, ("TankSizeGallons", "ReliabilityPercent"))
     exported = service.export_data(data)
 
-    assert rows == [["3,785", "90.0"]]
+    assert rows == [["3,785", "90"]]
     assert "TankSize (L)" in exported

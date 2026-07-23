@@ -7,6 +7,7 @@ from rainwater_app.engine import (
     AnalysisCancelledError,
     collection_balance_series,
     demand_series,
+    prepare_hourly_inputs,
     reliability_curve,
     simulate_hourly_tank,
     simulate_tank,
@@ -57,8 +58,35 @@ def test_hourly_schedule_values_are_relative_zero_to_one_multipliers() -> None:
     assert result["DemandGallons"].iloc[2:].sum() == pytest.approx(0.0)
 
 
+def test_daily_demand_timing_sums_preserved_hourly_profile_at_noon() -> None:
+    cfg = default_project_config()
+    cfg.demand.simple_daily_demand_gallons = 24.0
+    cfg.demand.hourly_schedule_enabled = False
+    original_profile = {
+        day: [1.0, 0.5] + [0.0] * 22
+        for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.demand.hourly_weekly_fractions = {
+        day: list(values) for day, values in original_profile.items()
+    }
+    rainfall = pd.DataFrame(
+        {"Date": [pd.Timestamp("2025-01-01")], "Precipitation": [0.0]}
+    )
+
+    result = simulate_hourly_tank(cfg, rainfall, 1_000.0)
+    prepared = prepare_hourly_inputs(cfg, rainfall)
+
+    assert result["DemandGallons"].sum() == pytest.approx(24.0)
+    assert result["DemandGallons"].iloc[12] == pytest.approx(24.0)
+    assert result["DemandGallons"].drop(result.index[12]).sum() == pytest.approx(0.0)
+    assert prepared.demand_gallons[12] == pytest.approx(24.0)
+    assert prepared.demand_gallons.sum() == pytest.approx(24.0)
+    assert cfg.demand.hourly_weekly_fractions == original_profile
+
+
 def test_hourly_result_start_date_warms_up_tank_state_without_returning_prior_days() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.demand.simple_daily_demand_gallons = 100.0
     cfg.demand.hourly_weekly_fractions = {
         day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions
@@ -258,6 +286,28 @@ def test_first_flush_is_separate_and_reconciles_to_gross_runoff() -> None:
         balance.loc[0, "FirstFlushLossGallons"] + balance.loc[0, "CollectedGallons"]
     )
     assert balance.loc[0, "FirstFlushLossGallons"] > 0.0
+
+
+def test_custom_system_without_first_flush_device_collects_gross_runoff() -> None:
+    cfg = default_project_config()
+    cfg.surfaces = [
+        Surface("Roof", area=1_000.0, runoff_coefficient=0.9, first_flush_depth_inches=0.1)
+    ]
+    cfg.system_layout = [
+        {"id": "rain", "component_type": "rainwater_input"},
+        {"id": "tank", "component_type": "primary_tank"},
+    ]
+    cfg.system_connections = [
+        {"source_component": "rain", "target_component": "tank"}
+    ]
+    rainfall = pd.DataFrame({"Date": ["2024-01-01"], "Precipitation": [0.5]})
+
+    balance = collection_balance_series(cfg, rainfall)
+
+    assert balance.loc[0, "FirstFlushLossGallons"] == pytest.approx(0.0)
+    assert balance.loc[0, "CollectedGallons"] == pytest.approx(
+        balance.loc[0, "GrossCollectedGallons"]
+    )
     assert balance.loc[0, "CollectedGallons"] > 0.0
 
 
@@ -432,6 +482,35 @@ def test_reliability_curve_candidate_metrics_reconcile_with_simulation() -> None
     )
 
 
+def test_lightweight_curve_reconciles_for_indirect_filtration_system() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.demand.simple_daily_demand_gallons = 100.0
+    cfg.system_parameters.filter_recovery_percent = 80.0
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.date_range("2025-01-01", periods=10, freq="D"),
+            "Precipitation": [0.0, 0.2] * 5,
+        }
+    )
+
+    candidate = reliability_curve(cfg, rainfall, [1_000.0]).iloc[0]
+    detailed = simulate_tank(cfg, rainfall, 1_000.0)
+
+    assert candidate["ReliabilityPercent"] == pytest.approx(
+        detailed["ReliabilityPercent"].iloc[0]
+    )
+    assert candidate["RainwaterSuppliedGallons"] == pytest.approx(
+        detailed["RainwaterSuppliedGallons"].sum()
+    )
+    assert candidate["TreatmentLossGallons"] == pytest.approx(
+        detailed["FilterLossGallons"].sum()
+    )
+    assert candidate["AverageAnnualPumpFlowGallons"] == pytest.approx(
+        detailed["PumpFlowGallons"].sum()
+    )
+
+
 def test_reliability_curve_reports_numeric_candidate_progress() -> None:
     cfg = default_project_config()
     rainfall = pd.DataFrame({
@@ -546,6 +625,7 @@ def test_recurring_demand_uses_occupancy_schedule_as_active_day_authority() -> N
 
 def test_hourly_recurring_demand_is_evenly_distributed_over_occupied_hours() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     schedule_name = "Office occupancy"
     cfg.demand.hourly_schedule_library[schedule_name] = {
         day: ([0.0] * 8 + [1.0] * 9 + [0.0] * 7 if day == "mon" else [0.0] * 24)
@@ -713,6 +793,7 @@ def test_demand_object_schedule_applies_only_in_selected_months() -> None:
 
 def test_hourly_demand_object_uses_its_own_project_schedule() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.demand.simple_daily_demand_gallons = 24.0
     cfg.demand.hourly_schedule_library = {
         "Morning": {day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions},
@@ -957,6 +1038,7 @@ def test_custom_builder_connections_govern_demand_delivery() -> None:
 
 def test_custom_direct_pump_block_applies_its_capacity() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.demand.simple_daily_demand_gallons = 24.0
     cfg.tank_parameters.initial_fill_percent = 100.0
     cfg.system_parameters.pump_capacity_gallons_per_hour = 0.5
@@ -991,6 +1073,7 @@ def test_indirect_hourly_results_report_filter_throughput() -> None:
 
 def test_direct_hourly_pump_capacity_limits_rainwater_delivery() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.demand.simple_daily_demand_gallons = 24.0
     cfg.tank_parameters.initial_fill_percent = 100.0
     cfg.system_parameters.pump_capacity_gallons_per_hour = 0.5
@@ -1037,6 +1120,7 @@ def test_booster_storage_and_disabled_mains_are_applied() -> None:
 
 def test_indirect_booster_refill_cycles_from_setpoint_until_full() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.system_type = "Indirect system"
     cfg.demand.simple_daily_demand_gallons = 60.0
     cfg.demand.hourly_weekly_fractions = {
@@ -1071,6 +1155,7 @@ def test_simulation_rejects_unsupported_filtration_system_flow() -> None:
 
 def test_parallel_filtration_system_capacities_are_additive() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.system_type = "Indirect system"
     cfg.demand.simple_daily_demand_gallons = 2_000.0
     cfg.demand.hourly_weekly_fractions = {
@@ -1091,6 +1176,7 @@ def test_parallel_filtration_system_capacities_are_additive() -> None:
 
 def test_infinite_filtration_flow_supplies_full_end_use_demand() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.system_type = "Indirect system"
     cfg.demand.simple_daily_demand_gallons = 2_000.0
     cfg.demand.hourly_weekly_fractions = {
@@ -1111,6 +1197,7 @@ def test_infinite_filtration_flow_supplies_full_end_use_demand() -> None:
 
 def test_indirect_municipal_makeup_refills_booster_when_primary_is_empty() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.system_type = "Indirect system"
     cfg.demand.simple_daily_demand_gallons = 10.0
     cfg.demand.hourly_weekly_fractions = {
@@ -1135,6 +1222,7 @@ def test_indirect_municipal_makeup_refills_booster_when_primary_is_empty() -> No
 
 def test_hourly_simulation_uses_active_schedule_from_library() -> None:
     cfg = default_project_config()
+    cfg.demand.hourly_schedule_enabled = True
     cfg.demand.simple_daily_demand_gallons = 24.0
     cfg.demand.hourly_schedule_library = {
         "Morning": {day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions},

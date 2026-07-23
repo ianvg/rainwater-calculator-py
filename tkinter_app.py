@@ -42,7 +42,15 @@ from rainwater_app.acis import (
     fetch_station_options_bbox,
 )
 from rainwater_app.analysis_state import ANALYSIS_ALGORITHM_VERSION, analysis_input_signature
-from rainwater_app.analysis_service import AnalysisProgressEvent, AnalysisService
+from rainwater_app.analysis_service import (
+    AnalysisOutcome,
+    AnalysisProgressEvent,
+    AnalysisService,
+)
+from rainwater_app.aviation import (
+    acis_aviation_identifiers,
+    verified_airport_weather_stations,
+)
 from rainwater_app.app_paths import (
     migrate_legacy_application_data,
     project_backup_dir,
@@ -99,6 +107,16 @@ from rainwater_app.example_projects import EXAMPLE_PROJECT_LABELS, build_complet
 from rainwater_app.financial import tariff_rate_per_gallon
 from rainwater_app.financial_service import FinancialAnalysisService
 from rainwater_app.candidate_service import CandidateAnalysisService
+from rainwater_app.first_flush import (
+    CODE_MINIMUM_PRESET,
+    DESIGN_PRESET_LABELS,
+    GUIDED_SIZING_METHOD,
+    MANUAL_SIZING_METHOD,
+    SIZING_METHOD_LABELS,
+    first_flush_guidance,
+    normalize_first_flush_design_preset,
+    normalize_first_flush_sizing_method,
+)
 from rainwater_app.geocoding import geocode_osm_address, reverse_geocode_osm
 from rainwater_app.map_tiles import TileLoadTask, shared_tile_loader
 from rainwater_app.models import (
@@ -129,6 +147,15 @@ from rainwater_app.models import (
     purge_unused_hourly_schedules,
     schedule_months_for,
     unused_hourly_schedule_names,
+)
+from rainwater_app.number_formatting import (
+    EUROPEAN_NUMBER_FORMAT,
+    NUMBER_FORMATS,
+    US_NUMBER_FORMAT,
+    format_number,
+    normalize_number_format,
+    parse_number,
+    set_active_number_format,
 )
 from rainwater_app.rainfall import (
     HOURLY_PRECIPITATION_COLUMNS,
@@ -178,7 +205,7 @@ from rainwater_app.system_model import (
     ensure_primary_overflow_paths,
     validate_builder_system,
 )
-from rainwater_app.stations import bounding_box, nearest_stations
+from rainwater_app.stations import bounding_box, filter_stations, nearest_stations
 from rainwater_app.ui_logic import (
     antecedent_dry_period_from_days as _antecedent_dry_period_from_days,
     antecedent_dry_period_to_days as _antecedent_dry_period_to_days,
@@ -221,6 +248,9 @@ RESULTS_MULTITANK_CHART_HEIGHT = 360
 RESULTS_HOURLY_CHART_HEIGHT = 480
 RESULTS_PLOT_STACK_BREAKPOINT = 900
 MAX_RECENT_PROJECTS = 8
+MAX_RECENT_RAINFALL_CSVS = 8
+MAX_PINNED_RAINFALL_CSVS = 1_000
+PINNED_RAINFALL_MENU_GROUP_SIZE = 50
 TEXT_SCALE_PERCENTAGES = (80, 90, 100, 110, 125, 150)
 DEFAULT_TEXT_SCALE_PERCENT = 100
 PROJECT_STATE_POLL_MS = 1_000
@@ -302,6 +332,7 @@ PROJECT_FORM_VARIABLES = (
     "graph_auto_step_count_var", "selected_tank_var",
     "recommendation_reliability_target_var", "recommendation_marginal_gain_var",
     "multitank_comparison_var", "initial_fill_var", "reserve_var",
+    "first_flush_sizing_method_var", "first_flush_design_preset_var",
     "first_flush_antecedent_unit_var", "first_flush_antecedent_var",
     "financial_currency_var", "financial_water_rate_var", "financial_sewer_rate_var",
     "financial_tariff_unit_var", "financial_sewer_eligible_var",
@@ -530,10 +561,7 @@ def _help_index_path() -> Path | None:
 
 
 def _float(value: object, default: float = 0.0) -> float:
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return default
+    return parse_number(value, default)
 
 
 class _QuietReportHandler(http.server.SimpleHTTPRequestHandler):
@@ -827,6 +855,7 @@ class _StationMapView(TkinterMapView):
         super().after_cancel(after_id)
 
     def destroy(self) -> None:
+        self.analysis_cancel_requested = True
         self.running = False
         self._tile_generation += 1
         for after_id in tuple(self._map_after_ids):
@@ -1012,6 +1041,18 @@ class RainwaterTkApp(tk.Tk):
         application_state_dir = self.application_data_dir
         self.app_preferences_path = application_state_dir / "app_preferences.json"
         self.app_preferences = self._load_app_preferences()
+        self.number_format_var = tk.StringVar(
+            value=set_active_number_format(
+                self.app_preferences.get("number_format", US_NUMBER_FORMAT)
+            )
+        )
+        self.recent_rainfall_csv_paths = self._preference_path_list(
+            "recent_rainfall_csv_paths", MAX_RECENT_RAINFALL_CSVS
+        )
+        self.pinned_rainfall_csv_paths = self._preference_path_list(
+            "pinned_rainfall_csv_paths", MAX_PINNED_RAINFALL_CSVS
+        )
+        self.current_rainfall_csv_path: str | None = None
         self.text_scale_var = tk.IntVar(
             value=_normalize_text_scale_percent(
                 self.app_preferences.get("text_scale_percent", DEFAULT_TEXT_SCALE_PERCENT)
@@ -1079,6 +1120,8 @@ class RainwaterTkApp(tk.Tk):
         self.station_map_rendered_zoom: int | None = None
         self.station_map_redraw_after_id: str | None = None
         self.station_map_selected_label = ""
+        self.station_map_embedded: _StationMapView | None = None
+        self.station_map_fullscreen_window: tk.Toplevel | None = None
         self.system_multi_select_var = tk.BooleanVar(value=False)
         self.system_geometry_status_var = tk.StringVar(value="Turn on multi-select, then choose two or more objects.")
         self.system_builder_selected_ids: set[str] = set()
@@ -1137,6 +1180,23 @@ class RainwaterTkApp(tk.Tk):
         self.initial_fill_var = tk.StringVar(value=str(self.config_model.tank_parameters.initial_fill_percent))
         self.reserve_var = tk.StringVar(
             value=str(self.config_model.tank_parameters.minimum_operating_volume_percent)
+        )
+        sizing_method = normalize_first_flush_sizing_method(
+            self.config_model.first_flush_sizing_method
+        )
+        design_preset = normalize_first_flush_design_preset(
+            self.config_model.first_flush_design_preset
+        )
+        self.first_flush_sizing_method_var = tk.StringVar(
+            value=SIZING_METHOD_LABELS[sizing_method]
+        )
+        self.first_flush_design_preset_var = tk.StringVar(
+            value=DESIGN_PRESET_LABELS[design_preset]
+        )
+        self.first_flush_guidance_summary_var = tk.StringVar()
+        self.country_var.trace_add("write", lambda *_args: self._refresh_first_flush_guidance())
+        self.state_or_province_var.trace_add(
+            "write", lambda *_args: self._refresh_first_flush_guidance()
         )
         self.first_flush_antecedent_unit_var = tk.StringVar(
             value=self.config_model.first_flush_antecedent_dry_unit
@@ -1267,6 +1327,13 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_progress_var = tk.DoubleVar(value=0.0)
         self.analysis_running = False
         self.analysis_cancel_requested = False
+        self.analysis_thread: threading.Thread | None = None
+        self.analysis_result_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.analysis_poll_after_id: str | None = None
+        self.analysis_active_label = "Analysis"
+        self.analysis_started_at = 0.0
+        self.analysis_started_signature: str | None = None
+        self.analysis_started_unit_system: str | None = None
         self.show_tank_points_var = tk.BooleanVar(value=True)
         initial_report_sections = normalize_report_sections(
             self.config_model.report_sections
@@ -1327,6 +1394,7 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_queue: queue.Queue = queue.Queue()
         self.station_lookup_poll_after_id: str | None = None
         self.station_lookup_in_progress = False
+        self.station_lookup_airport_only = False
         self.climate_normal_queue: queue.Queue = queue.Queue()
         self.climate_normal_poll_after_id: str | None = None
         self.climate_normal_lookup_in_progress = False
@@ -1468,8 +1536,8 @@ class RainwaterTkApp(tk.Tk):
         self.financial_tab = ttk.Frame(self.notebook, padding=10)
         self.notebook.add(self.inputs_tab, text="Project Inputs")
         self.notebook.add(self.import_tab, text="Rainwater Data")
-        self.notebook.add(self.schedules_tab, text="Schedules")
         self.notebook.add(self.collection_tab, text="Collection surfaces")
+        self.notebook.add(self.schedules_tab, text="Schedules")
         self.notebook.add(self.demand_tab, text="Demand parameters")
         self.notebook.add(self.system_parameters_tab, text="System parameters")
         self.notebook.add(self.analysis_tab, text="Analysis settings")
@@ -1585,6 +1653,20 @@ class RainwaterTkApp(tk.Tk):
         menubar.add_cascade(label="View", menu=view_menu)
 
         settings_menu = tk.Menu(menubar, tearoff=False)
+        number_format_menu = tk.Menu(settings_menu, tearoff=False)
+        number_format_labels = {
+            US_NUMBER_FORMAT: "1,000.00 (U.S.)",
+            EUROPEAN_NUMBER_FORMAT: "1.000,00 (France/Europe)",
+        }
+        for number_format in NUMBER_FORMATS:
+            number_format_menu.add_radiobutton(
+                label=number_format_labels[number_format],
+                value=number_format,
+                variable=self.number_format_var,
+                command=self._number_format_changed,
+            )
+        settings_menu.add_cascade(label="Number format", menu=number_format_menu)
+        settings_menu.add_separator()
         text_size_menu = tk.Menu(settings_menu, tearoff=False)
         for percentage in TEXT_SCALE_PERCENTAGES:
             text_size_menu.add_radiobutton(
@@ -1758,6 +1840,9 @@ class RainwaterTkApp(tk.Tk):
             "show_execution_log": bool(self.execution_log_visible_var.get()),
             "execution_log_detail": normalize_log_detail(self.execution_log_detail_var.get()),
             "text_scale_percent": _normalize_text_scale_percent(self.text_scale_var.get()),
+            "number_format": normalize_number_format(self.number_format_var.get()),
+            "recent_rainfall_csv_paths": self.recent_rainfall_csv_paths,
+            "pinned_rainfall_csv_paths": self.pinned_rainfall_csv_paths,
         })
         try:
             self.app_preferences_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1768,6 +1853,25 @@ class RainwaterTkApp(tk.Tk):
             self.execution_log.warning(
                 "Settings", "Could not save application preferences", details=str(exc)
             )
+
+    def _preference_path_list(self, key: str, limit: int) -> list[str]:
+        raw_paths = self.app_preferences.get(key, [])
+        if not isinstance(raw_paths, list):
+            return []
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in raw_paths:
+            if not isinstance(item, str) or not item.strip():
+                continue
+            path_text = str(Path(item).expanduser().resolve(strict=False))
+            identity = path_text.casefold()
+            if identity in seen:
+                continue
+            seen.add(identity)
+            paths.append(path_text)
+            if len(paths) >= limit:
+                break
+        return paths
 
     def _apply_tk_text_scale(self, percentage: int) -> None:
         self.tk.call(
@@ -1803,6 +1907,17 @@ class RainwaterTkApp(tk.Tk):
         self.update_idletasks()
         self._save_app_preferences()
         self.execution_log.info("Settings", f"Text size set to {percentage}%")
+
+    def _number_format_changed(self) -> None:
+        self._apply_form_to_model()
+        number_format = set_active_number_format(self.number_format_var.get())
+        self.number_format_var.set(number_format)
+        self._save_app_preferences()
+        self._populate_from_model()
+        if not self.results_df.empty:
+            self._populate_results()
+        self.status_var.set(f"Number format set to {number_format}")
+        self.execution_log.info("Settings", f"Number format set to {number_format}")
 
     def _save_recent_project_paths(self) -> None:
         try:
@@ -2670,6 +2785,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_pan_y = 0.0
         self.system_builder_pan_state: tuple[float, float, float, float] | None = None
         self.system_builder_zoom_var = tk.StringVar(value="100%")
+        self.system_builder_view_var = tk.StringVar(value="icon-graph")
         canvas_column = ttk.Frame(self.indirect_system_diagram_frame)
         canvas_column.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
         canvas_column.columnconfigure(0, weight=1)
@@ -2685,9 +2801,25 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(
             zoom_bar, text="Zoom in 10%", command=lambda: self._change_system_builder_zoom(0.1)
         ).grid(row=0, column=2, sticky="w")
+        view_switch = ttk.Frame(zoom_bar)
+        view_switch.grid(row=0, column=3, sticky="w", padx=(14, 0))
+        ttk.Radiobutton(
+            view_switch,
+            text="Block graph",
+            value="block-graph",
+            variable=self.system_builder_view_var,
+            command=self._system_builder_view_changed,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Radiobutton(
+            view_switch,
+            text="Icon graph",
+            value="icon-graph",
+            variable=self.system_builder_view_var,
+            command=self._system_builder_view_changed,
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(
             zoom_bar, text="Shift+wheel: zoom  |  Middle-drag: pan", foreground="#667278"
-        ).grid(row=0, column=3, sticky="w", padx=(12, 0))
+        ).grid(row=0, column=4, sticky="w", padx=(12, 0))
         self.system_builder_canvas = tk.Canvas(
             canvas_column,
             width=760,
@@ -2832,6 +2964,10 @@ class RainwaterTkApp(tk.Tk):
             "booster_refill_level": tk.StringVar(),
             "pump_capacity": tk.StringVar(),
             "municipal_backup_enabled": tk.BooleanVar(),
+            "first_flush_sizing_method": self.first_flush_sizing_method_var,
+            "first_flush_design_preset": self.first_flush_design_preset_var,
+            "first_flush_antecedent": self.first_flush_antecedent_var,
+            "first_flush_antecedent_unit": self.first_flush_antecedent_unit_var,
         }
         self.system_component_editor_loaded_id: str | None = None
         self.system_component_editor_baseline: dict[str, object] = {}
@@ -2923,6 +3059,100 @@ class RainwaterTkApp(tk.Tk):
             variable=editor_vars["municipal_backup_enabled"],
         ).grid(row=0, column=0, sticky="w")
         self.system_municipal_backup_editor.grid_remove()
+        first_flush_frame = ttk.Frame(self.system_component_parameters_editor)
+        first_flush_frame.grid(row=1, column=0, columnspan=2, sticky="ew")
+        first_flush_frame.columnconfigure(1, weight=1)
+        self.first_flush_surface_selection_var = tk.StringVar()
+        self.first_flush_surface_depth_var = tk.StringVar()
+        self.first_flush_surface_depth_unit_var = tk.StringVar(
+            value=precip_unit(self.config_model)
+        )
+        ttk.Label(first_flush_frame, text="Sizing method").grid(row=0, column=0, sticky="w", pady=2)
+        first_flush_sizing_method_combo = ttk.Combobox(
+            first_flush_frame,
+            textvariable=self.first_flush_sizing_method_var,
+            values=tuple(SIZING_METHOD_LABELS.values()),
+            state="readonly",
+        )
+        first_flush_sizing_method_combo.grid(
+            row=0, column=1, columnspan=2, sticky="ew", pady=2
+        )
+        first_flush_sizing_method_combo.bind(
+            "<<ComboboxSelected>>", self._first_flush_guidance_changed
+        )
+        ttk.Label(first_flush_frame, text="Design preset").grid(row=1, column=0, sticky="w", pady=2)
+        self.first_flush_design_preset_combo = ttk.Combobox(
+            first_flush_frame,
+            textvariable=self.first_flush_design_preset_var,
+            values=tuple(DESIGN_PRESET_LABELS.values()),
+            state="readonly",
+        )
+        self.first_flush_design_preset_combo.grid(row=1, column=1, columnspan=2, sticky="ew", pady=2)
+        self.first_flush_design_preset_combo.bind(
+            "<<ComboboxSelected>>", self._first_flush_guidance_changed
+        )
+        ttk.Label(first_flush_frame, text="Antecedent dry period").grid(
+            row=2, column=0, sticky="w", pady=2
+        )
+        ttk.Entry(first_flush_frame, textvariable=self.first_flush_antecedent_var, width=9).grid(
+            row=2, column=1, sticky="ew", pady=2
+        )
+        antecedent_combo = ttk.Combobox(
+            first_flush_frame,
+            textvariable=self.first_flush_antecedent_unit_var,
+            values=("days", "hours"),
+            state="readonly",
+            width=7,
+        )
+        antecedent_combo.grid(row=2, column=2, sticky="w", pady=2)
+        antecedent_combo.bind(
+            "<<ComboboxSelected>>", self._first_flush_antecedent_unit_changed
+        )
+        ttk.Label(first_flush_frame, text="Collection surface").grid(
+            row=3, column=0, sticky="w", pady=2
+        )
+        self.first_flush_surface_combo = ttk.Combobox(
+            first_flush_frame,
+            textvariable=self.first_flush_surface_selection_var,
+            state="readonly",
+        )
+        self.first_flush_surface_combo.grid(
+            row=3, column=1, columnspan=2, sticky="ew", pady=2
+        )
+        self.first_flush_surface_combo.bind(
+            "<<ComboboxSelected>>", self._first_flush_surface_changed
+        )
+        ttk.Label(first_flush_frame, text="Diversion depth").grid(
+            row=4, column=0, sticky="w", pady=2
+        )
+        ttk.Entry(
+            first_flush_frame, textvariable=self.first_flush_surface_depth_var, width=9
+        ).grid(row=4, column=1, sticky="ew", pady=2)
+        ttk.Label(first_flush_frame, textvariable=self.first_flush_surface_depth_unit_var).grid(
+            row=4, column=2, sticky="w", pady=2
+        )
+        ttk.Button(
+            first_flush_frame,
+            text="Apply surface depth",
+            command=self._apply_first_flush_surface_depth,
+        ).grid(row=5, column=0, columnspan=3, sticky="ew", pady=(4, 0))
+        ttk.Label(
+            first_flush_frame,
+            textvariable=self.first_flush_guidance_summary_var,
+            foreground="#667278",
+            wraplength=220,
+            justify="left",
+        ).grid(row=6, column=0, columnspan=3, sticky="ew", pady=(5, 0))
+        self.apply_first_flush_guidance_button = ttk.Button(
+            first_flush_frame,
+            text="Apply guided floor to surfaces",
+            command=self._apply_first_flush_guidance,
+        )
+        self.apply_first_flush_guidance_button.grid(
+            row=7, column=0, columnspan=3, sticky="ew", pady=(6, 0)
+        )
+        self.system_parameter_frames["first_flush_diversion"] = first_flush_frame
+        first_flush_frame.grid_remove()
         ttk.Label(
             self.system_component_parameters_editor,
             textvariable=self.system_component_validation_var,
@@ -3022,7 +3252,7 @@ class RainwaterTkApp(tk.Tk):
             "booster_pump": "Booster pump",
             "municipal_backup": "Municipal water backup",
             "end_uses": "End-uses",
-            "first_flush_diversion": "First-flush diversion",
+            "first_flush_diversion": "First-flush device",
             "overflow_pipe": "Overflow pipe",
         }
 
@@ -3071,6 +3301,10 @@ class RainwaterTkApp(tk.Tk):
             "graph_start_gal": cfg.graph_start_gal,
             "graph_end_gal": cfg.graph_end_gal,
             "graph_step_gal": cfg.graph_step_gal,
+            "first_flush_sizing_method": cfg.first_flush_sizing_method,
+            "first_flush_design_preset": cfg.first_flush_design_preset,
+            "first_flush_antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
+            "first_flush_antecedent_dry_unit": cfg.first_flush_antecedent_dry_unit,
         }
 
     def _create_media_control(
@@ -3768,11 +4002,16 @@ class RainwaterTkApp(tk.Tk):
         source_type: str, target_type: str, row: pd.Series
     ) -> bool:
         if source_type == "rainwater_input":
+            field = (
+                "GrossCollectedGallons"
+                if target_type == "first_flush_diversion"
+                else "CollectedGallons"
+            )
+            return float(row.get(field, 0.0)) > 1e-9
+        if source_type == "first_flush_diversion":
             return float(row.get("CollectedGallons", 0.0)) > 1e-9
         if source_type == "municipal_backup":
             return float(row.get("MainsMakeupGallons", 0.0)) > 1e-9
-        if target_type == "first_flush_diversion":
-            return float(row.get("FirstFlushLossGallons", 0.0)) > 1e-9
         if target_type == "overflow_pipe":
             return float(row.get("OverflowGallons", 0.0)) > 1e-9
         if source_type in {"primary_tank", "filtration_pump"}:
@@ -3992,9 +4231,9 @@ class RainwaterTkApp(tk.Tk):
         try:
             overrides = {
                 "model": self.candidate_override_vars["model"].get().strip(),
-                "capacity": float(self.candidate_override_vars["capacity"].get()),
-                "installed_cost": float(self.candidate_override_vars["installed_cost"].get()),
-                "properties": {"power_kw": float(self.candidate_override_vars["power_kw"].get() or 0)},
+                "capacity": parse_number(self.candidate_override_vars["capacity"].get()),
+                "installed_cost": parse_number(self.candidate_override_vars["installed_cost"].get()),
+                "properties": {"power_kw": parse_number(self.candidate_override_vars["power_kw"].get() or 0)},
             }
             if not overrides["model"] or overrides["capacity"] <= 0 or overrides["installed_cost"] < 0:
                 raise ValueError
@@ -4038,7 +4277,7 @@ class RainwaterTkApp(tk.Tk):
                 continue
             self.equipment_library_tree.insert("", "end", iid=str(item["id"]), values=(
                 item["category"], item["manufacturer"], item["model"], f"{float(item['capacity']):g}",
-                f"{float(item['installed_cost']):,.2f}",
+                format_number(float(item["installed_cost"]), self.config_model),
             ))
 
     def _load_library_editor(self) -> None:
@@ -4235,9 +4474,14 @@ class RainwaterTkApp(tk.Tk):
         """Return the volume crossing a builder connection during this hour."""
         if target_type == "overflow_pipe":
             return max(float(row.get("OverflowGallons", 0.0)), 0.0)
-        if target_type == "first_flush_diversion":
-            return max(float(row.get("FirstFlushLossGallons", 0.0)), 0.0)
         if source_type == "rainwater_input":
+            field = (
+                "GrossCollectedGallons"
+                if target_type == "first_flush_diversion"
+                else "CollectedGallons"
+            )
+            return max(float(row.get(field, 0.0)), 0.0)
+        if source_type == "first_flush_diversion":
             return max(float(row.get("CollectedGallons", 0.0)), 0.0)
         if source_type == "municipal_backup":
             return max(float(row.get("MainsMakeupGallons", 0.0)), 0.0)
@@ -4259,8 +4503,8 @@ class RainwaterTkApp(tk.Tk):
     ) -> str:
         flow = max(float(hourly_gallons), 0.0) / 60.0
         if is_metric(config):
-            return f"{flow * LITERS_PER_GALLON:,.1f} LPM"
-        return f"{flow:,.1f} GPM"
+            return f"{format_number(flow * LITERS_PER_GALLON, config, max_decimal_places=1)} LPM"
+        return f"{format_number(flow, config, max_decimal_places=1)} GPM"
 
     @staticmethod
     def _system_animation_rain_active(row: pd.Series) -> bool:
@@ -4452,8 +4696,8 @@ class RainwaterTkApp(tk.Tk):
         displayed_demand = volume_to_display(float(row.get("DemandGallons", 0.0)), self.config_model)
         self.system_animation_hour_var.set(
             f"Hour {hour:02d}:00-{hour:02d}:59  |  "
-            f"rain {displayed_rain:.1f} {volume_unit(self.config_model)}  |  "
-            f"demand {displayed_demand:.1f} {volume_unit(self.config_model)}"
+            f"rain {format_number(displayed_rain, self.config_model, max_decimal_places=1)} {volume_unit(self.config_model)}  |  "
+            f"demand {format_number(displayed_demand, self.config_model, max_decimal_places=1)} {volume_unit(self.config_model)}"
         )
         layout = self.config_model.system_layout
         if not layout:
@@ -4586,7 +4830,7 @@ class RainwaterTkApp(tk.Tk):
                     x, y,
                     text=(
                         "Cumulative overflow\n"
-                        f"{volume_to_display(overflow_total, self.config_model):,.1f} "
+                        f"{format_number(volume_to_display(overflow_total, self.config_model), self.config_model, max_decimal_places=1)} "
                         f"{volume_unit(self.config_model)}"
                     ),
                     fill="#a84300", font=("Segoe UI", 7, "bold"),
@@ -4670,6 +4914,24 @@ class RainwaterTkApp(tk.Tk):
             for field_name in ("graph_start_gal", "graph_end_gal", "graph_step_gal"):
                 if field_name in payload:
                     setattr(cfg, field_name, int(float(payload[field_name])))
+            cfg.first_flush_sizing_method = normalize_first_flush_sizing_method(
+                payload.get("first_flush_sizing_method", cfg.first_flush_sizing_method)
+            )
+            cfg.first_flush_design_preset = normalize_first_flush_design_preset(
+                payload.get("first_flush_design_preset", cfg.first_flush_design_preset)
+            )
+            cfg.first_flush_antecedent_dry_days = max(
+                float(payload.get(
+                    "first_flush_antecedent_dry_days",
+                    cfg.first_flush_antecedent_dry_days,
+                )),
+                0.0,
+            )
+            unit = str(payload.get(
+                "first_flush_antecedent_dry_unit",
+                cfg.first_flush_antecedent_dry_unit,
+            )).casefold()
+            cfg.first_flush_antecedent_dry_unit = unit if unit in {"days", "hours"} else "days"
         except (TypeError, ValueError) as exc:
             messagebox.showerror(APP_TITLE, str(exc), parent=self)
             return
@@ -4724,27 +4986,29 @@ class RainwaterTkApp(tk.Tk):
     def apply_system_template(self, system_type: str) -> None:
         if system_type == "Direct system":
             components = [
-                ("rainwater_input", "Rainwater input", 90, 135),
-                ("primary_tank", "Primary tank", 270, 135),
-                ("booster_pump", "Distribution pump", 460, 135),
-                ("end_uses", "End-uses", 650, 135),
+                ("rainwater_input", "Rainwater input", 65, 135),
+                ("first_flush_diversion", "First-flush device", 205, 135),
+                ("primary_tank", "Primary tank", 345, 135),
+                ("booster_pump", "Distribution pump", 500, 135),
+                ("end_uses", "End-uses", 665, 135),
                 ("municipal_backup", "Municipal water backup", 460, 260),
                 ("overflow_pipe", "Overflow pipe", 460, 40),
             ]
-            links = [(0, 1), (1, 2), (2, 3), (4, 3)]
+            links = [(0, 1), (1, 2), (2, 3), (3, 4), (5, 4)]
         elif system_type == "Indirect system":
             components = [
-                ("rainwater_input", "Rainwater input", 85, 100),
-                ("primary_tank", "Primary tank", 235, 100),
-                ("filtration_pump", "Transfer pump", 385, 100),
-                ("filtration_system", "Filtration system", 535, 100),
-                ("booster_tank", "Buffer tank", 685, 100),
+                ("rainwater_input", "Rainwater input", 65, 100),
+                ("first_flush_diversion", "First-flush device", 195, 100),
+                ("primary_tank", "Primary tank", 325, 100),
+                ("filtration_pump", "Transfer pump", 455, 100),
+                ("filtration_system", "Filtration system", 585, 100),
+                ("booster_tank", "Buffer tank", 715, 100),
                 ("municipal_backup", "Municipal water backup", 535, 235),
                 ("booster_pump", "Booster pump", 385, 320),
                 ("end_uses", "End-uses", 650, 320),
                 ("overflow_pipe", "Overflow pipe", 385, 20),
             ]
-            links = [(0, 1), (1, 2), (2, 3), (3, 4), (5, 4), (4, 6), (6, 7)]
+            links = [(0, 1), (1, 2), (2, 3), (3, 4), (4, 5), (6, 5), (5, 7), (7, 8)]
         else:
             return
         layout: list[dict[str, object]] = []
@@ -4760,6 +5024,13 @@ class RainwaterTkApp(tk.Tk):
                 item["demand_object_indices"] = list(
                     range(len(self.config_model.demand.demand_objects))
                 )
+            elif component_type == "first_flush_diversion":
+                item.update({
+                    "sizing_method": self.config_model.first_flush_sizing_method,
+                    "design_preset": self.config_model.first_flush_design_preset,
+                    "antecedent_dry_days": self.config_model.first_flush_antecedent_dry_days,
+                    "antecedent_dry_unit": self.config_model.first_flush_antecedent_dry_unit,
+                })
             layout.append(item)
         self.config_model.system_layout = layout
         self.config_model.system_connections = [
@@ -4813,6 +5084,13 @@ class RainwaterTkApp(tk.Tk):
             item["demand_object_indices"] = list(
                 range(len(self.config_model.demand.demand_objects))
             )
+        elif component_type == "first_flush_diversion":
+            item.update({
+                "sizing_method": self.config_model.first_flush_sizing_method,
+                "design_preset": self.config_model.first_flush_design_preset,
+                "antecedent_dry_days": self.config_model.first_flush_antecedent_dry_days,
+                "antecedent_dry_unit": self.config_model.first_flush_antecedent_dry_unit,
+            })
         self.config_model.system_layout.append(item)
         self.system_builder_selected_id = component_id
         self._render_system_builder()
@@ -5055,9 +5333,7 @@ class RainwaterTkApp(tk.Tk):
     @staticmethod
     def _system_component_ports(component_type: str) -> tuple[bool, bool]:
         has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
-        has_outlet = component_type not in {
-            "end_uses", "first_flush_diversion", "overflow_pipe"
-        }
+        has_outlet = component_type not in {"end_uses", "overflow_pipe"}
         return has_inlet, has_outlet
 
     @staticmethod
@@ -5681,6 +5957,10 @@ class RainwaterTkApp(tk.Tk):
             ),
             "booster_pump": ("pump_capacity",),
             "municipal_backup": ("municipal_backup_enabled",),
+            "first_flush_diversion": (
+                "first_flush_sizing_method", "first_flush_design_preset",
+                "first_flush_antecedent", "first_flush_antecedent_unit",
+            ),
         }.get(component_type, ())
 
     def _system_component_editor_snapshot(
@@ -5700,13 +5980,13 @@ class RainwaterTkApp(tk.Tk):
         values: dict[str, object] = {"name": str(item.get("name", ""))}
         if component_type == "primary_tank":
             values.update({
-                "selected_tank_size": f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}",
-                "initial_fill": f"{cfg.tank_parameters.initial_fill_percent:.0f}",
-                "reserve": f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}",
-                "graph_start": f"{volume_to_display(cfg.graph_start_gal, cfg):.0f}",
-                "graph_end": f"{volume_to_display(cfg.graph_end_gal, cfg):.0f}",
-                "graph_step": f"{volume_to_display(cfg.graph_step_gal, cfg):.0f}",
-                "graph_auto_step_count": str(cfg.graph_auto_step_count),
+                "selected_tank_size": format_number(volume_to_display(cfg.selected_tank_size_gal, cfg), cfg, max_decimal_places=0),
+                "initial_fill": format_number(cfg.tank_parameters.initial_fill_percent, cfg),
+                "reserve": format_number(cfg.tank_parameters.minimum_operating_volume_percent, cfg),
+                "graph_start": format_number(volume_to_display(cfg.graph_start_gal, cfg), cfg, max_decimal_places=0),
+                "graph_end": format_number(volume_to_display(cfg.graph_end_gal, cfg), cfg, max_decimal_places=0),
+                "graph_step": format_number(volume_to_display(cfg.graph_step_gal, cfg), cfg, max_decimal_places=0),
+                "graph_auto_step_count": format_number(cfg.graph_auto_step_count, cfg, max_decimal_places=0),
             })
         elif component_type == "filtration_pump":
             values["transfer_pump_type"] = cfg.system_parameters.transfer_pump_type
@@ -5725,21 +6005,46 @@ class RainwaterTkApp(tk.Tk):
             values["filtration_system_count"] = str(
                 cfg.system_parameters.filtration_system_count
             )
-            values["filter_recovery"] = f"{cfg.system_parameters.filter_recovery_percent:.2f}"
+            values["filter_recovery"] = format_number(cfg.system_parameters.filter_recovery_percent, cfg)
         elif component_type == "booster_tank":
             values.update({
-                "booster_tank_size": f"{volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg):.2f}",
-                "booster_initial_fill": f"{cfg.system_parameters.booster_initial_fill_percent:.2f}",
-                "booster_refill_level": f"{cfg.system_parameters.booster_refill_level_percent:.2f}",
+                "booster_tank_size": format_number(volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg), cfg),
+                "booster_initial_fill": format_number(cfg.system_parameters.booster_initial_fill_percent, cfg),
+                "booster_refill_level": format_number(cfg.system_parameters.booster_refill_level_percent, cfg),
             })
         elif component_type == "booster_pump":
             values["pump_capacity"] = (
-                f"{volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+                format_number(volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0, cfg)
             )
         elif component_type == "municipal_backup":
             values["municipal_backup_enabled"] = bool(
                 cfg.system_parameters.municipal_backup_enabled
             )
+        elif component_type == "first_flush_diversion":
+            sizing_method = normalize_first_flush_sizing_method(
+                item.get("sizing_method", cfg.first_flush_sizing_method)
+            )
+            design_preset = normalize_first_flush_design_preset(
+                item.get("design_preset", cfg.first_flush_design_preset)
+            )
+            antecedent_days = max(float(item.get(
+                "antecedent_dry_days", cfg.first_flush_antecedent_dry_days
+            )), 0.0)
+            antecedent_unit = str(item.get(
+                "antecedent_dry_unit", cfg.first_flush_antecedent_dry_unit
+            )).casefold()
+            if antecedent_unit not in {"days", "hours"}:
+                antecedent_unit = "days"
+            values.update({
+                "first_flush_sizing_method": SIZING_METHOD_LABELS[
+                    sizing_method
+                ],
+                "first_flush_design_preset": DESIGN_PRESET_LABELS[
+                    design_preset
+                ],
+                "first_flush_antecedent": f"{_antecedent_dry_period_from_days(antecedent_days, antecedent_unit):g}",
+                "first_flush_antecedent_unit": antecedent_unit,
+            })
         return values
 
     def _load_system_component_editor_values(
@@ -5858,6 +6163,9 @@ class RainwaterTkApp(tk.Tk):
         parameter_frame = self.system_parameter_frames.get(component_type_key)
         if parameter_frame is not None:
             parameter_frame.grid()
+            if component_type_key == "first_flush_diversion":
+                self._refresh_first_flush_guidance()
+                self._refresh_first_flush_surface_editor()
         elif component_type_key == "municipal_backup":
             self.system_municipal_backup_editor.grid()
         if component_type_key == "end_uses":
@@ -5866,6 +6174,62 @@ class RainwaterTkApp(tk.Tk):
         else:
             self.system_end_uses_editor.grid_remove()
         self._update_system_component_editor_state(restored=restored)
+
+    def _refresh_first_flush_surface_editor(self) -> None:
+        if not hasattr(self, "first_flush_surface_combo"):
+            return
+        names = [
+            f"{index + 1}. {surface.name}"
+            for index, surface in enumerate(self.config_model.surfaces)
+        ]
+        self._first_flush_surface_indices = {
+            label: index for index, label in enumerate(names)
+        }
+        self.first_flush_surface_combo.configure(values=names)
+        selected = self.first_flush_surface_selection_var.get()
+        if selected not in names:
+            selected = names[0] if names else ""
+            self.first_flush_surface_selection_var.set(selected)
+        self.first_flush_surface_depth_unit_var.set(precip_unit(self.config_model))
+        self._first_flush_surface_changed()
+
+    def _first_flush_surface_changed(self, _event: tk.Event | None = None) -> None:
+        selected = self.first_flush_surface_selection_var.get()
+        index = getattr(self, "_first_flush_surface_indices", {}).get(selected)
+        surface = (
+            self.config_model.surfaces[index]
+            if index is not None and 0 <= index < len(self.config_model.surfaces)
+            else None
+        )
+        self.first_flush_surface_depth_var.set(
+            "" if surface is None else format_number(
+                precip_to_display(surface.first_flush_depth_inches, self.config_model),
+                self.config_model,
+                max_decimal_places=3,
+            )
+        )
+
+    def _apply_first_flush_surface_depth(self) -> None:
+        selected = self.first_flush_surface_selection_var.get()
+        index = getattr(self, "_first_flush_surface_indices", {}).get(selected)
+        surface = (
+            self.config_model.surfaces[index]
+            if index is not None and 0 <= index < len(self.config_model.surfaces)
+            else None
+        )
+        if surface is None:
+            return
+        try:
+            displayed_depth = parse_number(self.first_flush_surface_depth_var.get())
+        except ValueError:
+            self.status_var.set("Enter a valid first-flush diversion depth")
+            return
+        surface.first_flush_depth_inches = max(
+            precip_to_internal(displayed_depth, self.config_model), 0.0
+        )
+        self._populate_surfaces()
+        self._refresh_project_dirty_state()
+        self.status_var.set(f"Updated first-flush depth for {surface.name}")
 
     def _refresh_end_uses_demand_editor(self, item: dict[str, object]) -> None:
         demand_objects = self.config_model.demand.demand_objects
@@ -5993,6 +6357,21 @@ class RainwaterTkApp(tk.Tk):
             enabled = bool(values["municipal_backup_enabled"])
             cfg.system_parameters.municipal_backup_enabled = enabled
             self.municipal_backup_enabled_var.set(enabled)
+        elif component_type == "first_flush_diversion":
+            cfg.first_flush_sizing_method = self._selected_first_flush_sizing_method()
+            cfg.first_flush_design_preset = self._selected_first_flush_design_preset()
+            unit = str(values["first_flush_antecedent_unit"]).casefold()
+            cfg.first_flush_antecedent_dry_unit = unit
+            cfg.first_flush_antecedent_dry_days = max(
+                _antecedent_dry_period_to_days(number("first_flush_antecedent"), unit),
+                0.0,
+            )
+            item.update({
+                "sizing_method": cfg.first_flush_sizing_method,
+                "design_preset": cfg.first_flush_design_preset,
+                "antecedent_dry_days": cfg.first_flush_antecedent_dry_days,
+                "antecedent_dry_unit": cfg.first_flush_antecedent_dry_unit,
+            })
 
         component_id = str(item.get("id", ""))
         self.system_component_editor_drafts.pop(component_id, None)
@@ -6001,9 +6380,23 @@ class RainwaterTkApp(tk.Tk):
         self.system_component_validation_var.set("")
         self._render_system_builder()
         component_label = self._system_component_templates().get(component_type, component_type)
-        self.system_component_edit_status_var.set(f"Object type: {component_label} — changes applied.")
+        self.system_component_edit_status_var.set(
+            f"Object type: {component_label} - changes applied."
+        )
         self.status_var.set(f"Applied changes to {item['name']}")
 
+    def _system_builder_view_changed(self) -> None:
+        view = self._normalized_system_builder_view(self.system_builder_view_var.get())
+        self.system_builder_view_var.set(view)
+        self._render_system_builder()
+        self.status_var.set(
+            "System builder view: " + ("icon graph" if view == "icon-graph" else "block graph")
+        )
+
+    @staticmethod
+    def _normalized_system_builder_view(value: object) -> str:
+        """Return a supported builder presentation without affecting project data."""
+        return "block-graph" if str(value) == "block-graph" else "icon-graph"
     def _apply_system_component_name_from_event(self, _event: tk.Event) -> str:
         self.apply_system_component_name()
         return "break"
@@ -6026,7 +6419,9 @@ class RainwaterTkApp(tk.Tk):
         step = max((end - start) / int(step_count_value), 1.0)
         self.system_component_graph_step_autosizing = True
         try:
-            self.system_component_parameter_vars["graph_step"].set(f"{step:.0f}")
+            self.system_component_parameter_vars["graph_step"].set(
+                format_number(step, max_decimal_places=0)
+            )
         finally:
             self.system_component_graph_step_autosizing = False
 
@@ -6086,6 +6481,99 @@ class RainwaterTkApp(tk.Tk):
             target_y,
         )
 
+    @staticmethod
+    def _draw_rounded_system_card(
+        canvas: tk.Canvas,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        *,
+        fill: str,
+        outline: str,
+        line_width: int,
+        tags: tuple[str, ...],
+    ) -> None:
+        radius = min(12.0, width / 5.0, height / 4.0)
+        left, top = x - width / 2.0, y - height / 2.0
+        right, bottom = x + width / 2.0, y + height / 2.0
+        canvas.create_polygon(
+            left + radius, top, right - radius, top, right, top + radius,
+            right, bottom - radius, right - radius, bottom, left + radius, bottom,
+            left, bottom - radius, left, top + radius,
+            smooth=True, splinesteps=12, fill=fill, outline=outline,
+            width=line_width, tags=tags,
+        )
+
+    @staticmethod
+    def _draw_system_component_icon(
+        canvas: tk.Canvas,
+        component_type: str,
+        x: float,
+        y: float,
+        *,
+        color: str,
+        tags: tuple[str, ...],
+    ) -> None:
+        """Draw compact canvas pictograms; tank geometry follows Tabler's MIT cylinder icon."""
+        line = {"fill": color, "width": 2, "tags": tags}
+        if component_type in {"primary_tank", "booster_tank"}:
+            half_width = 15.0 if component_type == "primary_tank" else 13.0
+            height = 24.0 if component_type == "primary_tank" else 21.0
+            top = y - height / 2.0
+            bottom = y + height / 2.0
+            water_fill = "#d8efff" if component_type == "primary_tank" else "#e3f4fb"
+            canvas.create_rectangle(
+                x - half_width, top + 4, x + half_width, bottom - 4,
+                fill=water_fill, outline="", tags=tags,
+            )
+            canvas.create_arc(
+                x - half_width, top, x + half_width, top + 8,
+                start=0, extent=359, style=tk.ARC, **line,
+            )
+            canvas.create_arc(
+                x - half_width, bottom - 8, x + half_width, bottom,
+                start=180, extent=180, style=tk.ARC, **line,
+            )
+            canvas.create_line(x - half_width, top + 4, x - half_width, bottom - 4, **line)
+            canvas.create_line(x + half_width, top + 4, x + half_width, bottom - 4, **line)
+            canvas.create_line(x - half_width + 2, y + 3, x + half_width - 2, y + 3,
+                               fill="#4aa3d8", width=2, tags=tags)
+        elif component_type in {"filtration_pump", "booster_pump"}:
+            canvas.create_oval(x - 13, y - 13, x + 13, y + 13, outline=color, width=2, tags=tags)
+            canvas.create_polygon(
+                x - 5, y - 8, x + 10, y, x - 5, y + 8,
+                fill="#dcecff", outline=color, width=2, tags=tags,
+            )
+        elif component_type == "rainwater_input":
+            canvas.create_arc(x - 17, y - 9, x + 2, y + 8, start=20, extent=210, style=tk.ARC, **line)
+            canvas.create_arc(x - 3, y - 12, x + 17, y + 8, start=-20, extent=220, style=tk.ARC, **line)
+            for offset in (-10, 0, 10):
+                canvas.create_line(x + offset, y + 7, x + offset - 3, y + 13, **line)
+        elif component_type == "filtration_system":
+            canvas.create_rectangle(x - 16, y - 12, x + 16, y + 12, outline=color, width=2, tags=tags)
+            for offset in (-8, 0, 8):
+                canvas.create_line(x + offset, y - 8, x + offset, y + 8, **line)
+        elif component_type == "municipal_backup":
+            canvas.create_rectangle(x - 15, y - 10, x + 15, y + 12, outline=color, width=2, tags=tags)
+            canvas.create_polygon(x - 18, y - 10, x, y - 18, x + 18, y - 10,
+                                  fill="#e7edf2", outline=color, width=2, tags=tags)
+            canvas.create_line(x, y - 8, x, y + 9, **line)
+        elif component_type == "end_uses":
+            canvas.create_line(x - 15, y - 7, x + 7, y - 7, x + 7, y + 1, **line)
+            canvas.create_line(x - 8, y - 12, x - 8, y - 2, **line)
+            canvas.create_arc(x + 2, y - 2, x + 13, y + 9, start=0, extent=180, style=tk.ARC, **line)
+            canvas.create_oval(x + 6, y + 8, x + 10, y + 13, fill="#4aa3d8", outline="", tags=tags)
+        elif component_type == "first_flush_diversion":
+            canvas.create_polygon(x - 16, y - 12, x + 16, y - 12, x + 5, y,
+                                  x + 5, y + 12, x - 5, y + 12, x - 5, y,
+                                  fill="#edf6fb", outline=color, width=2, tags=tags)
+        elif component_type == "overflow_pipe":
+            canvas.create_line(x - 16, y - 10, x + 4, y - 10, x + 4, y + 10, x + 16, y + 10,
+                               smooth=True, **line)
+        else:
+            canvas.create_oval(x - 11, y - 11, x + 11, y + 11, outline=color, width=2, tags=tags)
+
     def _render_system_builder(self) -> None:
         if not hasattr(self, "system_builder_canvas"):
             return
@@ -6094,6 +6582,9 @@ class RainwaterTkApp(tk.Tk):
         canvas.delete("all")
         self.system_builder_hover_port = None
         layout_by_id = {str(item.get("id")): item for item in self.config_model.system_layout}
+        view_mode = self._normalized_system_builder_view(
+            self.system_builder_view_var.get() if hasattr(self, "system_builder_view_var") else None
+        )
         for index, connection in enumerate(self.config_model.system_connections):
             source = layout_by_id.get(connection.get("source_component", ""))
             target = layout_by_id.get(connection.get("target_component", ""))
@@ -6151,14 +6642,31 @@ class RainwaterTkApp(tk.Tk):
             fill = "#e8f1fb" if selected or geometry_selected else "#f7f9fa"
             tag = f"component:{component_id}"
             half_width, half_height = object_width / 2.0, object_height / 2.0
-            canvas.create_rectangle(
-                x - half_width, y - half_height, x + half_width, y + half_height,
-                fill=fill, outline=outline, width=3 if selected or geometry_selected else 2, tags=(tag,)
-            )
-            canvas.create_text(
-                x, y, text=label, width=max(object_width - 12.0, 68.0),
-                justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,)
-            )
+            if view_mode == "icon-graph":
+                self._draw_rounded_system_card(
+                    canvas, x, y, object_width, object_height,
+                    fill=fill, outline=outline,
+                    line_width=3 if selected or geometry_selected else 2,
+                    tags=(tag,),
+                )
+                self._draw_system_component_icon(
+                    canvas, component_type, x, y - 8,
+                    color=outline, tags=(tag,),
+                )
+                canvas.create_text(
+                    x, y + 19, text=label, width=max(object_width - 10.0, 70.0),
+                    justify="center", font=("Segoe UI", 8, "bold"), tags=(tag,)
+                )
+            else:
+                canvas.create_rectangle(
+                    x - half_width, y - half_height, x + half_width, y + half_height,
+                    fill=fill, outline=outline,
+                    width=3 if selected or geometry_selected else 2, tags=(tag,)
+                )
+                canvas.create_text(
+                    x, y, text=label, width=max(object_width - 12.0, 68.0),
+                    justify="center", font=("Segoe UI", 9, "bold"), tags=(tag,)
+                )
             has_inlet, has_outlet = self._system_component_ports(component_type)
             if has_inlet:
                 extra_inlet = component_type == "booster_tank" and bool(item.get("extra_input_node"))
@@ -6361,13 +6869,13 @@ class RainwaterTkApp(tk.Tk):
         canvas.create_rectangle(40, 30, 260, 190, outline="black", width=4)
         canvas.create_text(150, 57, text="Primary tank", font=("Segoe UI", 13, "bold"))
         try:
-            primary_size = float(self.selected_tank_var.get().replace(",", ""))
+            primary_size = parse_number(self.selected_tank_var.get())
         except (ValueError, AttributeError):
             primary_size = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
         canvas.create_text(
             150,
             80,
-            text=f"Primary analysis size: {primary_size:,.0f} {volume_unit(self.config_model)}",
+            text=f"Primary analysis size: {format_number(primary_size, self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)}",
             font=("Segoe UI", 9),
         )
         canvas.create_line(*self._regular_wave_points(42, 258, 110, 8, 7), fill="black", width=4, smooth=True)
@@ -6579,11 +7087,32 @@ class RainwaterTkApp(tk.Tk):
         csv_frame.grid(row=0, column=0, sticky="ew")
         csv_frame.columnconfigure(0, weight=1)
         ttk.Label(csv_frame, textvariable=self.rainfall_summary_var).grid(row=0, column=0, sticky="w")
-        ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        ttk.Button(csv_frame, text="Load Rainfall CSV", command=self.load_rainfall_csv).grid(
+            row=0, column=1, sticky="e", padx=(12, 0)
+        )
+        self.rainfall_quick_access_button = ttk.Menubutton(
+            csv_frame, text="Quick Access \N{BLACK DOWN-POINTING SMALL TRIANGLE}"
+        )
+        self.rainfall_quick_access_button.grid(row=0, column=2, sticky="e", padx=(6, 0))
+        self.rainfall_quick_access_menu = tk.Menu(
+            self.rainfall_quick_access_button, tearoff=False
+        )
+        self.rainfall_quick_access_button.configure(menu=self.rainfall_quick_access_menu)
+        self.rainfall_quick_access_button.bind(
+            "<Enter>", self._open_rainfall_quick_access_on_hover, add="+"
+        )
+        self.save_rainfall_csv_button = ttk.Button(
+            csv_frame,
+            text="Save Rainfall CSV...",
+            command=self.save_rainfall_csv,
+            state="disabled",
+        )
+        self.save_rainfall_csv_button.grid(row=0, column=3, sticky="e", padx=(6, 0))
+        self._refresh_rainfall_quick_access_menu()
         provenance_frame = ttk.LabelFrame(
             csv_frame, text="Quality and provenance", padding=8
         )
-        provenance_frame.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        provenance_frame.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(10, 0))
         provenance_frame.columnconfigure(1, weight=1)
         ttk.Label(
             provenance_frame,
@@ -6664,7 +7193,12 @@ class RainwaterTkApp(tk.Tk):
         self.state_combo.grid(row=1, column=1, sticky="ew", pady=2)
         self.state_combo.bind("<KeyPress>", self._select_state_by_first_letter)
         self._labeled_entry(self.weather_frame, 2, "Historical years", self.weather_years_var)
-        self._labeled_entry(self.weather_frame, 3, "Station filter", self.weather_filter_var)
+        self._labeled_entry(
+            self.weather_frame,
+            3,
+            "Station filter(s), separated by ;",
+            self.weather_filter_var,
+        )
         self.canadian_precip_label = ttk.Label(self.weather_frame, text="Precipitation basis")
         self.canadian_precip_label.grid(row=4, column=0, sticky="w", pady=2)
         self.canadian_precip_combo = ttk.Combobox(
@@ -6686,6 +7220,14 @@ class RainwaterTkApp(tk.Tk):
             command=self.find_nearest_weather_stations,
         )
         self.find_nearest_stations_button.grid(row=0, column=1, sticky="w", padx=(6, 0))
+        self.find_nearest_airport_stations_button = ttk.Button(
+            station_search_buttons,
+            text="Find Nearest 5 Airports",
+            command=self.find_nearest_airport_weather_stations,
+        )
+        self.find_nearest_airport_stations_button.grid(
+            row=0, column=2, sticky="w", padx=(6, 0)
+        )
         self.station_combo = ttk.Combobox(self.weather_frame, textvariable=self.station_var, state="readonly")
         self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
         self.station_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
@@ -6701,18 +7243,33 @@ class RainwaterTkApp(tk.Tk):
         station_map_frame = ttk.LabelFrame(import_content, text="Weather stations", padding=6)
         station_map_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         station_map_frame.columnconfigure(0, weight=1)
-        self.station_map = _StationMapView(station_map_frame, width=800, height=440, corner_radius=0)
+        station_map_frame.rowconfigure(1, weight=1)
+        map_toolbar = ttk.Frame(station_map_frame)
+        map_toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        map_toolbar.columnconfigure(0, weight=1)
+        ttk.Label(
+            map_toolbar,
+            text="Select a station marker or expand the map for a larger view.",
+            foreground="#5f6b70",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            map_toolbar,
+            text="Full screen",
+            command=self._open_station_map_fullscreen,
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
+        self.station_map = _StationMapView(station_map_frame, width=800, height=560, corner_radius=0)
+        self.station_map_embedded = self.station_map
         self.station_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
         self.station_map.set_position(39.5, -98.35)
         self.station_map.set_zoom(3)
-        self.station_map.grid(row=0, column=0, sticky="nsew")
+        self.station_map.grid(row=1, column=0, sticky="nsew")
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
             self.station_map.canvas.bind(sequence, self._station_map_view_changed, add="+")
         ttk.Label(
             station_map_frame,
             text="Map data © OpenStreetMap contributors",
             foreground="#5f6b70",
-        ).grid(row=1, column=0, sticky="e", pady=(4, 0))
+        ).grid(row=2, column=0, sticky="e", pady=(4, 0))
 
     def _build_multi_site_comparison_tab(self) -> None:
         tab = self.multi_site_rainwater_tab
@@ -6977,18 +7534,16 @@ class RainwaterTkApp(tk.Tk):
         surfaces_frame.columnconfigure(0, weight=1)
         self.surface_tree = ttk.Treeview(
             surfaces_frame,
-            columns=("surface", "area", "runoff", "first_flush"),
+            columns=("surface", "area", "runoff"),
             show="headings",
             height=18,
         )
         self.surface_tree.heading("surface", text="Surface")
         self.surface_tree.heading("area", text="Area")
         self.surface_tree.heading("runoff", text="Runoff coeff.")
-        self.surface_tree.heading("first_flush", text=f"First flush ({precip_unit(self.config_model)})")
         self.surface_tree.column("surface", width=420)
         self.surface_tree.column("area", width=160, anchor="e")
         self.surface_tree.column("runoff", width=140, anchor="e")
-        self.surface_tree.column("first_flush", width=140, anchor="e")
         self.surface_tree.grid(row=0, column=0, sticky="nsew")
         surface_scroll_y = ttk.Scrollbar(surfaces_frame, orient="vertical", command=self.surface_tree.yview)
         surface_scroll_y.grid(row=0, column=1, sticky="ns")
@@ -7001,30 +7556,95 @@ class RainwaterTkApp(tk.Tk):
             row=0, column=0, padx=(0, 6)
         )
         ttk.Button(surface_buttons, text="Edit selected surface", command=self.edit_surface).grid(row=0, column=1)
-        event_frame = ttk.LabelFrame(
-            self.collection_tab, text="First-flush event definition", padding=10
+        self._refresh_first_flush_guidance()
+
+    def _selected_first_flush_sizing_method(self) -> str:
+        label = self.first_flush_sizing_method_var.get()
+        return next(
+            (code for code, value in SIZING_METHOD_LABELS.items() if value == label),
+            MANUAL_SIZING_METHOD,
         )
-        event_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
-        ttk.Label(event_frame, text="Antecedent dry period").grid(row=0, column=0, sticky="w")
-        ttk.Entry(
-            event_frame, textvariable=self.first_flush_antecedent_var, width=10
-        ).grid(row=0, column=1, sticky="w", padx=(8, 4))
-        antecedent_unit_combo = ttk.Combobox(
-            event_frame,
-            textvariable=self.first_flush_antecedent_unit_var,
-            values=("days", "hours"),
-            state="readonly",
-            width=7,
+
+    def _selected_first_flush_design_preset(self) -> str:
+        label = self.first_flush_design_preset_var.get()
+        return next(
+            (code for code, value in DESIGN_PRESET_LABELS.items() if value == label),
+            CODE_MINIMUM_PRESET,
         )
-        antecedent_unit_combo.grid(row=0, column=2, sticky="w")
-        antecedent_unit_combo.bind(
-            "<<ComboboxSelected>>", self._first_flush_antecedent_unit_changed
+
+    def _first_flush_guidance_changed(self, _event: tk.Event | None = None) -> None:
+        self._refresh_first_flush_guidance()
+
+    def _refresh_first_flush_guidance(self) -> None:
+        if not hasattr(self, "first_flush_design_preset_combo"):
+            return
+        method = self._selected_first_flush_sizing_method()
+        guided = method == GUIDED_SIZING_METHOD
+        self.first_flush_design_preset_combo.configure(
+            state="readonly" if guided else "disabled"
         )
-        ttk.Label(
-            event_frame,
-            text="A wet observation starts a new event after this continuous dry period.",
-            foreground="#667278",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        self.apply_first_flush_guidance_button.configure(
+            state="normal" if guided else "disabled"
+        )
+        if not guided:
+            self.first_flush_guidance_summary_var.set(
+                "Legacy behavior: each surface's stored first-flush depth is used without a guided floor."
+            )
+            return
+
+        country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
+        guidance = first_flush_guidance(
+            country_code,
+            self.state_or_province_var.get(),
+            self._selected_first_flush_design_preset(),
+        )
+        target = guidance.automatic_target_mm
+        target_text = f"{target:.3f} mm ({target / 25.4:.4f} in)"
+        self.first_flush_guidance_summary_var.set(
+            f"Location layer: {guidance.baseline.label}, {guidance.baseline.depth_mm:g} mm. "
+            f"Guided floor: {target_text}. Applying raises lower active-surface depths and "
+            f"retains larger site-specific values. {guidance.baseline.source}."
+        )
+
+    def _apply_first_flush_guidance(self) -> None:
+        if self._selected_first_flush_sizing_method() != GUIDED_SIZING_METHOD:
+            return
+        country_code = self.country_var.get().split(" - ", 1)[0].strip() or "USA"
+        guidance = first_flush_guidance(
+            country_code,
+            self.state_or_province_var.get(),
+            self._selected_first_flush_design_preset(),
+        )
+        target_inches = guidance.automatic_target_mm / 25.4
+        active_surfaces = [surface for surface in self.config_model.surfaces if surface.area > 0.0]
+        if not active_surfaces:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Add an active collection surface with an area before applying guided sizing.",
+                parent=self,
+            )
+            return
+        if target_inches <= 0.0:
+            messagebox.showinfo(
+                APP_TITLE,
+                "No built-in regulatory floor was identified for this location. Verify local "
+                "requirements and enter a custom or site-tested depth on each surface.",
+                parent=self,
+            )
+            return
+        for surface in active_surfaces:
+            surface.first_flush_depth_inches = max(
+                float(surface.first_flush_depth_inches), target_inches
+            )
+        self.config_model.first_flush_sizing_method = GUIDED_SIZING_METHOD
+        self.config_model.first_flush_design_preset = self._selected_first_flush_design_preset()
+        item = self._system_layout_item(self.system_builder_selected_id or "")
+        if item is not None and item.get("component_type") == "first_flush_diversion":
+            item["sizing_method"] = self.config_model.first_flush_sizing_method
+            item["design_preset"] = self.config_model.first_flush_design_preset
+        self._populate_surfaces()
+        self._refresh_first_flush_surface_editor()
+        self._refresh_project_dirty_state()
 
     def _first_flush_antecedent_unit_changed(self, _event: tk.Event | None = None) -> None:
         new_unit = self.first_flush_antecedent_unit_var.get().casefold()
@@ -7033,7 +7653,7 @@ class RainwaterTkApp(tk.Tk):
             self.first_flush_antecedent_unit_var.set(new_unit)
         old_unit = self.first_flush_antecedent_display_unit
         try:
-            displayed_value = float(self.first_flush_antecedent_var.get())
+            displayed_value = parse_number(self.first_flush_antecedent_var.get())
             if not math.isfinite(displayed_value):
                 raise ValueError
             duration_days = _antecedent_dry_period_to_days(displayed_value, old_unit)
@@ -7519,68 +8139,35 @@ class RainwaterTkApp(tk.Tk):
             analysis_content, text="Analysis resolution", padding=10
         )
         resolution_frame.grid(row=0, column=0, sticky="ew", pady=(0, 10))
-        resolution_frame.columnconfigure(1, weight=1)
-        self.daily_analysis_resolution_radio = ttk.Radiobutton(
-            resolution_frame,
-            text="Daily only",
-            variable=self.hourly_schedule_enabled_var,
-            value=False,
-            command=self._hourly_schedule_enabled_changed,
-        )
-        self.daily_analysis_resolution_radio.grid(row=0, column=0, sticky="nw")
+        resolution_frame.columnconfigure(0, weight=1)
         ttk.Label(
             resolution_frame,
-            text="Uses daily rainfall and daily demand totals.",
-            foreground="#667278",
-        ).grid(row=0, column=1, sticky="nw", padx=(16, 0))
-        self.hourly_analysis_resolution_radio = ttk.Radiobutton(
-            resolution_frame,
-            text="Daily + hourly",
-            variable=self.hourly_schedule_enabled_var,
-            value=True,
-            command=self._hourly_schedule_enabled_changed,
-        )
-        self.hourly_analysis_resolution_radio.grid(row=1, column=0, sticky="nw", pady=(7, 0))
+            textvariable=self.applied_analysis_resolution_var,
+            foreground="#33444c",
+            wraplength=900,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
         ttk.Label(
             resolution_frame,
-            text="Adds an hourly simulation using the demand and rainfall timing below.",
+            text=(
+                "Read-only. The daily mass balance is retained for the sizing curve, and the "
+                "hourly timing simulation uses the rainfall and demand modes below."
+            ),
             foreground="#667278",
-        ).grid(row=1, column=1, sticky="nw", padx=(16, 0), pady=(7, 0))
+            wraplength=900,
+            justify="left",
+        ).grid(row=1, column=0, sticky="ew", pady=(5, 0))
 
         hourly_analysis_frame = ttk.LabelFrame(
-            analysis_content, text="Hourly assumptions", padding=10
+            analysis_content, text="Timing assumptions", padding=10
         )
         hourly_analysis_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         hourly_analysis_frame.columnconfigure(0, weight=1)
 
-        demand_timing_frame = ttk.LabelFrame(
-            hourly_analysis_frame, text="Demand timing", padding=8
-        )
-        demand_timing_frame.grid(row=0, column=0, sticky="ew")
-        demand_timing_frame.columnconfigure(1, weight=1)
-        ttk.Label(demand_timing_frame, text="Schedule:").grid(
-            row=0, column=0, sticky="w", padx=(0, 8)
-        )
-        ttk.Label(
-            demand_timing_frame,
-            textvariable=self.hourly_demand_schedule_selection_var,
-        ).grid(row=0, column=1, sticky="w")
-        self.hourly_schedule_change_button = ttk.Button(
-            demand_timing_frame,
-            text="Change...",
-            command=lambda: self.notebook.select(self.schedules_tab),
-        )
-        self.hourly_schedule_change_button.grid(row=0, column=2, sticky="e", padx=(12, 0))
-        ttk.Label(
-            demand_timing_frame,
-            text="Demand is calculated and applied hour by hour in the hourly simulation.",
-            foreground="#667278",
-        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(5, 0))
-
         rainfall_timing_frame = ttk.LabelFrame(
             hourly_analysis_frame, text="Rainfall timing", padding=8
         )
-        rainfall_timing_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        rainfall_timing_frame.grid(row=0, column=0, sticky="ew")
         rainfall_timing_frame.columnconfigure(1, weight=1)
         self.daily_rainfall_timing_radio = ttk.Radiobutton(
             rainfall_timing_frame,
@@ -7628,6 +8215,56 @@ class RainwaterTkApp(tk.Tk):
             wraplength=930,
             justify="left",
         ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(7, 0))
+
+        demand_timing_frame = ttk.LabelFrame(
+            hourly_analysis_frame, text="Demand timing", padding=8
+        )
+        demand_timing_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        demand_timing_frame.columnconfigure(1, weight=1)
+        self.daily_demand_timing_radio = ttk.Radiobutton(
+            demand_timing_frame,
+            text="Daily",
+            variable=self.hourly_schedule_enabled_var,
+            value=False,
+            command=self._hourly_schedule_enabled_changed,
+        )
+        self.daily_demand_timing_radio.grid(row=0, column=0, sticky="nw")
+        ttk.Label(
+            demand_timing_frame,
+            text=(
+                "Runs the daily mass balance only. The hourly demand profile remains saved, "
+                "but no full hourly result is generated."
+            ),
+            foreground="#667278",
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=1, columnspan=2, sticky="nw", padx=(16, 0))
+        self.hourly_demand_timing_radio = ttk.Radiobutton(
+            demand_timing_frame,
+            text="Hourly",
+            variable=self.hourly_schedule_enabled_var,
+            value=True,
+            command=self._hourly_schedule_enabled_changed,
+        )
+        self.hourly_demand_timing_radio.grid(row=1, column=0, sticky="nw", pady=(7, 0))
+        ttk.Label(demand_timing_frame, text="Schedule:").grid(
+            row=1, column=1, sticky="w", padx=(16, 8), pady=(7, 0)
+        )
+        ttk.Label(
+            demand_timing_frame,
+            textvariable=self.hourly_demand_schedule_selection_var,
+        ).grid(row=1, column=2, sticky="w", pady=(7, 0))
+        self.hourly_schedule_change_button = ttk.Button(
+            demand_timing_frame,
+            text="Change...",
+            command=lambda: self.notebook.select(self.schedules_tab),
+        )
+        self.hourly_schedule_change_button.grid(row=1, column=3, sticky="e", padx=(12, 0), pady=(7, 0))
+        ttk.Label(
+            demand_timing_frame,
+            text="Applies the preserved demand profile hour by hour and generates full hourly results.",
+            foreground="#667278",
+        ).grid(row=2, column=1, columnspan=3, sticky="w", padx=(16, 0), pady=(5, 0))
 
         applied_settings_frame = ttk.LabelFrame(
             analysis_content, text="Applied analysis settings (read-only)", padding=10
@@ -7901,11 +8538,11 @@ class RainwaterTkApp(tk.Tk):
         collection_area = sum(max(float(surface.area), 0.0) for surface in cfg.surfaces)
         maximum_makeup = (
             "No limit" if optimization.maximum_annual_municipal_makeup_gallons is None
-            else f"{volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg):,.0f} {unit}/year"
+            else f"{format_number(volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg), cfg, max_decimal_places=0)} {unit}/year"
         )
         maximum_cost = (
             "No limit" if optimization.maximum_installed_cost is None
-            else f"{financial.currency} {optimization.maximum_installed_cost:,.2f}"
+            else f"{financial.currency} {format_number(optimization.maximum_installed_cost, cfg)}"
         )
         rows = [
             ("Design variable", "Primary tank product", f"{counts['Primary tank']} catalog choices", "Optimization catalog"),
@@ -7913,30 +8550,30 @@ class RainwaterTkApp(tk.Tk):
             ("Design variable", "Filtration system product", f"{counts['Filtration system']} catalog choices", "Optimization catalog"),
             ("Design variable", "Buffer tank product", f"{counts['Buffer tank']} catalog choices", "Optimization catalog"),
             ("Fixed input", "Rainfall record", rainfall_value, "Rainwater Data"),
-            ("Fixed input", "Collection surfaces", f"{len(cfg.surfaces)} surfaces; {area_to_display(collection_area, cfg):,.0f} {area_unit(cfg)}", "Collection surfaces"),
-            ("Fixed input", "Simple recurring demand", f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):,.1f} {unit}/day; {cfg.demand.daily_demand_days_per_week} days/week", "Demand parameters"),
+            ("Fixed input", "Collection surfaces", f"{len(cfg.surfaces)} surfaces; {format_number(area_to_display(collection_area, cfg), cfg, max_decimal_places=0)} {area_unit(cfg)}", "Collection surfaces"),
+            ("Fixed input", "Simple recurring demand", f"{format_number(volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg), cfg, max_decimal_places=1)} {unit}/day; {cfg.demand.daily_demand_days_per_week} days/week", "Demand parameters"),
             ("Fixed input", "Demand objects", f"{len(cfg.demand.demand_objects)} objects", "Demand parameters / Schedules"),
             ("Model constant", "Simulation resolution", "Hourly; historical rainfall repeated only as supplied", "Hourly engine"),
             ("Model constant", "Daily rainfall timing", "Collected rainfall enters after that day's demand", "Hourly engine"),
-            ("Fixed input", "Primary tank initial fill", f"{cfg.tank_parameters.initial_fill_percent:g}%", "System parameters / Edit"),
-            ("Hard operating constraint", "Primary minimum operating level", f"{cfg.tank_parameters.minimum_operating_volume_percent:g}% of capacity", "System parameters / Edit"),
-            ("Fixed input", "Filter recovery", f"{system.filter_recovery_percent:g}%", "System parameters / Edit"),
-            ("Fixed input", "Buffer initial fill / refill level", f"{system.booster_initial_fill_percent:g}% / {system.booster_refill_level_percent:g}%", "System parameters / Edit"),
+            ("Fixed input", "Primary tank initial fill", f"{format_number(cfg.tank_parameters.initial_fill_percent, cfg)}%", "System parameters / Edit"),
+            ("Hard operating constraint", "Primary minimum operating level", f"{format_number(cfg.tank_parameters.minimum_operating_volume_percent, cfg)}% of capacity", "System parameters / Edit"),
+            ("Fixed input", "Filter recovery", f"{format_number(system.filter_recovery_percent, cfg)}%", "System parameters / Edit"),
+            ("Fixed input", "Buffer initial fill / refill level", f"{format_number(system.booster_initial_fill_percent, cfg)}% / {format_number(system.booster_refill_level_percent, cfg)}%", "System parameters / Edit"),
             ("Fixed input", "Municipal backup", "Enabled" if system.municipal_backup_enabled else "Disabled", "System parameters / Edit"),
             ("Objective", "Ranking objective", optimization.objective, "Optimization"),
-            ("Constraint", "Minimum rainwater reliability", f"{optimization.minimum_reliability_percent:g}%", "Optimization"),
+            ("Constraint", "Minimum rainwater reliability", f"{format_number(optimization.minimum_reliability_percent, cfg)}%", "Optimization"),
             ("Constraint", "Maximum annual municipal makeup", maximum_makeup, "Optimization"),
             ("Constraint", "Maximum installed cost", maximum_cost, "Optimization"),
             ("Constraint", "Positive net annual savings", "Required" if optimization.require_positive_net_savings else "Not required", "Optimization"),
             ("Economic input", "Water / sewer tariff", f"{financial.currency} {financial.water_rate:g} / {financial.sewer_rate:g} {financial.tariff_billing_unit}", "Financial analysis"),
             ("Economic input", "Legacy aggregate sewer eligibility", f"{financial.sewer_eligible_percent:g}%", "Financial analysis"),
-            ("Economic input", "Base cost / incentives", f"{financial.currency} {financial.installed_cost:,.2f} / {financial.incentives:,.2f}", "Financial analysis"),
-            ("Economic input", "Annual maintenance", f"{financial.currency} {financial.fixed_annual_maintenance:,.2f} + {financial.annual_maintenance_percent:g}% of installed cost", "Financial analysis"),
+            ("Economic input", "Base cost / incentives", f"{financial.currency} {format_number(financial.installed_cost, cfg)} / {format_number(financial.incentives, cfg)}", "Financial analysis"),
+            ("Economic input", "Annual maintenance", f"{financial.currency} {format_number(financial.fixed_annual_maintenance, cfg)} + {format_number(financial.annual_maintenance_percent, cfg)}% of installed cost", "Financial analysis"),
             ("Economic input", "Electricity price", f"{financial.currency} {optimization.electricity_rate_per_kwh:g}/kWh", "Optimization"),
             ("Economic input", "Analysis period / discount rate", f"{financial.analysis_period_years} years / {financial.discount_rate_percent:g}%", "Financial analysis"),
             ("Economic input", "Utility / maintenance escalation", f"{financial.utility_rate_escalation_percent:g}% / {financial.maintenance_escalation_percent:g}%", "Financial analysis"),
             ("Economic input", "Electricity / replacement escalation", f"{financial.electricity_escalation_percent:g}% / {financial.equipment_replacement_escalation_percent:g}%", "Financial analysis"),
-            ("Economic input", "Recurring replacement", f"{financial.currency} {financial.equipment_replacement_cost:,.2f} every {financial.equipment_replacement_interval_years} year(s)", "Financial analysis"),
+            ("Economic input", "Recurring replacement", f"{financial.currency} {format_number(financial.equipment_replacement_cost, cfg)} every {financial.equipment_replacement_interval_years} year(s)", "Financial analysis"),
             ("Search method", "Candidate enumeration", f"Up to {math.prod(counts.values())} combinations before compatibility filtering", "Optimization backend"),
             ("Performance method", "Candidate evaluation", "Aggregate hourly arrays; prepared inputs cached for 4 unchanged runs", "Optimization backend"),
         ]
@@ -8033,7 +8670,7 @@ class RainwaterTkApp(tk.Tk):
         feasible_count = sum(result.feasible for result in results)
         for index, result in enumerate(results):
             payback = (
-                f"{result.simple_payback_years:.1f} years"
+                f"{format_number(result.simple_payback_years, run_config, max_decimal_places=1)} years"
                 if result.simple_payback_years is not None else "Not achieved"
             )
             self.optimization_tree.insert(
@@ -8044,28 +8681,28 @@ class RainwaterTkApp(tk.Tk):
                     result.filtration_pump.name,
                     result.filtration_unit.name,
                     result.booster_tank.name,
-                    f"{result.reliability_percent:.1f}%",
-                    f"{volume_to_display(result.average_annual_municipal_makeup_gallons, run_config):,.0f}",
-                    f"{result.average_annual_energy_kwh:,.0f} kWh",
-                    f"{currency} {result.total_installed_cost:,.0f}",
-                    f"{currency} {result.net_annual_savings:,.0f}",
+                    f"{format_number(result.reliability_percent, run_config, max_decimal_places=1)}%",
+                    format_number(volume_to_display(result.average_annual_municipal_makeup_gallons, run_config), run_config, max_decimal_places=0),
+                    f"{format_number(result.average_annual_energy_kwh, run_config, max_decimal_places=0)} kWh",
+                    f"{currency} {format_number(result.total_installed_cost, run_config, max_decimal_places=0)}",
+                    f"{currency} {format_number(result.net_annual_savings, run_config, max_decimal_places=0)}",
                     payback,
-                    f"{currency} {result.lifecycle_net_present_value:,.0f}",
+                    f"{currency} {format_number(result.lifecycle_net_present_value, run_config, max_decimal_places=0)}",
                 ),
             )
         if feasible_count:
             best = next(result for result in results if result.feasible)
             objective = run_config.optimization_parameters.objective
             if objective == "Simple payback":
-                best_value = f"{best.simple_payback_years:.1f} years" if best.simple_payback_years is not None else "not achieved"
+                best_value = f"{format_number(best.simple_payback_years, run_config, max_decimal_places=1)} years" if best.simple_payback_years is not None else "not achieved"
             elif objective == "Net annual savings":
-                best_value = f"{currency} {best.net_annual_savings:,.0f}/year"
+                best_value = f"{currency} {format_number(best.net_annual_savings, run_config, max_decimal_places=0)}/year"
             elif objective == "Rainwater reliability":
-                best_value = f"{best.reliability_percent:.1f}%"
+                best_value = f"{format_number(best.reliability_percent, run_config, max_decimal_places=1)}%"
             elif objective == "Lifecycle NPV":
-                best_value = f"{currency} {best.lifecycle_net_present_value:,.0f}"
+                best_value = f"{currency} {format_number(best.lifecycle_net_present_value, run_config, max_decimal_places=0)}"
             else:
-                best_value = f"{currency} {best.analysis_period_net_benefit:,.0f}"
+                best_value = f"{currency} {format_number(best.analysis_period_net_benefit, run_config, max_decimal_places=0)}"
             self.optimization_status_var.set(
                 f"{feasible_count} of {len(results)} combinations meet all constraints. "
                 f"Best: {best.primary_tank.name} + {best.filtration_pump.name} + "
@@ -8237,7 +8874,7 @@ class RainwaterTkApp(tk.Tk):
         self.financial_comparison_tree.configure(yscrollcommand=financial_scroll.set)
 
     def _financial_results_source(self) -> pd.DataFrame:
-        if self.config_model.demand.hourly_schedule_enabled and not self.hourly_results_df.empty:
+        if not self.hourly_results_df.empty:
             return self.hourly_results_df
         return self.results_df
 
@@ -8266,48 +8903,48 @@ class RainwaterTkApp(tk.Tk):
         currency = params.currency
         volume_label = volume_unit(self.config_model)
         supplied_display = volume_to_display(results.average_annual_supplied_gallons, self.config_model)
-        self.financial_result_vars["supplied"].set(f"{supplied_display:,.0f} {volume_label}/year")
+        self.financial_result_vars["supplied"].set(f"{format_number(supplied_display, self.config_model, max_decimal_places=0)} {volume_label}/year")
         eligible_display = volume_to_display(
             results.average_annual_sewer_eligible_supplied_gallons, self.config_model
         )
         self.financial_result_vars["sewer_eligible_supply"].set(
-            f"{eligible_display:,.0f} {volume_label}/year"
+            f"{format_number(eligible_display, self.config_model, max_decimal_places=0)} {volume_label}/year"
         )
         self.financial_result_vars["water_savings"].set(
-            f"{currency} {results.annual_municipal_water_savings:,.2f}/year"
+            f"{currency} {format_number(results.annual_municipal_water_savings, self.config_model)}/year"
         )
         self.financial_result_vars["sewer_savings"].set(
-            f"{currency} {results.annual_sewer_savings:,.2f}/year"
+            f"{currency} {format_number(results.annual_sewer_savings, self.config_model)}/year"
         )
-        self.financial_result_vars["gross"].set(f"{currency} {results.gross_annual_savings:,.2f}/year")
-        self.financial_result_vars["maintenance"].set(f"{currency} {results.annual_maintenance_cost:,.2f}/year")
+        self.financial_result_vars["gross"].set(f"{currency} {format_number(results.gross_annual_savings, self.config_model)}/year")
+        self.financial_result_vars["maintenance"].set(f"{currency} {format_number(results.annual_maintenance_cost, self.config_model)}/year")
         self.financial_result_vars["energy"].set(
-            f"{results.average_annual_pump_energy_kwh:,.1f} kWh; "
-            f"{currency} {results.annual_pump_energy_cost:,.2f}/year"
+            f"{format_number(results.average_annual_pump_energy_kwh, self.config_model, max_decimal_places=1)} kWh; "
+            f"{currency} {format_number(results.annual_pump_energy_cost, self.config_model)}/year"
         )
-        self.financial_result_vars["net"].set(f"{currency} {results.net_annual_savings:,.2f}/year")
-        self.financial_result_vars["net_cost"].set(f"{currency} {results.net_installed_cost:,.2f}")
+        self.financial_result_vars["net"].set(f"{currency} {format_number(results.net_annual_savings, self.config_model)}/year")
+        self.financial_result_vars["net_cost"].set(f"{currency} {format_number(results.net_installed_cost, self.config_model)}")
         self.financial_result_vars["payback"].set(
-            f"{results.simple_payback_years:,.1f} years"
+            f"{format_number(results.simple_payback_years, self.config_model, max_decimal_places=1)} years"
             if results.simple_payback_years is not None
             else "Not achieved"
         )
         self.financial_result_vars["discounted_payback"].set(
-            f"{results.discounted_payback_years:,.1f} years"
+            f"{format_number(results.discounted_payback_years, self.config_model, max_decimal_places=1)} years"
             if results.discounted_payback_years is not None
             else "Not achieved"
         )
         self.financial_result_vars["period_benefit"].set(
-            f"{currency} {results.analysis_period_net_benefit:,.2f}"
+            f"{currency} {format_number(results.analysis_period_net_benefit, self.config_model)}"
         )
         self.financial_result_vars["replacement"].set(
-            f"{currency} {results.total_replacement_cost:,.2f}"
+            f"{currency} {format_number(results.total_replacement_cost, self.config_model)}"
         )
         self.financial_result_vars["npv"].set(
-            f"{currency} {results.lifecycle_net_present_value:,.2f}"
+            f"{currency} {format_number(results.lifecycle_net_present_value, self.config_model)}"
         )
         self.financial_result_vars["irr"].set(
-            f"{results.internal_rate_of_return_percent:,.2f}%"
+            f"{format_number(results.internal_rate_of_return_percent, self.config_model)}%"
             if results.internal_rate_of_return_percent is not None
             else "Not uniquely defined"
         )
@@ -8342,7 +8979,7 @@ class RainwaterTkApp(tk.Tk):
                 results.average_annual_supplied_gallons, self.config_model
             )
             payback = (
-                f"{results.simple_payback_years:,.1f} years"
+                f"{format_number(results.simple_payback_years, self.config_model, max_decimal_places=1)} years"
                 if results.simple_payback_years is not None
                 else "Not achieved"
             )
@@ -8350,12 +8987,12 @@ class RainwaterTkApp(tk.Tk):
                 "",
                 "end",
                 values=(
-                    f"{tank_display:,.0f} {volume_unit(self.config_model)}",
-                    f"{supplied_display:,.0f} {volume_unit(self.config_model)}/yr",
-                    f"{params.currency} {results.gross_annual_savings:,.2f}",
-                    f"{params.currency} {results.net_annual_savings:,.2f}",
+                    f"{format_number(tank_display, self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)}",
+                    f"{format_number(supplied_display, self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)}/yr",
+                    f"{params.currency} {format_number(results.gross_annual_savings, self.config_model)}",
+                    f"{params.currency} {format_number(results.net_annual_savings, self.config_model)}",
                     payback,
-                    f"{params.currency} {results.lifecycle_net_present_value:,.2f}",
+                    f"{params.currency} {format_number(results.lifecycle_net_present_value, self.config_model)}",
                 ),
             )
 
@@ -8932,7 +9569,9 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Select one comparison tank first.")
             return
         tank_size = self.comparison_tree_sizes[selected[0]]
-        self.selected_tank_var.set(f"{volume_to_display(tank_size, self.config_model):.0f}")
+        self.selected_tank_var.set(
+            format_number(volume_to_display(tank_size, self.config_model), self.config_model, max_decimal_places=0)
+        )
 
     def _use_comparison_as_primary_from_event(self, event: tk.Event) -> str:
         row_id = self.comparison_tree.identify_row(event.y)
@@ -8962,7 +9601,7 @@ class RainwaterTkApp(tk.Tk):
         )
         for index, tank_size in enumerate(sorted(set(self.config_model.comparison_tank_sizes_gal))):
             reliability = reliability_by_size.get(round(float(tank_size), 6))
-            reliability_text = "--" if reliability is None else f"{reliability:.1f}%"
+            reliability_text = "--" if reliability is None else f"{format_number(reliability, self.config_model, max_decimal_places=1)}%"
             is_primary = abs(float(tank_size) - primary_tank_size) < 0.01
             item = f"comparison-{index}"
             self.comparison_tree.insert(
@@ -8970,7 +9609,7 @@ class RainwaterTkApp(tk.Tk):
                 "end",
                 iid=item,
                 values=(
-                    f"{volume_to_display(tank_size, self.config_model):,.0f}",
+                    format_number(volume_to_display(tank_size, self.config_model), self.config_model, max_decimal_places=0),
                     reliability_text,
                     "Primary" if is_primary else "",
                 ),
@@ -9006,11 +9645,13 @@ class RainwaterTkApp(tk.Tk):
     def _set_selected_tank_reliability(self, reliability: float) -> None:
         tank_size = volume_to_display(self.config_model.selected_tank_size_gal, self.config_model)
         self.reliability_var.set(
-            f"Reliability for {tank_size:,.0f} {volume_unit(self.config_model)} tank: {reliability:.2f}%"
+            f"Reliability for {format_number(tank_size, self.config_model, max_decimal_places=0)} "
+            f"{volume_unit(self.config_model)} tank: {format_number(reliability, self.config_model)}%"
         )
         average_precipitation = _report_average_annual_precipitation(self.rainfall_df, self.config_model)
         self.average_annual_precipitation_var.set(
-            f"Average annual precipitation: {average_precipitation:,.2f} {precip_unit(self.config_model)}"
+            f"Average annual precipitation: {format_number(average_precipitation, self.config_model)} "
+            f"{precip_unit(self.config_model)}"
         )
 
     def _select_state_by_first_letter(self, event: tk.Event) -> str | None:
@@ -9202,6 +9843,94 @@ class RainwaterTkApp(tk.Tk):
             return None
         return latitude, longitude
 
+    def _open_station_map_fullscreen(self) -> None:
+        existing = self.station_map_fullscreen_window
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+        if self.station_map_embedded is None or not self.station_map_embedded.winfo_exists():
+            return
+
+        if self.station_map_redraw_after_id is not None:
+            self.after_cancel(self.station_map_redraw_after_id)
+            self.station_map_redraw_after_id = None
+        center = self.station_map_embedded.get_position()
+        zoom = round(self.station_map_embedded.zoom)
+        self._clear_station_map_markers()
+
+        window = tk.Toplevel(self)
+        self.station_map_fullscreen_window = window
+        window.title("Daily rainfall weather-station map")
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        toolbar = ttk.Frame(window, padding=(10, 8))
+        toolbar.grid(row=0, column=0, sticky="ew")
+        toolbar.columnconfigure(0, weight=1)
+        ttk.Label(
+            toolbar,
+            text="Daily rainfall weather stations",
+            font=("Segoe UI", 11, "bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            toolbar,
+            text="Press Esc to return",
+            foreground="#5f6b70",
+        ).grid(row=0, column=1, sticky="e", padx=(12, 8))
+        ttk.Button(
+            toolbar,
+            text="Exit full screen",
+            command=self._close_station_map_fullscreen,
+        ).grid(row=0, column=2, sticky="e")
+
+        fullscreen_map = _StationMapView(window, width=1200, height=760, corner_radius=0)
+        fullscreen_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
+        fullscreen_map.set_position(*center)
+        fullscreen_map.set_zoom(zoom)
+        fullscreen_map.grid(row=1, column=0, sticky="nsew")
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
+            fullscreen_map.canvas.bind(sequence, self._station_map_view_changed, add="+")
+        ttk.Label(
+            window,
+            text="Map data © OpenStreetMap contributors",
+            foreground="#5f6b70",
+            padding=(8, 4),
+        ).grid(row=2, column=0, sticky="e")
+
+        self.station_map = fullscreen_map
+        self.station_map_rendered_zoom = None
+        self._render_station_map(fit_bounds=False)
+        window.protocol("WM_DELETE_WINDOW", self._close_station_map_fullscreen)
+        window.bind("<Escape>", lambda _event: self._close_station_map_fullscreen())
+        window.attributes("-fullscreen", True)
+        window.lift()
+        fullscreen_map.focus_set()
+
+    def _close_station_map_fullscreen(self) -> None:
+        window = self.station_map_fullscreen_window
+        embedded = self.station_map_embedded
+        if window is None or embedded is None:
+            return
+        if self.station_map_redraw_after_id is not None:
+            self.after_cancel(self.station_map_redraw_after_id)
+            self.station_map_redraw_after_id = None
+        try:
+            center = self.station_map.get_position()
+            zoom = round(self.station_map.zoom)
+        except tk.TclError:
+            center = embedded.get_position()
+            zoom = round(embedded.zoom)
+        self._clear_station_map_markers()
+        self.station_map = embedded
+        if embedded.winfo_exists():
+            embedded.set_position(*center)
+            embedded.set_zoom(zoom)
+        self.station_map_fullscreen_window = None
+        window.destroy()
+        self.station_map_rendered_zoom = None
+        if embedded.winfo_exists():
+            self._render_station_map(fit_bounds=False)
+
     def _station_selection_changed(self, _event: tk.Event | None = None) -> None:
         self._reset_station_typeahead()
         self._update_station_marker_selection()
@@ -9380,7 +10109,7 @@ class RainwaterTkApp(tk.Tk):
         )
         self.current_system_type_var.set(f"Current system type: {self.system_type_var.get()}")
         self.pump_capacity_var.set(
-            f"{volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0:.2f}"
+            format_number(volume_to_display(cfg.system_parameters.pump_capacity_gallons_per_hour, cfg) / 60.0, cfg)
         )
         filtration_flow_label = (
             "Infinite" if cfg.system_parameters.filtration_system_flow_gpm == 0
@@ -9390,58 +10119,58 @@ class RainwaterTkApp(tk.Tk):
         self.filtration_system_flow_gpm_var.set(filtration_flow_label)
         self.filtration_system_count_var.set(str(cfg.system_parameters.filtration_system_count))
         self.transfer_pump_type_var.set(cfg.system_parameters.transfer_pump_type)
-        self.filter_recovery_var.set(f"{cfg.system_parameters.filter_recovery_percent:.2f}")
+        self.filter_recovery_var.set(format_number(cfg.system_parameters.filter_recovery_percent, cfg))
         self.booster_tank_size_var.set(
-            f"{volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg):.2f}"
+            format_number(volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg), cfg)
         )
-        self.booster_initial_fill_var.set(f"{cfg.system_parameters.booster_initial_fill_percent:.2f}")
-        self.booster_refill_level_var.set(f"{cfg.system_parameters.booster_refill_level_percent:.2f}")
+        self.booster_initial_fill_var.set(format_number(cfg.system_parameters.booster_initial_fill_percent, cfg))
+        self.booster_refill_level_var.set(format_number(cfg.system_parameters.booster_refill_level_percent, cfg))
         self.municipal_backup_enabled_var.set(cfg.system_parameters.municipal_backup_enabled)
         financial = cfg.financial_parameters
         self.financial_currency_var.set(financial.currency)
-        self.financial_water_rate_var.set(f"{financial.water_rate:g}")
-        self.financial_sewer_rate_var.set(f"{financial.sewer_rate:g}")
+        self.financial_water_rate_var.set(format_number(financial.water_rate, cfg, max_decimal_places=4))
+        self.financial_sewer_rate_var.set(format_number(financial.sewer_rate, cfg, max_decimal_places=4))
         self.financial_tariff_unit_var.set(financial.tariff_billing_unit)
-        self.financial_sewer_eligible_var.set(f"{financial.sewer_eligible_percent:g}")
-        self.financial_installed_cost_var.set(f"{financial.installed_cost:g}")
-        self.financial_incentives_var.set(f"{financial.incentives:g}")
-        self.financial_fixed_maintenance_var.set(f"{financial.fixed_annual_maintenance:g}")
-        self.financial_maintenance_percent_var.set(f"{financial.annual_maintenance_percent:g}")
-        self.financial_analysis_period_var.set(str(financial.analysis_period_years))
-        self.financial_discount_rate_var.set(f"{financial.discount_rate_percent:g}")
+        self.financial_sewer_eligible_var.set(format_number(financial.sewer_eligible_percent, cfg))
+        self.financial_installed_cost_var.set(format_number(financial.installed_cost, cfg))
+        self.financial_incentives_var.set(format_number(financial.incentives, cfg))
+        self.financial_fixed_maintenance_var.set(format_number(financial.fixed_annual_maintenance, cfg))
+        self.financial_maintenance_percent_var.set(format_number(financial.annual_maintenance_percent, cfg))
+        self.financial_analysis_period_var.set(format_number(financial.analysis_period_years, cfg, max_decimal_places=0))
+        self.financial_discount_rate_var.set(format_number(financial.discount_rate_percent, cfg))
         self.financial_utility_escalation_var.set(
-            f"{financial.utility_rate_escalation_percent:g}"
+            format_number(financial.utility_rate_escalation_percent, cfg)
         )
         self.financial_maintenance_escalation_var.set(
-            f"{financial.maintenance_escalation_percent:g}"
+            format_number(financial.maintenance_escalation_percent, cfg)
         )
         self.financial_electricity_escalation_var.set(
-            f"{financial.electricity_escalation_percent:g}"
+            format_number(financial.electricity_escalation_percent, cfg)
         )
-        self.financial_pump_power_var.set(f"{financial.pump_power_kw:g}")
+        self.financial_pump_power_var.set(format_number(financial.pump_power_kw, cfg))
         self.financial_pump_flow_rate_var.set(
-            f"{volume_to_display(financial.pump_flow_rate_gallons_per_hour, cfg):g}"
+            format_number(volume_to_display(financial.pump_flow_rate_gallons_per_hour, cfg), cfg)
         )
         self.financial_pump_flow_unit_var.set(f"{volume_unit(cfg)}/hour")
         self.financial_replacement_cost_var.set(
-            f"{financial.equipment_replacement_cost:g}"
+            format_number(financial.equipment_replacement_cost, cfg)
         )
         self.financial_replacement_interval_var.set(
-            str(financial.equipment_replacement_interval_years)
+            format_number(financial.equipment_replacement_interval_years, cfg, max_decimal_places=0)
         )
         self.financial_replacement_escalation_var.set(
-            f"{financial.equipment_replacement_escalation_percent:g}"
+            format_number(financial.equipment_replacement_escalation_percent, cfg)
         )
         optimization = cfg.optimization_parameters
-        self.optimization_minimum_reliability_var.set(f"{optimization.minimum_reliability_percent:g}")
-        self.optimization_electricity_rate_var.set(f"{optimization.electricity_rate_per_kwh:g}")
+        self.optimization_minimum_reliability_var.set(format_number(optimization.minimum_reliability_percent, cfg))
+        self.optimization_electricity_rate_var.set(format_number(optimization.electricity_rate_per_kwh, cfg, max_decimal_places=4))
         self.optimization_objective_var.set(optimization.objective)
         self.optimization_maximum_makeup_var.set(
             "" if optimization.maximum_annual_municipal_makeup_gallons is None
-            else f"{volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg):g}"
+            else format_number(volume_to_display(optimization.maximum_annual_municipal_makeup_gallons, cfg), cfg)
         )
         self.optimization_maximum_cost_var.set(
-            "" if optimization.maximum_installed_cost is None else f"{optimization.maximum_installed_cost:g}"
+            "" if optimization.maximum_installed_cost is None else format_number(optimization.maximum_installed_cost, cfg)
         )
         self.optimization_positive_savings_var.set(optimization.require_positive_net_savings)
         equipment_constraints = normalized_constraints(optimization.equipment_constraints)
@@ -9459,7 +10188,7 @@ class RainwaterTkApp(tk.Tk):
         )
         if hasattr(self, "weather_frame"):
             self._update_weather_import_provider()
-        self.simple_daily_var.set(f"{volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg):.2f}")
+        self.simple_daily_var.set(format_number(volume_to_display(cfg.demand.simple_daily_demand_gallons, cfg), cfg))
         self.daily_demand_days_var.set(str(min(max(int(cfg.demand.daily_demand_days_per_week), 0), 7)))
         self.hourly_schedule_enabled_var.set(bool(cfg.demand.hourly_schedule_enabled))
         self.use_synthetic_hourly_rainfall_var.set(
@@ -9478,22 +10207,26 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_timezone_var.set(cfg.rainfall_timezone or "Unspecified")
             self.rainfall_timing_var.set(cfg.rainfall_timing_type)
         self.hourly_schedule_summary_var.set(
-            "Custom typical-week hourly profile" if cfg.demand.hourly_schedule_enabled else "Even 24-hour demand profile"
+            (
+                f"Active hourly profile: {cfg.demand.active_hourly_schedule_name}"
+                if cfg.demand.hourly_schedule_library
+                else "Even 24-hour demand profile"
+            )
         )
         self._refresh_schedule_management()
-        self.flushes_var.set(f"{cfg.demand.avg_flush_per_person:.2f}")
-        self.toilet_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_toilet, cfg):.2f}")
-        self.urinal_flush_var.set(f"{volume_to_display(cfg.demand.gallons_per_flush_urinal, cfg):.2f}")
-        self.graph_start_var.set(f"{volume_to_display(cfg.graph_start_gal, cfg):.0f}")
-        self.graph_end_var.set(f"{volume_to_display(cfg.graph_end_gal, cfg):.0f}")
-        self.graph_step_var.set(f"{volume_to_display(cfg.graph_step_gal, cfg):.0f}")
-        self.graph_auto_step_count_var.set(str(cfg.graph_auto_step_count))
-        self.selected_tank_var.set(f"{volume_to_display(cfg.selected_tank_size_gal, cfg):.0f}")
+        self.flushes_var.set(format_number(cfg.demand.avg_flush_per_person, cfg))
+        self.toilet_flush_var.set(format_number(volume_to_display(cfg.demand.gallons_per_flush_toilet, cfg), cfg))
+        self.urinal_flush_var.set(format_number(volume_to_display(cfg.demand.gallons_per_flush_urinal, cfg), cfg))
+        self.graph_start_var.set(format_number(volume_to_display(cfg.graph_start_gal, cfg), cfg, max_decimal_places=0))
+        self.graph_end_var.set(format_number(volume_to_display(cfg.graph_end_gal, cfg), cfg, max_decimal_places=0))
+        self.graph_step_var.set(format_number(volume_to_display(cfg.graph_step_gal, cfg), cfg, max_decimal_places=0))
+        self.graph_auto_step_count_var.set(format_number(cfg.graph_auto_step_count, cfg, max_decimal_places=0))
+        self.selected_tank_var.set(format_number(volume_to_display(cfg.selected_tank_size_gal, cfg), cfg, max_decimal_places=0))
         self.recommendation_reliability_target_var.set(
-            f"{cfg.recommendation_reliability_target_percent:g}"
+            format_number(cfg.recommendation_reliability_target_percent, cfg)
         )
         self.recommendation_marginal_gain_var.set(
-            f"{cfg.recommendation_marginal_gain_threshold:g}"
+            format_number(cfg.recommendation_marginal_gain_threshold, cfg)
         )
         self.multitank_comparison_var.set(cfg.multitank_comparison_enabled)
         report_sections = normalize_report_sections(cfg.report_sections)
@@ -9505,21 +10238,33 @@ class RainwaterTkApp(tk.Tk):
         self.report_include_multitank_charts_var.set(
             cfg.report_include_multitank_charts
         )
-        self.initial_fill_var.set(f"{cfg.tank_parameters.initial_fill_percent:.0f}")
-        self.reserve_var.set(f"{cfg.tank_parameters.minimum_operating_volume_percent:.0f}")
-        antecedent_unit = (
-            cfg.first_flush_antecedent_dry_unit
-            if cfg.first_flush_antecedent_dry_unit in {"days", "hours"}
-            else "days"
+        self.initial_fill_var.set(format_number(cfg.tank_parameters.initial_fill_percent, cfg))
+        self.reserve_var.set(format_number(cfg.tank_parameters.minimum_operating_volume_percent, cfg))
+        prior_component_editor_loading = getattr(
+            self, "system_component_editor_loading", False
         )
-        self.first_flush_antecedent_display_unit = antecedent_unit
-        self.first_flush_antecedent_unit_var.set(antecedent_unit)
-        antecedent_display_value = _antecedent_dry_period_from_days(
-            cfg.first_flush_antecedent_dry_days, antecedent_unit
-        )
-        self.first_flush_antecedent_var.set(
-            f"{antecedent_display_value:g}"
-        )
+        self.system_component_editor_loading = True
+        sizing_method = normalize_first_flush_sizing_method(cfg.first_flush_sizing_method)
+        design_preset = normalize_first_flush_design_preset(cfg.first_flush_design_preset)
+        try:
+            self.first_flush_sizing_method_var.set(SIZING_METHOD_LABELS[sizing_method])
+            self.first_flush_design_preset_var.set(DESIGN_PRESET_LABELS[design_preset])
+            self._refresh_first_flush_guidance()
+            antecedent_unit = (
+                cfg.first_flush_antecedent_dry_unit
+                if cfg.first_flush_antecedent_dry_unit in {"days", "hours"}
+                else "days"
+            )
+            self.first_flush_antecedent_display_unit = antecedent_unit
+            self.first_flush_antecedent_unit_var.set(antecedent_unit)
+            antecedent_display_value = _antecedent_dry_period_from_days(
+                cfg.first_flush_antecedent_dry_days, antecedent_unit
+            )
+            self.first_flush_antecedent_var.set(
+                format_number(antecedent_display_value, cfg)
+            )
+        finally:
+            self.system_component_editor_loading = prior_component_editor_loading
         self._update_setting_unit_labels()
         self._populate_surfaces()
         self._populate_demand()
@@ -9667,6 +10412,8 @@ class RainwaterTkApp(tk.Tk):
         cfg.tank_parameters.minimum_operating_volume_percent = min(
             max(_float(self.reserve_var.get(), 0), 0), 100
         )
+        cfg.first_flush_sizing_method = self._selected_first_flush_sizing_method()
+        cfg.first_flush_design_preset = self._selected_first_flush_design_preset()
         antecedent_unit = self.first_flush_antecedent_unit_var.get().casefold()
         if antecedent_unit not in {"days", "hours"}:
             antecedent_unit = "days"
@@ -9726,9 +10473,6 @@ class RainwaterTkApp(tk.Tk):
 
     def _populate_surfaces(self) -> None:
         self.surface_tree.heading("area", text=f"Area ({area_unit(self.config_model)})")
-        self.surface_tree.heading(
-            "first_flush", text=f"First flush ({precip_unit(self.config_model)})"
-        )
         self._wrap_treeview_headings(self.surface_tree)
         self.surface_tree.delete(*self.surface_tree.get_children())
         for i, surface in enumerate(self.config_model.surfaces):
@@ -9748,9 +10492,8 @@ class RainwaterTkApp(tk.Tk):
                 iid=str(i),
                 values=(
                     surface.name,
-                    f"{area_to_display(surface.area, self.config_model):.2f}",
-                    f"{surface.runoff_coefficient:.2f}",
-                    f"{precip_to_display(surface.first_flush_depth_inches, self.config_model):.3f}",
+                    format_number(area_to_display(surface.area, self.config_model), self.config_model),
+                    format_number(surface.runoff_coefficient, self.config_model),
                 ),
             )
 
@@ -9765,7 +10508,7 @@ class RainwaterTkApp(tk.Tk):
                 value = getattr(self.config_model.demand, field)[month]
                 if field in monthly_volume_fields:
                     value = volume_to_display(value, self.config_model)
-                row.append(f"{value:.2f}")
+                row.append(format_number(value, self.config_model))
             self.demand_tree.insert("", "end", iid=month, values=row)
 
     def _populate_demand_objects(self, select_index: int | None = None) -> None:
@@ -9804,21 +10547,25 @@ class RainwaterTkApp(tk.Tk):
         if demand_object.demand_mode == "fixture_usage":
             daily = fixture_daily_demand_gallons(demand_object)
             return (
-                f"{volume_to_display(daily, self.config_model):.2f} {unit}/active day "
-                f"({demand_object.fixture_people:g} people)"
+                f"{format_number(volume_to_display(daily, self.config_model), self.config_model)} "
+                f"{unit}/active day "
+                f"({format_number(demand_object.fixture_people, self.config_model)} people)"
             )
         if demand_object.demand_mode == "recurring_daily":
             return (
-                f"{volume_to_display(demand_object.recurring_daily_gallons, self.config_model):.2f} "
+                f"{format_number(volume_to_display(demand_object.recurring_daily_gallons, self.config_model), self.config_model)} "
                 f"{unit}/occupied day"
             )
         if demand_object.demand_mode == "monthly_volume":
             value = max(demand_object.monthly_demand_gallons.values(), default=0.0)
-            return f"up to {volume_to_display(value, self.config_model):.2f} {unit}/month"
+            return (
+                f"up to {format_number(volume_to_display(value, self.config_model), self.config_model)} "
+                f"{unit}/month"
+            )
         value = volume_to_display(
             demand_object.instantaneous_demand_gallons_per_minute, self.config_model
         )
-        return f"{value:.2f} {unit}/min"
+        return f"{format_number(value, self.config_model)} {unit}/min"
 
     def _update_demand_headings(self) -> None:
         unit = volume_unit(self.config_model)
@@ -9843,9 +10590,15 @@ class RainwaterTkApp(tk.Tk):
         if self.rainfall_df.empty:
             self.rainfall_summary_var.set("No rainfall file loaded")
             self.rainfall_quality_var.set("Quality assessment unavailable")
+            save_button = self.__dict__.get("save_rainfall_csv_button")
+            if save_button is not None:
+                save_button.state(["disabled"])
             self._refresh_system_animation_dates()
             self._refresh_synthetic_hourly_rainfall_status()
             return
+        save_button = self.__dict__.get("save_rainfall_csv_button")
+        if save_button is not None:
+            save_button.state(["!disabled"])
         start = pd.Timestamp(self.rainfall_df["Date"].min()).strftime("%Y-%m-%d")
         end = pd.Timestamp(self.rainfall_df["Date"].max()).strftime("%Y-%m-%d")
         source = f" from {self.rainfall_source_label}" if self.rainfall_source_label else ""
@@ -9856,7 +10609,7 @@ class RainwaterTkApp(tk.Tk):
         quality = self._rainfall_quality_assessment()
         partial_years = ", ".join(str(year) for year in quality.partial_years)
         quality_parts = [
-            f"Completeness: {quality.completeness_percent:.2f}% ({quality.completeness_rating}); "
+            f"Completeness: {format_number(quality.completeness_percent, self.config_model)}% ({quality.completeness_rating}); "
             f"{quality.observed_days:,} of {quality.expected_days:,} calendar days observed",
             f"{quality.missing_days:,} missing day(s) in {len(quality.missing_periods):,} period(s)",
         ]
@@ -9920,6 +10673,8 @@ class RainwaterTkApp(tk.Tk):
                 self.selected_tank_var,
                 self.initial_fill_var,
                 self.reserve_var,
+                self.first_flush_sizing_method_var,
+                self.first_flush_design_preset_var,
                 self.first_flush_antecedent_var,
                 self.first_flush_antecedent_unit_var,
                 self.pump_capacity_var,
@@ -10202,6 +10957,9 @@ class RainwaterTkApp(tk.Tk):
         self.station_combo.configure(state="readonly" if enabled else "disabled")
         self.find_stations_button.configure(state="normal" if enabled else "disabled")
         self.find_nearest_stations_button.configure(state="normal" if enabled else "disabled")
+        self.find_nearest_airport_stations_button.configure(
+            state="normal" if enabled else "disabled"
+        )
         self.import_station_button.configure(state="normal" if enabled else "disabled")
 
     def _project_form_values(self) -> dict[str, object]:
@@ -10356,6 +11114,7 @@ class RainwaterTkApp(tk.Tk):
             self.comparison_results = self._comparison_results_from_frame(
                 draft.comparison_results_df
             )
+            self.current_rainfall_csv_path = None
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self._populate_from_model()
@@ -10425,9 +11184,10 @@ class RainwaterTkApp(tk.Tk):
         cfg.graph_auto_step_count = step_count
         step_gal = (end_gal - start_gal) / step_count
         step_display = max(1.0, volume_to_display(step_gal, cfg))
-        self.graph_step_var.set(f"{step_display:.0f}")
+        self.graph_step_var.set(format_number(step_display, cfg, max_decimal_places=0))
         self.status_var.set(
-            f"Auto-set graph step to {step_display:.0f} {volume_unit(cfg)} for {step_count} steps"
+            f"Auto-set graph step to {format_number(step_display, cfg, max_decimal_places=0)} "
+            f"{volume_unit(cfg)} for {format_number(step_count, cfg, max_decimal_places=0)} steps"
         )
 
     def new_project(self) -> None:
@@ -10441,6 +11201,7 @@ class RainwaterTkApp(tk.Tk):
         self._reset_weather_selection()
         self.config_model = default_project_config()
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+        self.current_rainfall_csv_path = None
         self.rainfall_source_label = None
         self.config_model.rainfall_source_label = None
         self.results_df = pd.DataFrame()
@@ -10478,6 +11239,7 @@ class RainwaterTkApp(tk.Tk):
             self.results_df = example.outcome.selected_tank
             self.hourly_results_df = example.outcome.hourly_selected_tank
             self.comparison_results = example.outcome.comparison_tanks
+            self.current_rainfall_csv_path = None
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self._populate_from_model()
@@ -10516,6 +11278,7 @@ class RainwaterTkApp(tk.Tk):
         self.project_name_var.set("")
         self.saved_project_var.set("")
         self.rainfall_df = pd.DataFrame(columns=["Date", "Precipitation"])
+        self.current_rainfall_csv_path = None
         self.rainfall_source_label = None
         self.config_model.rainfall_source_label = None
         self.results_df = pd.DataFrame()
@@ -10558,6 +11321,7 @@ class RainwaterTkApp(tk.Tk):
                 )
             if not self.results_df.empty and not self.config_model.analysis_unit_system:
                 self.config_model.analysis_unit_system = self.config_model.unit_system
+            self.current_rainfall_csv_path = None
             self.rainfall_source_label = self.config_model.rainfall_source_label
             self._clear_results()
             self.hourly_results_df = self.store.load_hourly_results(name)
@@ -10813,6 +11577,305 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_timezone_var.set(timezone)
         self.rainfall_timing_var.set(timing_type)
 
+    @staticmethod
+    def _rainfall_quick_access_label(path_text: str) -> str:
+        path = Path(path_text)
+        return f"{path.name}  —  {path.parent}"
+
+    def _refresh_rainfall_quick_access_menu(self) -> None:
+        menu = self.rainfall_quick_access_menu
+        menu.delete(0, tk.END)
+
+        menu.add_command(label="Recent daily rainfall CSVs", state="disabled")
+        if self.recent_rainfall_csv_paths:
+            for path_text in self.recent_rainfall_csv_paths:
+                menu.add_command(
+                    label=self._rainfall_quick_access_label(path_text),
+                    command=lambda value=path_text: self._load_rainfall_csv_path(value),
+                )
+        else:
+            menu.add_command(label="No recent files", state="disabled")
+
+        menu.add_separator()
+        pinned_menu = tk.Menu(menu, tearoff=False)
+        if not self.pinned_rainfall_csv_paths:
+            pinned_menu.add_command(label="No pinned files", state="disabled")
+        elif len(self.pinned_rainfall_csv_paths) <= PINNED_RAINFALL_MENU_GROUP_SIZE:
+            self._add_rainfall_paths_to_menu(
+                pinned_menu, self.pinned_rainfall_csv_paths
+            )
+        else:
+            for start in range(
+                0, len(self.pinned_rainfall_csv_paths), PINNED_RAINFALL_MENU_GROUP_SIZE
+            ):
+                group = self.pinned_rainfall_csv_paths[
+                    start : start + PINNED_RAINFALL_MENU_GROUP_SIZE
+                ]
+                group_menu = tk.Menu(pinned_menu, tearoff=False)
+                self._add_rainfall_paths_to_menu(group_menu, group)
+                pinned_menu.add_cascade(
+                    label=f"Files {start + 1}–{start + len(group)}", menu=group_menu
+                )
+        menu.add_cascade(
+            label=f"Pinned files ({len(self.pinned_rainfall_csv_paths):,}/"
+            f"{MAX_PINNED_RAINFALL_CSVS:,})",
+            menu=pinned_menu,
+        )
+        menu.add_separator()
+        menu.add_command(label="Pin CSV files...", command=self.pin_rainfall_csv_files)
+        current_is_pinned = self._rainfall_path_is_pinned(
+            self.current_rainfall_csv_path
+        )
+        if current_is_pinned:
+            menu.add_command(
+                label="Unpin current CSV", command=self.unpin_current_rainfall_csv
+            )
+        else:
+            menu.add_command(
+                label="Pin current CSV",
+                command=self.pin_current_rainfall_csv,
+                state="normal" if self.current_rainfall_csv_path else "disabled",
+            )
+        menu.add_command(
+            label="Manage pinned files...", command=self.manage_pinned_rainfall_csvs
+        )
+        menu.add_command(
+            label="Remove missing entries", command=self.remove_missing_rainfall_csv_entries
+        )
+        menu.add_command(label="Clear recent files", command=self.clear_recent_rainfall_csvs)
+
+    def _add_rainfall_paths_to_menu(
+        self, menu: tk.Menu, paths: list[str]
+    ) -> None:
+        for path_text in paths:
+            menu.add_command(
+                label=self._rainfall_quick_access_label(path_text),
+                command=lambda value=path_text: self._load_rainfall_csv_path(value),
+            )
+
+    def _open_rainfall_quick_access_on_hover(self, _event: tk.Event) -> None:
+        self._refresh_rainfall_quick_access_menu()
+        button = self.rainfall_quick_access_button
+        try:
+            self.rainfall_quick_access_menu.post(
+                button.winfo_rootx(), button.winfo_rooty() + button.winfo_height()
+            )
+        except tk.TclError:
+            pass
+
+    def _rainfall_path_is_pinned(self, path_text: str | None) -> bool:
+        if not path_text:
+            return False
+        identity = path_text.casefold()
+        return any(path.casefold() == identity for path in self.pinned_rainfall_csv_paths)
+
+    def _remember_recent_rainfall_csv(self, path: Path) -> None:
+        path_text = str(path.expanduser().resolve(strict=False))
+        identity = path_text.casefold()
+        self.recent_rainfall_csv_paths = [
+            item for item in self.recent_rainfall_csv_paths
+            if item.casefold() != identity
+        ]
+        self.recent_rainfall_csv_paths.insert(0, path_text)
+        self.recent_rainfall_csv_paths = self.recent_rainfall_csv_paths[
+            :MAX_RECENT_RAINFALL_CSVS
+        ]
+        self._save_app_preferences()
+        self._refresh_rainfall_quick_access_menu()
+
+    def pin_rainfall_csv_files(self) -> None:
+        paths = filedialog.askopenfilenames(
+            title="Pin rainfall CSV files",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not paths:
+            return
+        added = 0
+        skipped = 0
+        for raw_path in paths:
+            if len(self.pinned_rainfall_csv_paths) >= MAX_PINNED_RAINFALL_CSVS:
+                skipped += 1
+                continue
+            path = Path(raw_path).expanduser().resolve(strict=False)
+            if path.suffix.casefold() != ".csv" or not path.is_file():
+                skipped += 1
+                continue
+            path_text = str(path)
+            if self._rainfall_path_is_pinned(path_text):
+                skipped += 1
+                continue
+            self.pinned_rainfall_csv_paths.append(path_text)
+            added += 1
+        self._save_app_preferences()
+        self._refresh_rainfall_quick_access_menu()
+        self.status_var.set(f"Pinned {added:,} rainfall CSV file(s)")
+        if skipped:
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Pinned {added:,} file(s). Skipped {skipped:,} duplicate, invalid, "
+                f"or over-limit file(s).",
+                parent=self,
+            )
+
+    def pin_current_rainfall_csv(self) -> None:
+        if not self.current_rainfall_csv_path:
+            return
+        if len(self.pinned_rainfall_csv_paths) >= MAX_PINNED_RAINFALL_CSVS:
+            messagebox.showinfo(
+                APP_TITLE,
+                f"Quick Access already contains the maximum of "
+                f"{MAX_PINNED_RAINFALL_CSVS:,} pinned files.",
+                parent=self,
+            )
+            return
+        if not self._rainfall_path_is_pinned(self.current_rainfall_csv_path):
+            self.pinned_rainfall_csv_paths.append(self.current_rainfall_csv_path)
+            self._save_app_preferences()
+            self._refresh_rainfall_quick_access_menu()
+            self.status_var.set(f"Pinned rainfall CSV: {Path(self.current_rainfall_csv_path).name}")
+
+    def unpin_current_rainfall_csv(self) -> None:
+        if not self.current_rainfall_csv_path:
+            return
+        identity = self.current_rainfall_csv_path.casefold()
+        self.pinned_rainfall_csv_paths = [
+            item for item in self.pinned_rainfall_csv_paths
+            if item.casefold() != identity
+        ]
+        self._save_app_preferences()
+        self._refresh_rainfall_quick_access_menu()
+
+    def clear_recent_rainfall_csvs(self) -> None:
+        self.recent_rainfall_csv_paths = []
+        self._save_app_preferences()
+        self._refresh_rainfall_quick_access_menu()
+        self.status_var.set("Cleared recent rainfall CSV files")
+
+    def remove_missing_rainfall_csv_entries(self) -> None:
+        recent_before = len(self.recent_rainfall_csv_paths)
+        pinned_before = len(self.pinned_rainfall_csv_paths)
+        self.recent_rainfall_csv_paths = [
+            path for path in self.recent_rainfall_csv_paths if Path(path).is_file()
+        ]
+        self.pinned_rainfall_csv_paths = [
+            path for path in self.pinned_rainfall_csv_paths if Path(path).is_file()
+        ]
+        removed = (
+            recent_before - len(self.recent_rainfall_csv_paths)
+            + pinned_before - len(self.pinned_rainfall_csv_paths)
+        )
+        self._save_app_preferences()
+        self._refresh_rainfall_quick_access_menu()
+        self.status_var.set(f"Removed {removed:,} missing Quick Access entry/entries")
+
+    def manage_pinned_rainfall_csvs(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("Manage pinned rainfall CSV files")
+        window.geometry("820x480")
+        window.minsize(560, 300)
+        window.transient(self)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+        pinned_count_var = tk.StringVar()
+        ttk.Label(
+            window,
+            textvariable=pinned_count_var,
+            padding=(10, 10, 10, 6),
+        ).grid(row=0, column=0, sticky="w")
+        list_frame = ttk.Frame(window, padding=(10, 0))
+        list_frame.grid(row=1, column=0, sticky="nsew")
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        file_list = tk.Listbox(list_frame, selectmode=tk.EXTENDED)
+        file_list.grid(row=0, column=0, sticky="nsew")
+        y_scroll = ttk.Scrollbar(list_frame, orient="vertical", command=file_list.yview)
+        y_scroll.grid(row=0, column=1, sticky="ns")
+        x_scroll = ttk.Scrollbar(list_frame, orient="horizontal", command=file_list.xview)
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        file_list.configure(yscrollcommand=y_scroll.set, xscrollcommand=x_scroll.set)
+        def refresh_file_list() -> None:
+            file_list.delete(0, tk.END)
+            for path_text in self.pinned_rainfall_csv_paths:
+                file_list.insert(tk.END, path_text)
+            pinned_count_var.set(
+                f"Pinned files ({len(self.pinned_rainfall_csv_paths):,}/"
+                f"{MAX_PINNED_RAINFALL_CSVS:,})"
+            )
+
+        refresh_file_list()
+
+        def remove_selected() -> None:
+            selected = list(file_list.curselection())
+            if not selected:
+                return
+            for index in reversed(selected):
+                del self.pinned_rainfall_csv_paths[index]
+            self._save_app_preferences()
+            self._refresh_rainfall_quick_access_menu()
+            refresh_file_list()
+
+        def load_selected() -> None:
+            selected = file_list.curselection()
+            if not selected:
+                return
+            path_text = self.pinned_rainfall_csv_paths[selected[0]]
+            window.destroy()
+            self._load_rainfall_csv_path(path_text)
+
+        def add_files() -> None:
+            self.pin_rainfall_csv_files()
+            refresh_file_list()
+
+        controls = ttk.Frame(window, padding=10)
+        controls.grid(row=2, column=0, sticky="ew")
+        ttk.Button(controls, text="Load selected", command=load_selected).pack(side="left")
+        ttk.Button(controls, text="Remove selected", command=remove_selected).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(controls, text="Add files...", command=add_files).pack(
+            side="left", padx=(6, 0)
+        )
+        ttk.Button(controls, text="Close", command=window.destroy).pack(side="right")
+
+    def save_rainfall_csv(self) -> None:
+        if self.rainfall_df.empty:
+            messagebox.showinfo(
+                APP_TITLE, "Load or import precipitation data before saving a CSV.", parent=self
+            )
+            return
+        self._apply_form_to_model()
+        source_stem = (
+            Path(self.current_rainfall_csv_path).stem
+            if self.current_rainfall_csv_path
+            else _safe_project_file_name(self.config_model.name).replace(".db", "")
+        )
+        path = filedialog.asksaveasfilename(
+            title="Save daily rainfall CSV",
+            initialfile=f"{source_stem}_rainfall.csv",
+            defaultextension=".csv",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            export = self.rainfall_df[["Date", "Precipitation"]].copy()
+            export["Date"] = pd.to_datetime(export["Date"]).dt.strftime("%Y-%m-%d")
+            export["Precipitation"] = export["Precipitation"].map(
+                lambda value: precip_to_display(float(value), self.config_model)
+            )
+            export.to_csv(path, index=False, quoting=csv.QUOTE_MINIMAL)
+            self.status_var.set(
+                f"Saved rainfall CSV ({precip_unit(self.config_model)}): {Path(path).name}"
+            )
+            self.execution_log.info(
+                "Rainfall", f"Saved {len(export):,} daily rainfall rows to {Path(path).name}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error("Rainfall", "Could not save rainfall CSV", exception=exc)
+            messagebox.showerror(
+                APP_TITLE, f"Could not save rainfall CSV:\n{exc}", parent=self
+            )
+
     def load_rainfall_csv(self) -> None:
         self._apply_form_to_model()
         path = filedialog.askopenfilename(
@@ -10821,15 +11884,22 @@ class RainwaterTkApp(tk.Tk):
         )
         if not path:
             return
+        self._load_rainfall_csv_path(path)
+
+    def _load_rainfall_csv_path(self, path: str | Path) -> None:
+        self._apply_form_to_model()
+        csv_path = Path(path).expanduser().resolve(strict=False)
         try:
-            self.execution_log.info("Rainfall", f"Loading rainfall CSV {Path(path).name}")
-            raw = Path(path).read_bytes()
+            self.execution_log.info("Rainfall", f"Loading rainfall CSV {csv_path.name}")
+            raw = csv_path.read_bytes()
             rainfall = load_rainfall_csv(raw)
             rainfall["Precipitation"] = rainfall["Precipitation"].map(lambda v: precip_to_internal(float(v), self.config_model))
             self.rainfall_df = rainfall
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
-            self.rainfall_source_label = f"CSV file: {Path(path).name}"
+            self.current_rainfall_csv_path = str(csv_path)
+            self._remember_recent_rainfall_csv(csv_path)
+            self.rainfall_source_label = f"CSV file: {csv_path.name}"
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self._set_rainfall_provenance(
                 data_type="unclassified",
@@ -10846,7 +11916,7 @@ class RainwaterTkApp(tk.Tk):
             self._clear_results()
             self._reset_weather_selection()
             self._update_rainfall_summary()
-            self.status_var.set(f"Loaded rainfall CSV: {Path(path).name}")
+            self.status_var.set(f"Loaded rainfall CSV: {csv_path.name}")
             self.execution_log.info(
                 "Rainfall", f"Loaded {len(self.rainfall_df):,} rainfall rows from CSV"
             )
@@ -10876,6 +11946,7 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = rainfall
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
+            self.current_rainfall_csv_path = None
             self.rainfall_source_label = f"Hourly CSV file: {Path(path).name}"
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self._set_rainfall_provenance(
@@ -10966,6 +12037,7 @@ class RainwaterTkApp(tk.Tk):
         self.rainfall_timing_var.set(self.config_model.rainfall_timing_type)
         self.curve_df = pd.DataFrame()
         self.results_df = pd.DataFrame()
+        self.hourly_results_df = pd.DataFrame()
         self.reliability_var.set("Reliability: --")
         self._clear_results()
         self._update_rainfall_summary()
@@ -11004,8 +12076,8 @@ class RainwaterTkApp(tk.Tk):
                 "end",
                 values=(
                     f"{hour:02d}:00-{(hour + 1) % 24:02d}:00",
-                    f"{precip_to_display(total, self.config_model):,.3f}",
-                    f"{share:.2f}",
+                    format_number(precip_to_display(total, self.config_model), self.config_model, max_decimal_places=3),
+                    format_number(share, self.config_model),
                 ),
             )
         wet_hours = int((hourly_totals > 0.0).sum())
@@ -11025,12 +12097,12 @@ class RainwaterTkApp(tk.Tk):
         archive_size_mb = NCEI_BULK_ARCHIVE_SIZE_BYTES / 1_000_000
         if installed:
             self.climate_normal_archive_status_var.set(
-                f"Installed ({archive_size_mb:.1f} MB) as an offline fallback at "
+                f"Installed ({format_number(archive_size_mb, self.config_model, max_decimal_places=1)} MB) as an offline fallback at "
                 f"{archive_path}. Normal lookups use NOAA's per-station mirrors first."
             )
         else:
             self.climate_normal_archive_status_var.set(
-                f"Not installed. Download the {archive_size_mb:.1f} MB official NOAA "
+                f"Not installed. Download the {format_number(archive_size_mb, self.config_model, max_decimal_places=1)} MB official NOAA "
                 "1991-2020 annual/seasonal archive only if an offline fallback is needed."
             )
         if hasattr(self, "download_climate_normal_archive_button"):
@@ -11095,8 +12167,8 @@ class RainwaterTkApp(tk.Tk):
             percent = min(downloaded / total * 100.0, 100.0)
             self.climate_normal_archive_progress_var.set(percent)
             self.climate_normal_archive_status_var.set(
-                f"Downloading NOAA archive: {downloaded / 1_000_000:.1f} of "
-                f"{total / 1_000_000:.1f} MB ({percent:.0f}%)."
+                f"Downloading NOAA archive: {format_number(downloaded / 1_000_000, self.config_model, max_decimal_places=1)} of "
+                f"{format_number(total / 1_000_000, self.config_model, max_decimal_places=1)} MB ({format_number(percent, self.config_model, max_decimal_places=0)}%)."
             )
             self.climate_normal_archive_poll_after_id = self.after(
                 100, self._poll_climate_normal_archive_download
@@ -11322,7 +12394,7 @@ class RainwaterTkApp(tk.Tk):
             self.add_climate_normal_button.configure(state="normal")
             self.climate_normal_status_var.set(
                 f"Selected {record['name']}: "
-                f"{float(record['annual_precipitation_inches']):.2f} in annually."
+                f"{format_number(float(record['annual_precipitation_inches']), self.config_model)} in annually."
             )
             return
         self.add_climate_normal_button.configure(state="normal")
@@ -11823,7 +12895,7 @@ class RainwaterTkApp(tk.Tk):
                 values=(
                     f"{record.get('name', '')} [{record.get('station_id', '')}]",
                     *(
-                        f"{precip_to_display(float(record[key]), self.config_model):,.2f}"
+                        format_number(precip_to_display(float(record[key]), self.config_model), self.config_model)
                         for key in PRECIPITATION_NORMAL_RECORD_KEYS
                     ),
                 ),
@@ -11881,7 +12953,7 @@ class RainwaterTkApp(tk.Tk):
                             record.get("name", ""),
                             record.get("station_id", ""),
                             *(
-                                f"{precip_to_display(float(record[key]), self.config_model):.2f}"
+                                format_number(precip_to_display(float(record[key]), self.config_model), self.config_model)
                                 for key in PRECIPITATION_NORMAL_RECORD_KEYS
                             ),
                             record.get("period", "1991-2020"),
@@ -11935,6 +13007,30 @@ class RainwaterTkApp(tk.Tk):
             years,
         )
 
+    def find_nearest_airport_weather_stations(self) -> None:
+        if self.station_lookup_in_progress:
+            return
+        coordinates = self._coordinates_from_form(require_coordinates=True)
+        if coordinates is None:
+            return
+        latitude, longitude = coordinates
+        assert latitude is not None and longitude is not None
+        country = self._selected_country_code()
+        if country not in {"USA", "CAN"}:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Airport-station search is currently available for the USA and Canada.",
+            )
+            return
+        years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        self._start_nearest_station_lookup(
+            "ACIS" if country == "USA" else "ECCC",
+            latitude,
+            longitude,
+            years,
+            airport_only=True,
+        )
+
     def find_eccc_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
         selected_province = self.weather_state_var.get()
@@ -11949,11 +13045,13 @@ class RainwaterTkApp(tk.Tk):
         start_date, end_date = default_complete_calendar_range(years)
         query = self.weather_filter_var.get().strip().casefold()
         self.station_lookup_in_progress = True
+        self.station_lookup_airport_only = False
         for widget in (
             self.country_combo,
             self.state_combo,
             self.find_stations_button,
             self.find_nearest_stations_button,
+            self.find_nearest_airport_stations_button,
             self.station_combo,
             self.import_station_button,
         ):
@@ -11978,15 +13076,23 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_poll_after_id = self.after(100, self._poll_station_lookup_results)
 
     def _start_nearest_station_lookup(
-        self, provider: str, latitude: float, longitude: float, years: int
+        self,
+        provider: str,
+        latitude: float,
+        longitude: float,
+        years: int,
+        *,
+        airport_only: bool = False,
     ) -> None:
         start_date, end_date = default_complete_calendar_range(years)
         self.station_lookup_in_progress = True
+        self.station_lookup_airport_only = airport_only
         for widget in (
             self.country_combo,
             self.state_combo,
             self.find_stations_button,
             self.find_nearest_stations_button,
+            self.find_nearest_airport_stations_button,
             self.station_combo,
             self.import_station_button,
         ):
@@ -11994,11 +13100,12 @@ class RainwaterTkApp(tk.Tk):
         self.analysis_progress.stop()
         self.analysis_progress.configure(mode="indeterminate", style="Analysis.Horizontal.TProgressbar")
         self.analysis_progress.start(12)
-        self.status_var.set(f"Finding nearest {provider} stations...")
-        self.execution_log.info("Weather", f"Searching for nearest {provider} stations")
+        station_kind = "airport weather stations" if airport_only else f"{provider} stations"
+        self.status_var.set(f"Finding nearest {station_kind}...")
+        self.execution_log.info("Weather", f"Searching for nearest {station_kind}")
         threading.Thread(
             target=self._nearest_station_lookup_worker,
-            args=(provider, latitude, longitude, start_date, end_date),
+            args=(provider, latitude, longitude, start_date, end_date, airport_only),
             name=f"rwh-{provider.casefold()}-nearest-stations",
             daemon=True,
         ).start()
@@ -12011,10 +13118,17 @@ class RainwaterTkApp(tk.Tk):
         longitude: float,
         start_date: dt.date,
         end_date: dt.date,
+        airport_only: bool = False,
     ) -> None:
         try:
             stations: list[dict] = []
-            for radius_km in (50.0, 150.0, 400.0, 1000.0):
+            limit = 5 if airport_only else 10
+            search_radii = (
+                (150.0, 400.0, 1000.0)
+                if airport_only and provider == "ACIS"
+                else (50.0, 150.0, 400.0, 1000.0)
+            )
+            for radius_index, radius_km in enumerate(search_radii):
                 self.execution_log.diagnostic(
                     "Weather", f"Searching within a {radius_km:g} km radius"
                 )
@@ -12023,8 +13137,24 @@ class RainwaterTkApp(tk.Tk):
                     stations = fetch_station_options_bbox(west, south, east, north, start_date, end_date)
                 else:
                     stations = fetch_canadian_station_options_bbox(west, south, east, north, start_date, end_date)
-                stations = nearest_stations(stations, latitude, longitude, limit=10)
-                if len(stations) >= 10:
+                if airport_only and provider == "ACIS":
+                    structured_candidates = [
+                        station for station in stations if acis_aviation_identifiers(station)
+                    ]
+                    verification_window = (10, 20, 40)[radius_index]
+                    structured_candidates = nearest_stations(
+                        structured_candidates,
+                        latitude,
+                        longitude,
+                        limit=verification_window,
+                    )
+                    stations = verified_airport_weather_stations(
+                        structured_candidates, provider
+                    )
+                elif airport_only:
+                    stations = verified_airport_weather_stations(stations, provider)
+                stations = nearest_stations(stations, latitude, longitude, limit=limit)
+                if len(stations) >= limit:
                     break
             self.station_lookup_queue.put(("success", provider, stations))
         except Exception as exc:  # noqa: BLE001
@@ -12045,12 +13175,7 @@ class RainwaterTkApp(tk.Tk):
                 stations = fetch_station_options(region, start_date, end_date)
             else:
                 stations = fetch_canadian_station_options(region, start_date, end_date)
-            if query:
-                stations = [
-                    station
-                    for station in stations
-                    if query in station["name"].casefold() or query in station["sid"].casefold()
-                ]
+            stations = filter_stations(stations, query)
             self.station_lookup_queue.put(("success", provider, stations))
         except Exception as exc:  # noqa: BLE001
             self.execution_log.error("Weather", f"{provider} station search failed", exception=exc)
@@ -12072,12 +13197,14 @@ class RainwaterTkApp(tk.Tk):
         self.state_combo.configure(state="readonly")
         self.find_stations_button.configure(state="normal")
         self.find_nearest_stations_button.configure(state="normal")
+        self.find_nearest_airport_stations_button.configure(state="normal")
         self.station_combo.configure(state="readonly")
         self.import_station_button.configure(state="normal")
         if result == "error":
-            self.status_var.set(f"Could not fetch {provider} stations")
+            station_kind = "airport weather stations" if self.station_lookup_airport_only else f"{provider} stations"
+            self.status_var.set(f"Could not fetch {station_kind}")
             self.execution_log.error("Weather", f"Could not fetch {provider} stations: {payload}")
-            messagebox.showerror(APP_TITLE, f"Could not fetch {provider} stations:\n{payload}")
+            messagebox.showerror(APP_TITLE, f"Could not fetch {station_kind}:\n{payload}")
             return
 
         self.station_options = payload
@@ -12086,7 +13213,11 @@ class RainwaterTkApp(tk.Tk):
         self.station_var.set(labels[0] if labels else "")
         self._reset_station_typeahead()
         self._render_station_map(fit_bounds=True)
-        descriptor = "ECCC climate station(s)" if provider == "ECCC" else "ACIS station(s)"
+        descriptor = (
+            "airport weather station(s)"
+            if self.station_lookup_airport_only
+            else "ECCC climate station(s)" if provider == "ECCC" else "ACIS station(s)"
+        )
         nearest = bool(self.station_options and "distance_km" in self.station_options[0])
         qualifier = "nearest " if nearest else ""
         self.status_var.set(f"Found {len(self.station_options)} {qualifier}{descriptor}")
@@ -12125,6 +13256,7 @@ class RainwaterTkApp(tk.Tk):
         basis_label = self.canadian_precip_var.get()
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
         try:
+            self.status_var.set(f"Importing station {station['name']} ({station['sid']})...")
             self.execution_log.info("Weather", "Importing ACIS rainfall data")
             self.execution_log.diagnostic(
                 "Weather", "ACIS import configured", details=f"years={years}; basis={basis_label}"
@@ -12136,6 +13268,7 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
+            self.current_rainfall_csv_path = None
             station_region = self._station_region_suffix(station)
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
@@ -12200,7 +13333,7 @@ class RainwaterTkApp(tk.Tk):
         basis_label = self.canadian_precip_var.get()
         precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(basis_label, "TOTAL_PRECIPITATION")
         try:
-            self.status_var.set(f"Importing ECCC data for {station['name']}...")
+            self.status_var.set(f"Importing station {station['name']} ({station['sid']})...")
             self.execution_log.info("Weather", "Importing ECCC rainfall data")
             self.execution_log.diagnostic(
                 "Weather", "ECCC import configured", details=f"years={years}; basis={basis_label}"
@@ -12218,6 +13351,7 @@ class RainwaterTkApp(tk.Tk):
             self.rainfall_df = weather_df[["Date", "Precipitation"]].copy()
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
+            self.current_rainfall_csv_path = None
             station_region = self._station_region_suffix(station)
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
@@ -13000,7 +14134,7 @@ class RainwaterTkApp(tk.Tk):
             return
         if not messagebox.askyesno(
             APP_TITLE,
-            "Delete the typical-week hourly demand schedule? Hourly analysis will be disabled.",
+            "Delete the typical-week hourly demand schedule? Demand timing will switch to Daily.",
             parent=self,
         ):
             return
@@ -13031,6 +14165,11 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.demand.hourly_schedule_months[name] = list(range(1, 13))
             self.config_model.demand.active_hourly_schedule_name = name
         self.config_model.demand.hourly_schedule_enabled = bool(self.hourly_schedule_enabled_var.get())
+        self.curve_df = pd.DataFrame()
+        self.results_df = pd.DataFrame()
+        self.hourly_results_df = pd.DataFrame()
+        self.reliability_var.set("Reliability: --")
+        self._clear_results()
         self._refresh_schedule_management()
 
     def purge_unused_schedule_objects(self) -> None:
@@ -13077,16 +14216,10 @@ class RainwaterTkApp(tk.Tk):
             return
         enabled = bool(self.use_synthetic_hourly_rainfall_var.get())
         available = has_hourly_rainfall(self.rainfall_df)
-        hourly_enabled = bool(self.hourly_schedule_enabled_var.get())
-        if not hourly_enabled:
-            message = (
-                "Hourly assumptions are not applied while Daily only is selected."
-                + (" A synthetic hourly profile is available." if available else "")
-            )
-        elif enabled and available:
+        if enabled and available:
             message = (
                 "Synthetic hourly profiles will be used for hourly collection and first-flush timing. "
-                "Daily analyses continue to use the observed daily totals."
+                "The daily mass balance continues to use the source daily totals."
             )
         elif enabled:
             message = (
@@ -13154,29 +14287,34 @@ class RainwaterTkApp(tk.Tk):
         )
         if schedule_selection_var is not None:
             schedule_selection_var.set(active_name)
-        if hourly_enabled:
-            resolution = "Daily + hourly (the daily analysis is always included)"
-            demand_timing = f"Hourly schedules (project default: {active_name})"
-            if bool(self.use_synthetic_hourly_rainfall_var.get()):
-                if available:
-                    seed_match = re.search(
-                        r"\(seed (\d+)\)", self.config_model.rainfall_timing_type
-                    )
-                    seed_suffix = f" (seed {seed_match.group(1)})" if seed_match else ""
-                    rainfall_timing = (
-                        "Synthetic hourly profile derived from each daily rainfall total"
-                        + seed_suffix
-                    )
-                else:
-                    rainfall_timing = (
-                        "Synthetic hourly timing selected, but no profile has been generated"
-                    )
+        resolution = (
+            "Daily mass balance for sizing + full hourly selected-tank simulation"
+            if hourly_enabled
+            else "Daily mass balance only"
+        )
+        demand_timing = (
+            f"Hourly profile applied hour by hour (schedule: {active_name})"
+            if hourly_enabled
+            else "Daily demand totals; hourly profile is preserved but not simulated"
+        )
+        if not hourly_enabled:
+            rainfall_timing = "Hourly rainfall timing is not simulated; daily source totals are used"
+        elif bool(self.use_synthetic_hourly_rainfall_var.get()):
+            if available:
+                seed_match = re.search(
+                    r"\(seed (\d+)\)", self.config_model.rainfall_timing_type
+                )
+                seed_suffix = f" (seed {seed_match.group(1)})" if seed_match else ""
+                rainfall_timing = (
+                    "Synthetic hourly profile derived from each daily rainfall total"
+                    + seed_suffix
+                )
             else:
-                rainfall_timing = "Each daily rainfall total is applied at 23:00"
+                rainfall_timing = (
+                    "Synthetic hourly timing selected, but no profile has been generated"
+                )
         else:
-            resolution = "Daily only"
-            demand_timing = "Daily totals (hourly simulation is off)"
-            rainfall_timing = "Daily totals"
+            rainfall_timing = "Each daily rainfall total is applied at 23:00"
 
         self.applied_analysis_resolution_var.set(resolution)
         rainfall_source = (
@@ -13198,13 +14336,13 @@ class RainwaterTkApp(tk.Tk):
             "daily_rainfall_timing_radio"
         )
         if daily_rainfall_timing_radio is not None:
-            daily_rainfall_timing_radio.state(enabled_state)
+            daily_rainfall_timing_radio.state(["!disabled"])
         synthetic_hourly_rainfall_radio = self.__dict__.get(
             "synthetic_hourly_rainfall_radio"
         )
         if synthetic_hourly_rainfall_radio is not None:
             synthetic_hourly_rainfall_radio.state(
-                ["!disabled"] if hourly_enabled and available else ["disabled"]
+                ["!disabled"] if available else ["disabled"]
             )
         analysis_generate_hourly_rainfall_button = self.__dict__.get(
             "analysis_generate_hourly_rainfall_button"
@@ -13212,7 +14350,7 @@ class RainwaterTkApp(tk.Tk):
         if analysis_generate_hourly_rainfall_button is not None:
             analysis_generate_hourly_rainfall_button.state(
                 ["!disabled"]
-                if hourly_enabled and not self.rainfall_df.empty
+                if not self.rainfall_df.empty
                 else ["disabled"]
             )
 
@@ -13350,7 +14488,11 @@ class RainwaterTkApp(tk.Tk):
         if self.rainfall_df.empty:
             messagebox.showwarning(APP_TITLE, "Load rainfall data before running the analysis.")
             return
-        if cfg.use_synthetic_hourly_rainfall and not has_hourly_rainfall(self.rainfall_df):
+        if (
+            cfg.demand.hourly_schedule_enabled
+            and cfg.use_synthetic_hourly_rainfall
+            and not has_hourly_rainfall(self.rainfall_df)
+        ):
             messagebox.showwarning(
                 APP_TITLE,
                 "Synthetic hourly rainfall is selected, but no generated profiles are available. "
@@ -13391,100 +14533,165 @@ class RainwaterTkApp(tk.Tk):
             details=(
                 f"rainfall_rows={len(self.rainfall_df):,}; surfaces={len(cfg.surfaces)}; "
                 f"selected_tank={cfg.selected_tank_size_gal:g}; "
-                f"hourly={cfg.demand.hourly_schedule_enabled}"
+                f"demand_timing={'hourly' if cfg.demand.hourly_schedule_enabled else 'daily'}"
             ),
         )
         self.analysis_running = True
         self.analysis_cancel_requested = False
         self.cancel_analysis_button.state(["!disabled"])
-        try:
-            self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
-            self.analysis_progress_var.set(0)
+        self.analysis_progress.configure(style="Analysis.Horizontal.TProgressbar")
+        self.analysis_progress_var.set(0)
+        self.status_var.set(f"{analysis_label} running: preparing inputs")
+        analysis_config = copy.deepcopy(cfg)
+        analysis_rainfall = self.rainfall_df.copy(deep=True)
+        self.analysis_active_label = analysis_label
+        self.analysis_started_at = analysis_started
+        self.analysis_started_signature = analysis_input_signature(
+            analysis_config, analysis_rainfall
+        )
+        self.analysis_started_unit_system = analysis_config.unit_system
+        self.analysis_result_queue = queue.Queue()
 
-            def update_analysis_progress(event: AnalysisProgressEvent) -> None:
-                self.update()
-                if event.phase == "reliability_curve":
-                    part_progress = event.current / event.total if event.total else 1.0
-                    self.analysis_progress_var.set(part_progress * 50.0)
-                    self.status_var.set(
-                        f"{analysis_label} running: Part A - reliability curve "
-                        f"({event.current}/{event.total})"
-                    )
-                    self.execution_log.debug(
-                        "Analysis",
-                        f"Reliability curve tank {event.current} of {event.total}: "
-                        f"{float(event.tank_size_gallons or 0.0):g} gal",
-                    )
-                elif event.phase == "selected_tank":
-                    self.analysis_progress_var.set(50)
-                    self.status_var.set(
-                        f"{analysis_label} running: Part B - selected tank simulation"
-                    )
-                    self.execution_log.info("Analysis", "Simulating the selected tank")
-                else:
-                    self.status_var.set(
-                        f"{analysis_label} running: Part B - comparison tank simulation "
-                        f"({event.current}/{event.total})"
-                    )
-                    self.execution_log.debug(
-                        "Analysis",
-                        f"Comparison tank {event.current} of {event.total}: "
-                        f"{float(event.tank_size_gallons or 0.0):g} gal",
-                    )
-                self.update_idletasks()
+        def run_in_background() -> None:
+            try:
+                outcome = AnalysisService().run(
+                    analysis_config,
+                    analysis_rainfall,
+                    include_comparisons=include_comparisons,
+                    progress_callback=lambda event: self.analysis_result_queue.put(
+                        ("progress", event)
+                    ),
+                    cancel_callback=lambda: self.analysis_cancel_requested,
+                )
+            except AnalysisCancelledError as exc:
+                self.analysis_result_queue.put(("cancelled", exc))
+            except Exception as exc:  # noqa: BLE001
+                self.analysis_result_queue.put(("error", exc))
+            else:
+                self.analysis_result_queue.put(("complete", outcome))
 
-            def cancellation_requested() -> bool:
-                self.update()
-                return self.analysis_cancel_requested
+        self.analysis_thread = threading.Thread(
+            target=run_in_background,
+            name="rainwater-analysis",
+            daemon=True,
+        )
+        self.analysis_thread.start()
+        self.analysis_poll_after_id = self.after(50, self._poll_analysis_results)
 
-            outcome = AnalysisService().run(
-                cfg,
-                self.rainfall_df,
-                include_comparisons=include_comparisons,
-                progress_callback=update_analysis_progress,
-                cancel_callback=cancellation_requested,
+    def _apply_analysis_progress(self, event: AnalysisProgressEvent) -> None:
+        analysis_label = self.analysis_active_label
+        if event.phase == "reliability_curve":
+            part_progress = event.current / event.total if event.total else 1.0
+            self.analysis_progress_var.set(part_progress * 50.0)
+            self.status_var.set(
+                f"{analysis_label} running: Part A - reliability curve "
+                f"({event.current}/{event.total})"
             )
-            self.curve_df = outcome.curve
-            self.results_df = outcome.selected_tank
-            self.hourly_results_df = outcome.hourly_selected_tank
-            self.comparison_results = outcome.comparison_tanks
-            self._populate_comparison_tanks()
-            self.analysis_progress_var.set(75)
-            self.status_var.set(f"{analysis_label} running: Part B - drawing results")
-            self.execution_log.info("Analysis", "Rendering analysis results")
-            self.update_idletasks()
-            reliability = (
-                float(self.results_df["ReliabilityPercent"].iloc[0])
-                if not self.results_df.empty
-                else 0.0
+        elif event.phase == "selected_tank":
+            self.analysis_progress_var.set(50)
+            self.status_var.set(
+                f"{analysis_label} running: Part B - selected tank simulation"
             )
-            self._set_selected_tank_reliability(reliability)
-            self._populate_results()
-            self.update_financial_analysis(show_errors=False)
-            self._draw_saved_analysis_charts()
-            cfg.analysis_input_signature = analysis_input_signature(cfg, self.rainfall_df)
-            cfg.analysis_unit_system = cfg.unit_system
-            self.last_analysis_warning_key = None
-            self.analysis_progress_var.set(100)
-            self.status_var.set(f"{analysis_label} complete")
-            self.execution_log.info(
-                "Analysis",
-                f"{analysis_label} completed in "
-                f"{time.perf_counter() - analysis_started:.2f} seconds",
+            self.execution_log.info("Analysis", "Simulating the selected tank")
+        else:
+            self.status_var.set(
+                f"{analysis_label} running: Part B - comparison tank simulation "
+                f"({event.current}/{event.total})"
             )
-        except AnalysisCancelledError:
+
+    def _poll_analysis_results(self) -> None:
+        self.analysis_poll_after_id = None
+        terminal: tuple[str, object] | None = None
+        while True:
+            try:
+                kind, payload = self.analysis_result_queue.get_nowait()
+            except queue.Empty:
+                break
+            if kind == "progress":
+                self._apply_analysis_progress(payload)  # type: ignore[arg-type]
+            else:
+                terminal = (kind, payload)
+        if terminal is None:
+            if self.analysis_running:
+                self.analysis_poll_after_id = self.after(
+                    50, self._poll_analysis_results
+                )
+            return
+        kind, payload = terminal
+        if kind == "complete":
+            try:
+                self._complete_analysis(payload)  # type: ignore[arg-type]
+            except Exception as exc:  # noqa: BLE001
+                self.analysis_progress_var.set(0)
+                self.status_var.set(f"{self.analysis_active_label} failed")
+                self.execution_log.error(
+                    "Analysis",
+                    f"{self.analysis_active_label} failed while drawing results",
+                    exception=exc,
+                )
+                messagebox.showerror(
+                    APP_TITLE, f"{self.analysis_active_label} failed:\n{exc}"
+                )
+                self._finish_analysis_run()
+        elif kind == "cancelled":
             self.analysis_progress_var.set(0)
-            self.status_var.set(f"{analysis_label} cancelled; previous completed results retained")
-            self.execution_log.warning("Analysis", f"{analysis_label} cancelled")
-        except Exception as exc:  # noqa: BLE001
+            self.status_var.set(
+                f"{self.analysis_active_label} cancelled; previous completed results retained"
+            )
+            self.execution_log.warning(
+                "Analysis", f"{self.analysis_active_label} cancelled"
+            )
+            self._finish_analysis_run()
+        else:
+            exc = payload
             self.analysis_progress_var.set(0)
-            self.status_var.set(f"{analysis_label} failed")
-            self.execution_log.error("Analysis", f"{analysis_label} failed", exception=exc)
-            messagebox.showerror(APP_TITLE, f"{analysis_label} failed:\n{exc}")
-        finally:
-            self.analysis_running = False
-            self.analysis_cancel_requested = False
-            self.cancel_analysis_button.state(["disabled"])
+            self.status_var.set(f"{self.analysis_active_label} failed")
+            self.execution_log.error(
+                "Analysis", f"{self.analysis_active_label} failed", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"{self.analysis_active_label} failed:\n{exc}"
+            )
+            self._finish_analysis_run()
+
+    def _complete_analysis(self, outcome: AnalysisOutcome) -> None:
+        self.curve_df = outcome.curve
+        self.results_df = outcome.selected_tank
+        self.hourly_results_df = outcome.hourly_selected_tank
+        self.comparison_results = outcome.comparison_tanks
+        self._populate_comparison_tanks()
+        self.analysis_progress_var.set(75)
+        self.status_var.set(
+            f"{self.analysis_active_label} running: drawing results"
+        )
+        self.execution_log.info("Analysis", "Rendering analysis results")
+        self.update_idletasks()
+        reliability = (
+            float(self.results_df["ReliabilityPercent"].iloc[0])
+            if not self.results_df.empty
+            else 0.0
+        )
+        self._set_selected_tank_reliability(reliability)
+        self._populate_results()
+        self.update_financial_analysis(show_errors=False)
+        self._draw_saved_analysis_charts()
+        self.config_model.analysis_input_signature = self.analysis_started_signature
+        self.config_model.analysis_unit_system = self.analysis_started_unit_system
+        self.last_analysis_warning_key = None
+        self.analysis_progress_var.set(100)
+        self.status_var.set(f"{self.analysis_active_label} complete")
+        self.execution_log.info(
+            "Analysis",
+            f"{self.analysis_active_label} completed in "
+            f"{time.perf_counter() - self.analysis_started_at:.2f} seconds",
+        )
+        self._finish_analysis_run()
+
+    def _finish_analysis_run(self) -> None:
+        self.analysis_running = False
+        self.analysis_cancel_requested = False
+        self.analysis_thread = None
+        self.cancel_analysis_button.state(["disabled"])
 
     def cancel_analysis(self) -> None:
         if not self.analysis_running:
@@ -13692,6 +14899,7 @@ class RainwaterTkApp(tk.Tk):
             "country_typeahead_after_id",
             "station_map_redraw_after_id",
             "climate_normal_archive_poll_after_id",
+            "analysis_poll_after_id",
         ):
             after_id = getattr(self, after_id_name, None)
             if after_id is not None:
@@ -14173,12 +15381,21 @@ class RainwaterTkApp(tk.Tk):
                 "rainfall_timezone": cfg.rainfall_timezone,
                 "rainfall_timing_metadata": cfg.rainfall_timing_type,
                 "rainfall_retrieved_at": cfg.rainfall_retrieved_at or "Not recorded",
-                "simulation_timestep": "Daily mass balance",
+                "simulation_timestep": (
+                    "Daily mass balance for sizing; hourly timing simulation for detailed results"
+                ),
                 "rainfall_timing_assumption": (
                     "Synthetic hourly timing is used for hourly analysis."
                     if cfg.use_synthetic_hourly_rainfall and has_hourly_rainfall(self.rainfall_df)
                     else "Each daily rainfall total is applied within that simulated day; "
                     "hourly demand analysis places it after hour 23."
+                ),
+                "demand_timing_assumption": (
+                    f"Hourly demand profile applied hour by hour (schedule: "
+                    f"{cfg.demand.active_hourly_schedule_name})."
+                    if cfg.demand.hourly_schedule_enabled
+                    else "Hourly demand values are summed for each calendar day and the total "
+                    "is applied once at 12:00 noon; the hourly profile is preserved."
                 ),
                 "initial_tank_fill_percent": cfg.tank_parameters.initial_fill_percent,
                 "municipal_backup": "Enabled" if cfg.system_parameters.municipal_backup_enabled else "Disabled",
@@ -14223,7 +15440,7 @@ class RainwaterTkApp(tk.Tk):
         for tank_size, results in sorted(self.comparison_results.items()):
             if results.empty:
                 continue
-            label = f"{volume_to_display(tank_size, self.config_model):,.0f} {unit}"
+            label = f"{format_number(volume_to_display(tank_size, self.config_model), self.config_model, max_decimal_places=0)} {unit}"
             levels = [float(value) for value in results["WaterInTankGallons"]]
             render_indices = self._chart_render_indices(levels, 800)
             result_dates = pd.to_datetime(results["Date"], errors="coerce")
@@ -14512,12 +15729,12 @@ class RainwaterTkApp(tk.Tk):
             for item in items:
                 economics = ""
                 if item.simple_payback_years is not None:
-                    economics = f"; payback {item.simple_payback_years:.1f} years"
+                    economics = f"; payback {format_number(item.simple_payback_years, cfg, max_decimal_places=1)} years"
                 elif item.net_annual_savings is not None:
-                    economics = f"; net savings {currency} {item.net_annual_savings:,.2f}/year"
+                    economics = f"; net savings {currency} {format_number(item.net_annual_savings, cfg)}/year"
                 lines.append(
-                    f"- {item.role}: {volume_to_display(item.tank_size_gallons, cfg):,.0f} "
-                    f"{unit} at {item.reliability_percent:.1f}% reliability{economics}. {item.detail}"
+                    f"- {item.role}: {format_number(volume_to_display(item.tank_size_gallons, cfg), cfg, max_decimal_places=0)} "
+                    f"{unit} at {format_number(item.reliability_percent, cfg, max_decimal_places=1)}% reliability{economics}. {item.detail}"
                 )
             self.design_recommendations_var.set("\n".join(lines))
         warnings = self._design_review_warnings()
@@ -14583,7 +15800,9 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, "Select one candidate tank first.")
             return
         tank_size = self.candidate_tree_sizes[selected[0]]
-        self.selected_tank_var.set(f"{volume_to_display(tank_size, self.config_model):.0f}")
+        self.selected_tank_var.set(
+            format_number(volume_to_display(tank_size, self.config_model), self.config_model, max_decimal_places=0)
+        )
         self.status_var.set("Candidate set as the primary tank size; rerun the analysis to refresh detailed results.")
 
     def _use_candidate_as_primary_from_event(self, event: tk.Event) -> str:
@@ -14615,8 +15834,18 @@ class RainwaterTkApp(tk.Tk):
         location = ""
         if station.get("latitude") is not None and station.get("longitude") is not None:
             location = f" ({station['latitude']:.3f}, {station['longitude']:.3f})"
-        distance = f" - {float(station['distance_km']):.1f} km" if station.get("distance_km") is not None else ""
-        return f"{station['name']} - {station['sid']}{distance}{location}{RainwaterTkApp._station_region_suffix(station)}"
+        distance = f" - {format_number(float(station['distance_km']), self.config_model, max_decimal_places=1)} km" if station.get("distance_km") is not None else ""
+        airport_id = str(
+            station.get("airport_icao")
+            or station.get("airport_faa")
+            or station.get("tc_identifier")
+            or ""
+        ).strip()
+        airport = f" [Airport {airport_id}]" if station.get("airport_verified") and airport_id else ""
+        return (
+            f"{station['name']} - {station['sid']}{airport}{distance}{location}"
+            f"{RainwaterTkApp._station_region_suffix(station)}"
+        )
 
     @staticmethod
     def _station_region_suffix(station: dict) -> str:
@@ -14641,20 +15870,20 @@ class RainwaterTkApp(tk.Tk):
         overflow_column = f"Overflow ({volume_unit(self.config_model)}/day)"
         for _, row in display.iterrows():
             overflow_value = row.get(overflow_column)
-            overflow_text = "" if pd.isna(overflow_value) else f"{overflow_value:.1f}"
+            overflow_text = "" if pd.isna(overflow_value) else format_number(overflow_value, self.config_model, max_decimal_places=1)
             self.results_tree.insert(
                 "",
                 "end",
                 values=(
                     pd.Timestamp(row["Date"]).strftime("%Y-%m-%d"),
-                    f"{row[f'Precipitation ({precip_unit(self.config_model)})']:.3f}",
-                    f"{row[f'Gross runoff ({volume_unit(self.config_model)})']:.1f}",
-                    f"{row[f'First-flush loss ({volume_unit(self.config_model)})']:.1f}",
-                    f"{row[f'Collected ({volume_unit(self.config_model)})']:.1f}",
+                    format_number(row[f'Precipitation ({precip_unit(self.config_model)})'], self.config_model, max_decimal_places=3),
+                    format_number(row[f'Gross runoff ({volume_unit(self.config_model)})'], self.config_model, max_decimal_places=1),
+                    format_number(row[f'First-flush loss ({volume_unit(self.config_model)})'], self.config_model, max_decimal_places=1),
+                    format_number(row[f'Collected ({volume_unit(self.config_model)})'], self.config_model, max_decimal_places=1),
                     overflow_text,
-                    f"{row[f'Demand ({volume_unit(self.config_model)}/day)']:.1f}",
-                    f"{row[f'Unmet Demand ({volume_unit(self.config_model)}/day)']:.1f}",
-                    f"{row[f'Water in Tank ({volume_unit(self.config_model)})']:.1f}",
+                    format_number(row[f'Demand ({volume_unit(self.config_model)}/day)'], self.config_model, max_decimal_places=1),
+                    format_number(row[f'Unmet Demand ({volume_unit(self.config_model)}/day)'], self.config_model, max_decimal_places=1),
+                    format_number(row[f'Water in Tank ({volume_unit(self.config_model)})'], self.config_model, max_decimal_places=1),
                 ),
             )
         self._populate_hourly_results()
@@ -14679,19 +15908,19 @@ class RainwaterTkApp(tk.Tk):
             self.hourly_results_tree.insert(
                 "", "end", values=(
                     pd.Timestamp(row.Date).strftime("%Y-%m-%d %H:00"),
-                    f"{volume_to_display(row.GrossCollectedGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.FirstFlushLossGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.CollectedGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.DemandGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.PumpFlowGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.FilterThroughputGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.FilterLossGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.BoosterTankGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.MainsMakeupGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.UnmetDemandGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.SystemUnmetDemandGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.OverflowGallons, self.config_model):.2f}",
-                    f"{volume_to_display(row.WaterInTankGallons, self.config_model):.2f}",
+                    format_number(volume_to_display(row.GrossCollectedGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.FirstFlushLossGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.CollectedGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.DemandGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.PumpFlowGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.FilterThroughputGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.FilterLossGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.BoosterTankGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.MainsMakeupGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.UnmetDemandGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.SystemUnmetDemandGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.OverflowGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(row.WaterInTankGallons, self.config_model), self.config_model),
                 )
             )
 
@@ -14727,11 +15956,11 @@ class RainwaterTkApp(tk.Tk):
             self.hourly_tank_canvas,
             [float(index) for index in indices],
             [values[index] for index in indices],
-            f"Hourly Tank Water Over Time ({self.hourly_results_year_var.get()}) - {volume_to_display(self.config_model.selected_tank_size_gal, self.config_model):,.0f} {volume_unit(self.config_model)} tank",
+            f"Hourly Tank Water Over Time ({self.hourly_results_year_var.get()}) - {format_number(volume_to_display(self.config_model.selected_tank_size_gal, self.config_model), self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)} tank",
             volume_unit(self.config_model),
             "Simulation hour",
             [
-                f"Date: {pd.Timestamp(dates[index]):%Y-%m-%d %H:00}\nWater in tank: {values[index]:.2f} {volume_unit(self.config_model)}"
+                f"Date: {pd.Timestamp(dates[index]):%Y-%m-%d %H:00}\nWater in tank: {format_number(values[index], self.config_model)} {volume_unit(self.config_model)}"
                 for index in indices
             ],
             show_points=False,
@@ -14795,7 +16024,7 @@ class RainwaterTkApp(tk.Tk):
         x = [volume_to_display(v, self.config_model) for v in self.curve_df["TankSizeGallons"]]
         y = list(self.curve_df["ReliabilityPercent"])
         hover_labels = [
-            f"Tank size: {tank_size:.0f} {volume_unit(self.config_model)}\nReliability: {reliability:.2f}%"
+            f"Tank size: {format_number(tank_size, self.config_model, max_decimal_places=0)} {volume_unit(self.config_model)}\nReliability: {format_number(reliability, self.config_model)}%"
             for tank_size, reliability in zip(x, y)
         ]
         self._draw_line_chart(
@@ -14861,7 +16090,7 @@ class RainwaterTkApp(tk.Tk):
         x = list(range(1, len(chart_results) + 1))
         y = [volume_to_display(v, self.config_model) for v in chart_results["WaterInTankGallons"]]
         hover_labels = [
-            f"Date: {pd.Timestamp(date).strftime('%Y-%m-%d')}\nWater in tank: {water:.1f} {volume_unit(self.config_model)}"
+            f"Date: {pd.Timestamp(date).strftime('%Y-%m-%d')}\nWater in tank: {format_number(water, self.config_model, max_decimal_places=1)} {volume_unit(self.config_model)}"
             for date, water in zip(chart_results["Date"], y)
         ]
         self._draw_line_chart(
@@ -14869,7 +16098,7 @@ class RainwaterTkApp(tk.Tk):
             x,
             y,
             f"Tank Water Over Time ({chart_title_period}) - "
-            f"{volume_to_display(self.config_model.selected_tank_size_gal, self.config_model):,.0f} "
+            f"{format_number(volume_to_display(self.config_model.selected_tank_size_gal, self.config_model), self.config_model, max_decimal_places=0)} "
             f"{volume_unit(self.config_model)} tank",
             volume_unit(self.config_model),
             "Day in selected period",
@@ -14950,7 +16179,7 @@ class RainwaterTkApp(tk.Tk):
         canvas.create_text(
             width / 2,
             16,
-            text=f"Tank Level Distribution - {selected_capacity:,.0f} {unit} tank",
+            text=f"Tank Level Distribution - {format_number(selected_capacity, self.config_model, max_decimal_places=0)} {unit} tank",
             font=("Segoe UI", 10, "bold"),
         )
 
@@ -14958,7 +16187,7 @@ class RainwaterTkApp(tk.Tk):
             y = pad_top + plot_height * tick / 4
             value = max_count * (4 - tick) / 4
             canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
-            canvas.create_text(pad_left - 7, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 8))
+            canvas.create_text(pad_left - 7, y, text=format_number(value, self.config_model, max_decimal_places=0), anchor="e", font=("Segoe UI", 8))
         canvas.create_line(pad_left, pad_top, pad_left, height - pad_bottom, fill="#555")
         canvas.create_line(pad_left, height - pad_bottom, width - pad_right, height - pad_bottom, fill="#555")
 
@@ -14971,7 +16200,7 @@ class RainwaterTkApp(tk.Tk):
             canvas.create_rectangle(left, top, right, bottom, fill="#2e8b57", outline="#246b49")
             low = index * bin_width
             high = (index + 1) * bin_width
-            canvas.create_text((left + right) / 2, bottom + 15, text=f"{low:.0f}-{high:.0f}", font=("Segoe UI", 7))
+            canvas.create_text((left + right) / 2, bottom + 15, text=f"{format_number(low, self.config_model, max_decimal_places=0)}-{format_number(high, self.config_model, max_decimal_places=0)}", font=("Segoe UI", 7))
             canvas.create_text((left + right) / 2, max(top - 9, pad_top + 7), text=str(count), font=("Segoe UI", 8))
         canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
         canvas.create_text(
@@ -14996,7 +16225,7 @@ class RainwaterTkApp(tk.Tk):
         canvas.create_text(
             width / 2,
             14,
-            text=f"Yearly Demand Reliability - {selected_capacity:,.0f} {unit} tank",
+            text=f"Yearly Demand Reliability - {format_number(selected_capacity, self.config_model, max_decimal_places=0)} {unit} tank",
             font=("Segoe UI", 10, "bold"),
         )
         canvas.create_rectangle(16, 27, 26, 35, fill="#2e8b57", outline="")
@@ -15038,8 +16267,8 @@ class RainwaterTkApp(tk.Tk):
             )
             label = (
                 f"Year: {int(row['year'])}\n"
-                f"Demand met: {int(row['met_days'])} days ({float(row['met_percent']):.2f}%)\n"
-                f"Demand not met: {int(row['unmet_days'])} days ({float(row['unmet_percent']):.2f}%)"
+                f"Demand met: {format_number(int(row['met_days']), self.config_model, max_decimal_places=0)} days ({format_number(float(row['met_percent']), self.config_model)}%)\n"
+                f"Demand not met: {format_number(int(row['unmet_days']), self.config_model, max_decimal_places=0)} days ({format_number(float(row['unmet_percent']), self.config_model)}%)"
             )
             if met_height > 0:
                 canvas.hover_points.append((center_x, boundary + met_height / 2, label))
@@ -15062,7 +16291,7 @@ class RainwaterTkApp(tk.Tk):
         )
         canvas.create_text(average_x, baseline + 13, text="Average", font=("Segoe UI", 7))
         canvas.hover_points.append(
-            (average_x, average_y, f"Overall tank reliability: {average_reliability:.2f}%")
+            (average_x, average_y, f"Overall tank reliability: {format_number(average_reliability, self.config_model)}%")
         )
         canvas.create_text(12, pad_top + plot_height / 2, text="Days (%)", angle=90, font=("Segoe UI", 8))
         canvas.create_text(
@@ -15083,7 +16312,7 @@ class RainwaterTkApp(tk.Tk):
             if results.empty:
                 continue
             display_size = volume_to_display(tank_size, self.config_model)
-            label = f"{display_size:,.0f} {unit}"
+            label = f"{format_number(display_size, self.config_model, max_decimal_places=0)} {unit}"
             tank_series.append(
                 (
                     label,
@@ -15177,10 +16406,10 @@ class RainwaterTkApp(tk.Tk):
             y = pad_top + plot_height * tick / 4
             value = y_max - (y_max - y_min) * tick / 4
             canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
-            canvas.create_text(pad_left - 7, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 7))
+            canvas.create_text(pad_left - 7, y, text=format_number(value, self.config_model, max_decimal_places=0), anchor="e", font=("Segoe UI", 7))
             x = pad_left + plot_width * tick / 4
             x_value = x_min + (x_max - x_min) * tick / 4
-            canvas.create_text(x, height - pad_bottom + 14, text=f"{x_value:.0f}", font=("Segoe UI", 7))
+            canvas.create_text(x, height - pad_bottom + 14, text=format_number(x_value, self.config_model, max_decimal_places=0), font=("Segoe UI", 7))
         canvas.create_line(pad_left, pad_top, pad_left, height - pad_bottom, fill="#555")
         canvas.create_line(pad_left, height - pad_bottom, width - pad_right, height - pad_bottom, fill="#555")
         for series_index, (label, x_values, y_values) in enumerate(series):
@@ -15191,7 +16420,7 @@ class RainwaterTkApp(tk.Tk):
                 px = pad_left + (x_values[index] - x_min) / (x_max - x_min) * plot_width
                 py = height - pad_bottom - (y_values[index] - y_min) / (y_max - y_min) * plot_height
                 points.extend((px, py))
-                canvas.hover_points.append((px, py, f"Tank: {label}\n{x_label}: {x_values[index]:.0f}\n{y_label}: {y_values[index]:.1f}"))
+                canvas.hover_points.append((px, py, f"Tank: {label}\n{x_label}: {format_number(x_values[index], self.config_model, max_decimal_places=0)}\n{y_label}: {format_number(y_values[index], self.config_model, max_decimal_places=1)}"))
             if len(points) >= 4:
                 canvas.create_line(*points, fill=color, width=2)
             legend_x = pad_left + series_index * max(plot_width / max(len(series), 1), 85)
@@ -15234,7 +16463,7 @@ class RainwaterTkApp(tk.Tk):
         if y_min == y_max:
             y_max = y_min + 1
         points: list[float] = []
-        hover_labels = hover_labels or [f"X: {x:.2f}\nY: {y:.2f}" for x, y in zip(x_values, y_values)]
+        hover_labels = hover_labels or [f"X: {format_number(x, self.config_model)}\nY: {format_number(y, self.config_model)}" for x, y in zip(x_values, y_values)]
         render_indices = self._chart_render_indices(y_values, max(int(plot_w * 2), 300))
         for index in render_indices:
             x = x_values[index]
@@ -15262,12 +16491,12 @@ class RainwaterTkApp(tk.Tk):
             value = y_max - ((y_max - y_min) * i / 4)
             canvas.create_line(pad_left, y, width - pad_right, y, fill="#e6e6e6")
             canvas.create_line(pad_left - 5, y, pad_left, y, fill="#555")
-            canvas.create_text(pad_left - 8, y, text=f"{value:.0f}", anchor="e", font=("Segoe UI", 8))
+            canvas.create_text(pad_left - 8, y, text=format_number(value, self.config_model, max_decimal_places=0), anchor="e", font=("Segoe UI", 8))
         for i in range(5):
             x = pad_left + (plot_w * i / 4)
             value = x_min + ((x_max - x_min) * i / 4)
             canvas.create_line(x, height - pad_bottom, x, height - pad_bottom + 5, fill="#555")
-            canvas.create_text(x, height - pad_bottom + 17, text=f"{value:.0f}", font=("Segoe UI", 8))
+            canvas.create_text(x, height - pad_bottom + 17, text=format_number(value, self.config_model, max_decimal_places=0), font=("Segoe UI", 8))
         canvas.create_text(14, height / 2, text=y_label, angle=90, font=("Segoe UI", 8))
         canvas.create_text(
             pad_left + plot_w / 2,
@@ -15362,6 +16591,9 @@ class RainwaterTkApp(tk.Tk):
 class SurfaceLibraryDialog(tk.Toplevel):
     """Offer the built-in collection surfaces only when a user asks to add one."""
 
+    COMPACT_ROW_COUNT = 7
+    SCREEN_MARGIN = 24
+
     def __init__(self, parent: RainwaterTkApp) -> None:
         super().__init__(parent)
         self.title("Add collection surface")
@@ -15370,22 +16602,24 @@ class SurfaceLibraryDialog(tk.Toplevel):
 
         body = ttk.Frame(self, padding=12)
         body.grid(sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
         ttk.Label(
             body,
             text="Collection surface library",
             font=("TkDefaultFont", 10, "bold"),
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(
             body,
             text="Choose a common surface, then enter its area and other details.",
             foreground="#667278",
-        ).grid(row=1, column=0, sticky="w", pady=(2, 8))
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(2, 8))
 
         self.surface_tree = ttk.Treeview(
             body,
             columns=("surface", "runoff"),
             show="headings",
-            height=7,
+            height=max(self.COMPACT_ROW_COUNT, len(DEFAULT_SURFACES)),
             selectmode="browse",
         )
         self.surface_tree.heading("surface", text="Surface")
@@ -15393,19 +16627,22 @@ class SurfaceLibraryDialog(tk.Toplevel):
         self.surface_tree.column("surface", width=280)
         self.surface_tree.column("runoff", width=150, anchor="e")
         self.surface_tree.grid(row=2, column=0, sticky="nsew")
+        surface_scroll = ttk.Scrollbar(body, orient="vertical", command=self.surface_tree.yview)
+        surface_scroll.grid(row=2, column=1, sticky="ns")
+        self.surface_tree.configure(yscrollcommand=surface_scroll.set)
         for index, surface in enumerate(DEFAULT_SURFACES):
             self.surface_tree.insert(
                 "",
                 "end",
                 iid=str(index),
-                values=(surface.name, f"{surface.runoff_coefficient:.2f}"),
+                values=(surface.name, format_number(surface.runoff_coefficient)),
             )
         if DEFAULT_SURFACES:
             self.surface_tree.selection_set("0")
             self.surface_tree.focus("0")
 
         buttons = ttk.Frame(body)
-        buttons.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        buttons.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(
             buttons, text="Custom surface...", command=self._choose_custom
         ).pack(side="left")
@@ -15450,10 +16687,19 @@ class SurfaceLibraryDialog(tk.Toplevel):
     def _focus_dialog(self) -> None:
         self.update_idletasks()
         parent = self.master
+        work_x, work_y, work_width, work_height = parent._screen_work_area()
+        maximum_height = max(work_height - (self.SCREEN_MARGIN * 2), 1)
+        if self.winfo_reqheight() > maximum_height:
+            self.surface_tree.configure(
+                height=min(self.COMPACT_ROW_COUNT, len(DEFAULT_SURFACES))
+            )
+            self.update_idletasks()
         width = self.winfo_reqwidth()
         height = self.winfo_reqheight()
-        x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
-        y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        centered_x = parent.winfo_rootx() + (parent.winfo_width() - width) // 2
+        centered_y = parent.winfo_rooty() + (parent.winfo_height() - height) // 2
+        x = min(max(centered_x, work_x + self.SCREEN_MARGIN), work_x + work_width - width - self.SCREEN_MARGIN)
+        y = min(max(centered_y, work_y + self.SCREEN_MARGIN), work_y + work_height - height - self.SCREEN_MARGIN)
         self.geometry(f"{width}x{height}{x:+d}{y:+d}")
         self.deiconify()
         self.lift()
@@ -15468,11 +16714,9 @@ class SurfaceDialog(tk.Toplevel):
         self.result: Surface | None = None
         self.config_model = config
         self.name_var = tk.StringVar(value=surface.name)
-        self.area_var = tk.StringVar(value=f"{area_to_display(surface.area, config):.2f}")
-        self.runoff_var = tk.StringVar(value=f"{surface.runoff_coefficient:.2f}")
-        self.first_flush_depth_var = tk.StringVar(
-            value=f"{precip_to_display(surface.first_flush_depth_inches, config):.3f}"
-        )
+        self.area_var = tk.StringVar(value=format_number(area_to_display(surface.area, config), config))
+        self.runoff_var = tk.StringVar(value=format_number(surface.runoff_coefficient, config))
+        self.first_flush_depth_inches = surface.first_flush_depth_inches
         body = ttk.Frame(self, padding=12)
         body.grid(sticky="nsew")
         ttk.Label(body, text="Surface").grid(row=0, column=0, sticky="w", pady=3)
@@ -15485,22 +16729,11 @@ class SurfaceDialog(tk.Toplevel):
         default_runoff = default_surface_runoff(surface.name)
         tk.Label(
             body,
-            text=f"Default runoff coefficient: {default_runoff:.2f}",
+            text=f"Default runoff coefficient: {format_number(default_runoff, config)}",
             fg="#777777",
         ).grid(row=3, column=1, sticky="w", pady=(0, 6))
-        ttk.Label(body, text=f"First-flush depth ({precip_unit(config)})").grid(
-            row=4, column=0, sticky="w", pady=3
-        )
-        ttk.Entry(body, textvariable=self.first_flush_depth_var, width=18).grid(
-            row=4, column=1, sticky="w", pady=3
-        )
-        ttk.Label(
-            body,
-            text="Diverted once per rainfall event; 0 disables diversion for this surface.",
-            foreground="#777777",
-        ).grid(row=5, column=1, sticky="w", pady=(0, 6))
         buttons = ttk.Frame(body)
-        buttons.grid(row=6, column=0, columnspan=2, sticky="e", pady=(10, 0))
+        buttons.grid(row=4, column=0, columnspan=2, sticky="e", pady=(10, 0))
         ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
         ttk.Button(buttons, text="Save", command=self._save).grid(row=0, column=1)
         self.transient(parent)
@@ -15540,10 +16773,7 @@ class SurfaceDialog(tk.Toplevel):
             name=self.name_var.get().strip() or "Other",
             area=max(0.0, area_to_internal(_float(self.area_var.get()), self.config_model)),
             runoff_coefficient=min(max(_float(self.runoff_var.get(), 0.0), 0.0), 1.0),
-            first_flush_depth_inches=max(
-                precip_to_internal(_float(self.first_flush_depth_var.get()), self.config_model),
-                0.0,
-            ),
+            first_flush_depth_inches=self.first_flush_depth_inches,
         )
         self.destroy()
 
@@ -15598,6 +16828,10 @@ class ReportDialog(tk.Toplevel):
 
 class HourlyDemandScheduleDialog(tk.Toplevel):
     DAY_LABELS = dict(zip(WEEKDAY_KEYS, ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")))
+    FRACTIONAL_MIN_VALUE = 0.0
+    FRACTIONAL_MAX_VALUE = 1.0
+    FRACTIONAL_INCREMENT = 0.01
+    FRACTIONAL_FORMAT = "%.2f"
 
     def __init__(
         self,
@@ -15635,12 +16869,15 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
             for column, day in enumerate(WEEKDAY_KEYS, start=1):
                 fractions = config.demand.hourly_weekly_fractions.get(day, [1.0] * 24)
                 value = fractions[hour] if hour < len(fractions) else 0.0
-                normalized_value = min(max(float(value), 0.0), 1.0)
+                normalized_value = min(
+                    max(float(value), self.FRACTIONAL_MIN_VALUE),
+                    self.FRACTIONAL_MAX_VALUE,
+                )
                 variable = tk.StringVar(
                     value=(
                         str(int(normalized_value > 0.0))
                         if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
-                        else f"{normalized_value:.3f}"
+                        else self.FRACTIONAL_FORMAT % normalized_value
                     )
                 )
                 self.vars[(day, hour)] = variable
@@ -15654,8 +16891,15 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
                         justify="right",
                     ).grid(row=hour + 2, column=column, padx=2, pady=1)
                 else:
-                    ttk.Entry(
-                        body, textvariable=variable, width=8, justify="right"
+                    ttk.Spinbox(
+                        body,
+                        textvariable=variable,
+                        from_=self.FRACTIONAL_MIN_VALUE,
+                        to=self.FRACTIONAL_MAX_VALUE,
+                        increment=self.FRACTIONAL_INCREMENT,
+                        format=self.FRACTIONAL_FORMAT,
+                        width=8,
+                        justify="right",
                     ).grid(row=hour + 2, column=column, padx=2, pady=1)
         actions = ttk.Frame(body)
         actions.grid(row=26, column=0, columnspan=8, sticky="ew", pady=(10, 0))
@@ -15681,7 +16925,7 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
             variable.set(
                 "1"
                 if self.schedule_type == OCCUPANCY_SCHEDULE_TYPE
-                else "1.000"
+                else self.FRACTIONAL_FORMAT % self.FRACTIONAL_MAX_VALUE
             )
 
     def _copy_day(self, source: str, targets: list[str]) -> None:
@@ -15703,7 +16947,11 @@ class HourlyDemandScheduleDialog(tk.Toplevel):
             except ValueError:
                 messagebox.showwarning(APP_TITLE, f"Enter numeric hourly multipliers for {self.DAY_LABELS[day]}.", parent=self)
                 return
-            if any(value < 0.0 or value > 1.0 for value in multipliers):
+            if any(
+                value < self.FRACTIONAL_MIN_VALUE
+                or value > self.FRACTIONAL_MAX_VALUE
+                for value in multipliers
+            ):
                 messagebox.showwarning(
                     APP_TITLE,
                     f"Hourly multipliers for {self.DAY_LABELS[day]} must be between 0 and 1.",
@@ -15759,7 +17007,14 @@ class DemandObjectDialog(tk.Toplevel):
         self.instantaneous_demand_unit_var = tk.StringVar(value=initial_flow_unit)
         self._instantaneous_demand_unit = initial_flow_unit
         self.instantaneous_demand_var = tk.StringVar(
-            value=f"{_demand_flow_from_gallons_per_minute(demand_object.instantaneous_demand_gallons_per_minute, initial_flow_unit):.8g}"
+            value=format_number(
+                _demand_flow_from_gallons_per_minute(
+                    demand_object.instantaneous_demand_gallons_per_minute,
+                    initial_flow_unit,
+                ),
+                config,
+                max_decimal_places=8,
+            )
         )
         self.project_schedule_names = list(config.demand.hourly_schedule_library)
         mode_label = next(
@@ -15775,7 +17030,13 @@ class DemandObjectDialog(tk.Toplevel):
         )
         self.schedule_var = tk.StringVar(value=selected_schedule)
         self.mode_var = tk.StringVar(value=mode_label)
-        self.daily_volume_var = tk.StringVar(value=f"{volume_to_display(demand_object.recurring_daily_gallons, config):.8g}")
+        self.daily_volume_var = tk.StringVar(
+            value=format_number(
+                volume_to_display(demand_object.recurring_daily_gallons, config),
+                config,
+                max_decimal_places=8,
+            )
+        )
         default_fixture_uses = (
             DEFAULT_TOILET_FLUSHES_PER_PERSON_PER_DAY
             if demand_object.object_type == "Toilet"
@@ -15787,17 +17048,27 @@ class DemandObjectDialog(tk.Toplevel):
             else 0.0
         )
         self.fixture_people_var = tk.StringVar(
-            value=f"{(demand_object.fixture_people or 1.0):.8g}"
+            value=format_number(
+                demand_object.fixture_people or 1.0, config, max_decimal_places=8
+            )
         )
         self.fixture_uses_var = tk.StringVar(
-            value=f"{(demand_object.fixture_uses_per_person_per_day or default_fixture_uses):.8g}"
+            value=format_number(
+                demand_object.fixture_uses_per_person_per_day or default_fixture_uses,
+                config,
+                max_decimal_places=8,
+            )
         )
         fixture_volume = (
             demand_object.fixture_volume_gallons_per_use
             or default_fixture_volume
         )
         self.fixture_volume_var = tk.StringVar(
-            value=f"{volume_to_display(fixture_volume, config):.8g}"
+            value=format_number(
+                volume_to_display(fixture_volume, config),
+                config,
+                max_decimal_places=8,
+            )
         )
         self.fixture_uses_label_var = tk.StringVar()
         self.fixture_volume_label_var = tk.StringVar()
@@ -15809,7 +17080,13 @@ class DemandObjectDialog(tk.Toplevel):
         )
         self.monthly_vars = {
             month: tk.StringVar(
-                value=f"{volume_to_display(float(existing_monthly_values.get(month, 0.0)), config):.8g}"
+                value=format_number(
+                    volume_to_display(
+                        float(existing_monthly_values.get(month, 0.0)), config
+                    ),
+                    config,
+                    max_decimal_places=8,
+                )
             )
             for month in MONTH_KEYS
         }
@@ -16040,10 +17317,10 @@ class DemandObjectDialog(tk.Toplevel):
 
     def _parsed_nonnegative(self, variable: tk.StringVar) -> float | None:
         try:
-            value = float(variable.get())
+            value = parse_number(variable.get(), float("nan"))
         except ValueError:
             return None
-        return value if value >= 0.0 else None
+        return value if math.isfinite(value) and value >= 0.0 else None
 
     def _monthly_display_values(self) -> dict[str, float] | None:
         values: dict[str, float] = {}
@@ -16210,7 +17487,7 @@ class DemandObjectDialog(tk.Toplevel):
         schedule = self.config_model.demand.hourly_schedule_library.get(self.schedule_var.get(), {})
         typical_day = 0.0
         typical_week = 0.0
-        january = 0.0
+        average_monthly = 0.0
         daily_summary_label = "Typical weekday"
         if mode == "scheduled_flow":
             display_flow = self._parsed_nonnegative(self.instantaneous_demand_var) or 0.0
@@ -16223,7 +17500,7 @@ class DemandObjectDialog(tk.Toplevel):
             ]
             typical_day = sum(daily_values[:5]) / 5.0
             typical_week = sum(daily_values)
-            january = typical_week * 31.0 / 7.0
+            average_monthly = typical_week * 365.0 / (7.0 * 12.0)
         elif mode == "fixture_usage":
             daily_summary_label = "Active-day demand"
             people = self._parsed_nonnegative(self.fixture_people_var) or 0.0
@@ -16238,7 +17515,7 @@ class DemandObjectDialog(tk.Toplevel):
             )
             typical_day = people * uses * volume
             typical_week = typical_day * selected_days
-            january = typical_week * 31.0 / 7.0
+            average_monthly = typical_week * 365.0 / (7.0 * 12.0)
         elif mode == "recurring_daily":
             daily = volume_to_internal(
                 self._parsed_nonnegative(self.daily_volume_var) or 0.0, self.config_model
@@ -16249,18 +17526,22 @@ class DemandObjectDialog(tk.Toplevel):
             )
             typical_day = daily
             typical_week = daily * selected_days
-            january = daily * selected_days * 31.0 / 7.0
+            average_monthly = typical_week * 365.0 / (7.0 * 12.0)
         else:
             monthly = self._monthly_display_values() or {}
-            january = volume_to_internal(monthly.get("jan", 0.0), self.config_model)
-            typical_day = january / 31.0
+            annual = sum(
+                volume_to_internal(monthly.get(month, 0.0), self.config_model)
+                for month in MONTH_KEYS
+            )
+            average_monthly = annual / 12.0
+            typical_day = annual / 365.0
             typical_week = typical_day * 7.0
         unit = volume_unit(self.config_model)
         eligibility = "Yes" if self.sewer_eligible_var.get() else "No"
         self.summary_var.set(
-            f"{daily_summary_label}: {volume_to_display(typical_day, self.config_model):,.1f} {unit}    |    "
-            f"Typical week: {volume_to_display(typical_week, self.config_model):,.1f} {unit}\n"
-            f"January estimate: {volume_to_display(january, self.config_model):,.1f} {unit}    |    "
+            f"{daily_summary_label}: {format_number(volume_to_display(typical_day, self.config_model), self.config_model, max_decimal_places=1)} {unit}    |    "
+            f"Typical week: {format_number(volume_to_display(typical_week, self.config_model), self.config_model, max_decimal_places=1)} {unit}\n"
+            f"Average monthly estimate: {format_number(volume_to_display(average_monthly, self.config_model), self.config_model, max_decimal_places=1)} {unit}    |    "
             f"Sewer-charge eligible: {eligibility}"
         )
 
@@ -16270,14 +17551,20 @@ class DemandObjectDialog(tk.Toplevel):
         if new_unit == old_unit:
             return
         try:
-            current_value = float(self.instantaneous_demand_var.get())
+            current_value = parse_number(
+                self.instantaneous_demand_var.get(), float("nan")
+            )
+            if not math.isfinite(current_value):
+                raise ValueError
         except ValueError:
             self.instantaneous_demand_unit_var.set(old_unit)
             self.bell()
             return
         internal_flow = _demand_flow_to_gallons_per_minute(current_value, old_unit)
         converted = _demand_flow_from_gallons_per_minute(internal_flow, new_unit)
-        self.instantaneous_demand_var.set(f"{converted:.8g}")
+        self.instantaneous_demand_var.set(
+            format_number(converted, self.config_model, max_decimal_places=8)
+        )
         self._instantaneous_demand_unit = new_unit
         self._refresh_dialog_state()
 
@@ -16362,7 +17649,7 @@ class DemandDialog(tk.Toplevel):
             else:
                 unit = f"{volume_unit(config)}/month"
                 value = volume_to_display(value, config)
-            var = tk.StringVar(value=f"{value:.2f}")
+            var = tk.StringVar(value=format_number(value, self.config_model))
             self.vars[field] = var
             grid_row = row + 1
             ttk.Label(body, text=label).grid(row=grid_row, column=0, sticky="w", pady=2)

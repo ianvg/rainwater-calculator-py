@@ -9,6 +9,7 @@ from pypdf import PdfWriter
 from pypdf.annotations import Link
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 
+from .number_formatting import format_number
 from .reporting import (
     REPORT_SECTION_DEFINITIONS,
     ReportModel,
@@ -24,8 +25,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     surface_rows = [
         (
             surface["name"],
-            f"{surface['area']:,.2f}",
-            f"{surface['runoff_coefficient']:.2f}",
+            format_number(surface["area"]),
+            format_number(surface["runoff_coefficient"]),
         )
         for surface in report["surfaces"]
     ]
@@ -34,7 +35,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
 
     selected_reliability = "--"
     if report["selected_reliability"] is not None:
-        selected_reliability = f"{report['selected_reliability']:.2f}%"
+        selected_reliability = f"{format_number(report['selected_reliability'])}%"
 
     pages: list[list[str]] = [[]]
     discarded_commands: list[str] = []
@@ -172,8 +173,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     heading("Design Recommendations")
     assumptions = report.get("recommendation_assumptions", {})
     add_wrapped(
-        f'Reliability target: {float(assumptions.get("reliability_target_percent", 90.0)):.1f}%. '
-        f'Diminishing-return threshold: {float(assumptions.get("marginal_gain_threshold", 1.0)):.2f} '
+        f'Reliability target: {format_number(float(assumptions.get("reliability_target_percent", 90.0)), max_decimal_places=1)}%. '
+        f'Diminishing-return threshold: {format_number(float(assumptions.get("marginal_gain_threshold", 1.0)))} '
         "reliability percentage points per 1,000 gallons."
     )
     add_wrapped(
@@ -183,9 +184,9 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     for item in report.get("recommendations", []):
         add_wrapped(
             f'{item.get("role", "Recommendation")}: '
-            f'{float(item.get("tank_size", 0.0)):,.0f} '
+            f'{format_number(float(item.get("tank_size", 0.0)), max_decimal_places=0)} '
             f'{item.get("volume_unit", report["volume_unit"])} at '
-            f'{float(item.get("reliability_percent", 0.0)):.1f}% reliability. '
+            f'{format_number(float(item.get("reliability_percent", 0.0)), max_decimal_places=1)}% reliability. '
             f'{item.get("detail", "")}',
             indent=10,
         )
@@ -280,16 +281,16 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     for label, value in (
         (
             "Average annual precipitation",
-            f"{float(report['average_annual_precipitation']):,.2f} {report['precipitation_unit']}",
+            f"{format_number(float(report['average_annual_precipitation']))} {report['precipitation_unit']}",
         ),
         ("Precipitation basis", report["precipitation_basis"]),
-        ("Selected tank", f'{float(report["selected_tank_size"]):,.0f} {report["volume_unit"]}'),
+        ("Selected tank", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {report["volume_unit"]}'),
         ("Selected reliability", selected_reliability),
-        ("Average annual rainwater supply", f'{float(executive.get("average_annual_supply", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Average annual municipal makeup", f'{float(executive.get("average_annual_municipal_makeup", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Average annual overflow", f'{float(executive.get("average_annual_overflow", 0.0)):,.0f} {report["volume_unit"]}/year'),
-        ("Net annual savings", f'{financial.get("currency", "USD")} {float(executive.get("net_annual_savings", 0.0)):,.2f}/year'),
-        ("Simple payback", f"{float(payback):.1f} years" if payback is not None else "Not achieved"),
+        ("Average annual rainwater supply", f'{format_number(float(executive.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Average annual municipal makeup", f'{format_number(float(executive.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Net annual savings", f'{financial.get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
+        ("Simple payback", f"{format_number(float(payback), max_decimal_places=1)} years" if payback is not None else "Not achieved"),
     ):
         add_wrapped(f"{label}: {value}")
     y -= 4
@@ -326,7 +327,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Total usable average rain", "total_usable_average_rain"),
     ):
         add_wrapped(
-            f'{label}: {float(rainfall_volumes.get(key, 0.0)):,.0f} '
+            f'{label}: {format_number(float(rainfall_volumes.get(key, 0.0)), max_decimal_places=0)} '
             f'{report["volume_unit"]}/year'
         )
     add_wrapped(
@@ -343,7 +344,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     line(54, y, 558, y)
     y -= 14
     text(54, y, "Size", size=9)
-    text(330, y, f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}", size=9)
+    text(330, y, f"{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {report['volume_unit']}", size=9)
     y -= 14
 
     heading("Candidate Performance")
@@ -353,11 +354,11 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     for candidate in candidates:
         payback_value = candidate.get("SimplePaybackYears")
         add_wrapped(
-            f'{float(candidate.get("tank_size", 0.0)):,.0f} {report["volume_unit"]}: '
-            f'{float(candidate.get("reliability", 0.0)):.1f}% reliability; '
-            f'{float(candidate.get("RainwaterSuppliedGallons") or 0.0):,.0f} supply/year; '
-            f'{float(candidate.get("OverflowGallons") or 0.0):,.0f} overflow/year; '
-            + (f"{float(payback_value):.1f} years payback" if payback_value is not None else "payback not achieved")
+            f'{format_number(float(candidate.get("tank_size", 0.0)), max_decimal_places=0)} {report["volume_unit"]}: '
+            f'{format_number(float(candidate.get("reliability", 0.0)), max_decimal_places=1)}% reliability; '
+            f'{format_number(float(candidate.get("RainwaterSuppliedGallons") or 0.0), max_decimal_places=0)} supply/year; '
+            f'{format_number(float(candidate.get("OverflowGallons") or 0.0), max_decimal_places=0)} overflow/year; '
+            + (f"{format_number(float(payback_value), max_decimal_places=1)} years payback" if payback_value is not None else "payback not achieved")
         )
     y -= 4
 
@@ -374,7 +375,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Final storage", "final_storage"),
         ("Storage residual", "storage_residual"),
     ):
-        add_wrapped(f'{label}: {float(balance.get(key, 0.0)):,.1f} {report["volume_unit"]}')
+        add_wrapped(f'{label}: {format_number(float(balance.get(key, 0.0)), max_decimal_places=1)} {report["volume_unit"]}')
     y -= 4
 
     if report.get("include_system_visualization"):
@@ -388,7 +389,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         text(
             tank_left + 20,
             tank_bottom + 54,
-            f"{float(report['selected_tank_size']):,.0f} {report['volume_unit']}",
+            f"{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {report['volume_unit']}",
             size=8,
         )
         wave_points = [
@@ -455,17 +456,17 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         left_month = report["monthly_demand"][index]
         right_month = report["monthly_demand"][index + 6]
         text(column_x[0], y, left_month["month"], size=9)
-        text(column_x[1], y, f"{float(left_month['demand_per_day']):,.0f}", size=9)
-        text(column_x[2], y, f"{float(left_month['demand_per_month']):,.0f}", size=9)
+        text(column_x[1], y, format_number(float(left_month['demand_per_day']), max_decimal_places=0), size=9)
+        text(column_x[2], y, format_number(float(left_month['demand_per_month']), max_decimal_places=0), size=9)
         text(column_x[3], y, right_month["month"], size=9)
-        text(column_x[4], y, f"{float(right_month['demand_per_day']):,.0f}", size=9)
-        text(column_x[5], y, f"{float(right_month['demand_per_month']):,.0f}", size=9)
+        text(column_x[4], y, format_number(float(right_month['demand_per_day']), max_decimal_places=0), size=9)
+        text(column_x[5], y, format_number(float(right_month['demand_per_month']), max_decimal_places=0), size=9)
         y -= 14
     line(54, y + 5, 558, y + 5, width=0.4)
     line(54, y + 2, 558, y + 2, width=0.4)
     y -= 12
     text(320, y, "Total Annual Demand", size=9, bold=True)
-    text(450, y, f"{float(report['total_annual_demand']):,.0f} {report['volume_unit']}", size=9, bold=True)
+    text(450, y, f"{format_number(float(report['total_annual_demand']), max_decimal_places=0)} {report['volume_unit']}", size=9, bold=True)
     y -= 14
 
     heading("End-use Performance")
@@ -475,9 +476,9 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     for row in end_use_rows:
         add_wrapped(
             f'{row.get("name", "Unnamed")}: {row.get("type", "unspecified")}; '
-            f'{float(row.get("annual_demand", 0.0)):,.0f} demand/year; '
-            f'{float(row.get("annual_supply", 0.0)):,.0f} supplied/year; '
-            f'{float(row.get("demand_met_percent", 0.0)):.1f}% met'
+            f'{format_number(float(row.get("annual_demand", 0.0)), max_decimal_places=0)} demand/year; '
+            f'{format_number(float(row.get("annual_supply", 0.0)), max_decimal_places=0)} supplied/year; '
+            f'{format_number(float(row.get("demand_met_percent", 0.0)), max_decimal_places=1)}% met'
         )
     y -= 4
 
@@ -488,14 +489,14 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Configured", "Yes" if financial.get("configured") else "No"),
         ("Water tariff", f'{financial.get("currency", "USD")} {float(financial.get("water_rate", 0.0)):g} {financial.get("tariff_billing_unit", "")}'),
         ("Sewer tariff", f'{financial.get("currency", "USD")} {float(financial.get("sewer_rate", 0.0)):g} {financial.get("tariff_billing_unit", "")}'),
-        ("Installed cost", f'{financial.get("currency", "USD")} {float(financial.get("installed_cost", 0.0)):,.2f}'),
-        ("Net annual savings", f'{financial.get("currency", "USD")} {float(financial.get("net_annual_savings", 0.0)):,.2f}'),
-        ("Simple payback", f"{float(payback):.1f} years" if payback is not None else "Not achieved"),
-        ("Pump energy", f'{float(financial.get("average_annual_pump_energy_kwh", 0.0)):,.1f} kWh/year; {financial.get("currency", "USD")} {float(financial.get("annual_pump_energy_cost", 0.0)):,.2f}/year'),
+        ("Installed cost", f'{financial.get("currency", "USD")} {format_number(float(financial.get("installed_cost", 0.0)))}'),
+        ("Net annual savings", f'{financial.get("currency", "USD")} {format_number(float(financial.get("net_annual_savings", 0.0)))}'),
+        ("Simple payback", f"{format_number(float(payback), max_decimal_places=1)} years" if payback is not None else "Not achieved"),
+        ("Pump energy", f'{format_number(float(financial.get("average_annual_pump_energy_kwh", 0.0)), max_decimal_places=1)} kWh/year; {financial.get("currency", "USD")} {format_number(float(financial.get("annual_pump_energy_cost", 0.0)))}/year'),
         ("Discount rate", f'{float(financial.get("discount_rate_percent", 0.0)):g}%'),
-        ("Lifecycle NPV", f'{financial.get("currency", "USD")} {float(financial.get("lifecycle_net_present_value", 0.0)):,.2f}'),
-        ("IRR", f'{float(financial["internal_rate_of_return_percent"]):.2f}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
-        ("Discounted payback", f'{float(financial["discounted_payback_years"]):.1f} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
+        ("Lifecycle NPV", f'{financial.get("currency", "USD")} {format_number(float(financial.get("lifecycle_net_present_value", 0.0)))}'),
+        ("IRR", f'{format_number(float(financial["internal_rate_of_return_percent"]))}%' if financial.get("internal_rate_of_return_percent") is not None else "Not uniquely defined"),
+        ("Discounted payback", f'{format_number(float(financial["discounted_payback_years"]), max_decimal_places=1)} years' if financial.get("discounted_payback_years") is not None else "Not achieved"),
         ("Methodology", financial.get("methodology", "")),
     ):
         add_wrapped(f"{label}: {value}")
@@ -508,10 +509,10 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         discounted = nominal / ((1.0 + discount_rate) ** year)
         cumulative_discounted += discounted
         add_wrapped(
-            f"Year {year}: nominal {financial.get('currency', 'USD')} {nominal:,.2f}; "
-            f"discounted {financial.get('currency', 'USD')} {discounted:,.2f}; "
+            f"Year {year}: nominal {financial.get('currency', 'USD')} {format_number(nominal)}; "
+            f"discounted {financial.get('currency', 'USD')} {format_number(discounted)}; "
             f"cumulative discounted {financial.get('currency', 'USD')} "
-            f"{cumulative_discounted:,.2f}",
+            f"{format_number(cumulative_discounted)}",
             indent=10,
         )
     y -= 4
@@ -519,7 +520,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     heading("Rainfall Quality and Completeness")
     rainfall_quality = report.get("rainfall_quality", {})
     for label, value in (
-        ("Completeness score", f'{float(rainfall_quality.get("completeness_percent", 0.0)):.2f}% ({rainfall_quality.get("completeness_rating", "Not rated")})'),
+        ("Completeness score", f'{format_number(float(rainfall_quality.get("completeness_percent", 0.0)))}% ({rainfall_quality.get("completeness_rating", "Not rated")})'),
         ("Calendar-day coverage", f'{int(rainfall_quality.get("observed_days", 0)):,} observed of {int(rainfall_quality.get("expected_days", 0)):,} expected'),
         ("Missing days", f'{int(rainfall_quality.get("missing_days", 0)):,}'),
         ("Partial/incomplete years", ", ".join(str(value) for value in rainfall_quality.get("partial_years", [])) or "None"),
@@ -545,8 +546,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         add_wrapped(
             f'{int(row.get("year", 0))}: {int(row.get("observed_days", 0)):,} observed; '
             f'{int(row.get("missing_days", 0)):,} missing; '
-            f'{float(row.get("completeness_percent", 0.0)):.2f}% complete; '
-            f'{float(row.get("precipitation", 0.0)):,.2f} {report["precipitation_unit"]}; '
+            f'{format_number(float(row.get("completeness_percent", 0.0)))}% complete; '
+            f'{format_number(float(row.get("precipitation", 0.0)))} {report["precipitation_unit"]}; '
             f'{int(row.get("wet_days", 0)):,} wet day(s); '
             f'{"partial" if row.get("partial_year") else "complete"} year'
         )
@@ -557,9 +558,9 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     add_wrapped(
         f'{int(event_summary.get("event_count", 0)):,} event(s); '
         f'antecedent dry threshold {float(event_summary.get("antecedent_dry_days", 1.0)):g} day(s); '
-        f'average depth {float(event_summary.get("average_event_precipitation", 0.0)):,.3f} '
+        f'average depth {format_number(float(event_summary.get("average_event_precipitation", 0.0)), max_decimal_places=3)} '
         f'{report["precipitation_unit"]}; largest depth '
-        f'{float(event_summary.get("largest_event_precipitation", 0.0)):,.3f} '
+        f'{format_number(float(event_summary.get("largest_event_precipitation", 0.0)), max_decimal_places=3)} '
         f'{report["precipitation_unit"]}.'
     )
     for row in event_summary.get("largest_events", []):
@@ -567,7 +568,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
             f'Event {int(row.get("event_number", 0))}: {row.get("start", "")} to '
             f'{row.get("end", "")}; {int(row.get("duration_days", 0))} day(s); '
             f'{int(row.get("wet_days", 0))} wet day(s); '
-            f'{float(row.get("precipitation", 0.0)):,.3f} {report["precipitation_unit"]}',
+            f'{format_number(float(row.get("precipitation", 0.0)), max_decimal_places=3)} {report["precipitation_unit"]}',
             indent=10,
         )
     y -= 4
@@ -585,6 +586,8 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Rainfall timing metadata", provenance.get("rainfall_timing_metadata", "Not specified")),
         ("Rainfall retrieved/imported", provenance.get("rainfall_retrieved_at", "Not recorded")),
         ("Simulation timestep", provenance.get("simulation_timestep", "Daily mass balance")),
+        ("Rainfall timing", provenance.get("rainfall_timing_assumption", "Not specified")),
+        ("Demand timing", provenance.get("demand_timing_assumption", "Not specified")),
         ("Application / algorithm", f'{provenance.get("application_version", "Unknown")} / {provenance.get("algorithm_version", "Unknown")}'),
         ("Report schema", provenance.get("report_schema_version", report["schema_version"])),
         ("Analysis signature", provenance.get("analysis_input_signature", "Not stored")),
@@ -598,7 +601,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
 
     add_page()
     heading(
-        f"Yearly Demand Reliability - {float(report['selected_tank_size']):,.0f} "
+        f"Yearly Demand Reliability - {format_number(float(report['selected_tank_size']), max_decimal_places=0)} "
         f"{report['volume_unit']} tank"
     )
     _draw_pdf_yearly_demand_reliability(page(), 78, 400, 456, 250, report)
@@ -771,7 +774,7 @@ def _draw_pdf_tank_level_distribution(
         bar_height = height * int(row["count"]) / max_count
         commands.append("0.18 0.55 0.34 rg")
         commands.append(f"{left:.2f} {y:.2f} {bar_width:.2f} {bar_height:.2f} re f")
-        label = _pdf_escape(f"{float(row['low']):,.0f}-{float(row['high']):,.0f}")
+        label = _pdf_escape(f"{format_number(float(row['low']), max_decimal_places=0)}-{format_number(float(row['high']), max_decimal_places=0)}")
         commands.append(
             f"BT /F1 7 Tf 1 0 0 1 {left:.2f} {y - 16:.2f} Tm ({label}) Tj ET"
         )
@@ -822,7 +825,7 @@ def _draw_pdf_reliability_curve(
     for i in range(5):
         value = x_min + ((x_max - x_min) * i / 4)
         tick_x = x + (width * i / 4)
-        label = _pdf_escape(f"{value:.0f}")
+        label = _pdf_escape(format_number(value, max_decimal_places=0))
         commands.append(f"BT /F1 8 Tf 1 0 0 1 {tick_x - 12:.2f} {y - 18:.2f} Tm ({label}) Tj ET")
     commands.append(f"BT /F2 10 Tf 1 0 0 1 {x + width / 2 - 56:.2f} {y + height + 18:.2f} Tm (Reliability Curve) Tj ET")
     commands.append(f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 44:.2f} {y - 36:.2f} Tm (Tank size ({_pdf_escape(report['volume_unit'])})) Tj ET")

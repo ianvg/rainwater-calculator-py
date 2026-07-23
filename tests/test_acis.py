@@ -3,7 +3,12 @@ from datetime import date
 
 import pytest
 
-from rainwater_app.acis import fetch_daily_station_data, fetch_station_by_id
+from rainwater_app.acis import (
+    fetch_daily_station_data,
+    fetch_station_by_id,
+    fetch_station_options,
+    fetch_station_options_bbox,
+)
 
 
 @pytest.fixture
@@ -67,6 +72,32 @@ def test_acis_preserves_missing_precipitation_dates_for_quality_scoring(tmp_path
     assert data.attrs["known_missing_dates"] == ["2020-01-01"]
 
 
+@pytest.mark.parametrize("response", [{"data": []}, {"error": "No data available"}])
+def test_acis_empty_response_reports_a_clear_error(tmp_path, response) -> None:
+    cache_file = tmp_path / "acis_empty_20200101_20200102.json"
+    cache_file.write_text(json.dumps(response), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="no valid daily weather rows"):
+        fetch_daily_station_data(
+            "empty", date(2020, 1, 1), date(2020, 1, 2), cache_dir=tmp_path
+        )
+
+
+def test_acis_station_search_requires_precipitation_data(monkeypatch) -> None:
+    payloads = []
+
+    def fake_post(_url, payload):
+        payloads.append(payload)
+        return {"meta": []}
+
+    monkeypatch.setattr("rainwater_app.acis._post_json", fake_post)
+
+    fetch_station_options("NJ", date(2020, 1, 1), date(2020, 1, 2))
+    fetch_station_options_bbox(-75.0, 39.0, -74.0, 41.0, date(2020, 1, 1), date(2020, 1, 2))
+
+    assert [payload["elems"] for payload in payloads] == [["pcpn"], ["pcpn"]]
+
+
 def test_fetch_station_by_id_uses_stnmeta_sids_and_returns_coordinates(monkeypatch) -> None:
     captured = {}
 
@@ -84,5 +115,6 @@ def test_fetch_station_by_id_uses_stnmeta_sids_and_returns_coordinates(monkeypat
 
     assert captured["sids"] == "13873"
     assert station is not None
+    assert station["identifiers"] == {"WBAN": ["13873"]}
     assert station["latitude"] == 33.94773
     assert station["longitude"] == -83.32736

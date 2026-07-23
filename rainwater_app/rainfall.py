@@ -153,10 +153,12 @@ def expand_hourly_rainfall(
         values = np.maximum(values, 0.0)
     else:
         values[:, 23] = np.maximum(daily["Precipitation"].to_numpy(dtype=float), 0.0)
-    dates = [
-        pd.Timestamp(date).normalize() + pd.Timedelta(hours=hour)
-        for date in daily["Date"] for hour in range(24)
-    ]
+    daily_dates = daily["Date"].dt.normalize().to_numpy(
+        dtype="datetime64[ns]", copy=False
+    )
+    dates = np.repeat(daily_dates, 24) + np.tile(
+        np.arange(24, dtype="timedelta64[h]"), len(daily_dates)
+    )
     return pd.DataFrame({"Date": dates, "Precipitation": values.reshape(-1)})
 
 

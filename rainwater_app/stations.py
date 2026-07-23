@@ -5,6 +5,22 @@ import math
 EARTH_RADIUS_KM = 6371.0088
 
 
+def filter_stations(stations: list[dict], query: str) -> list[dict]:
+    """Return stations matching any semicolon-separated name or ID filter."""
+    filters = [value.strip().casefold() for value in query.split(";") if value.strip()]
+    if not filters:
+        return stations
+    return [
+        station
+        for station in stations
+        if any(
+            value in str(station.get(field, "")).casefold()
+            for value in filters
+            for field in ("name", "sid")
+        )
+    ]
+
+
 def bounding_box(latitude: float, longitude: float, radius_km: float) -> tuple[float, float, float, float]:
     latitude_delta = radius_km / 111.32
     longitude_scale = max(math.cos(math.radians(latitude)), 0.01)

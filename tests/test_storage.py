@@ -246,6 +246,26 @@ def test_first_flush_settings_are_loaded_and_legacy_surfaces_default_to_zero() -
     assert config.surfaces[1].first_flush_depth_inches == pytest.approx(0.0)
 
 
+def test_first_flush_guidance_settings_are_loaded_and_normalized() -> None:
+    config = SQLiteStore._config_from_dict(
+        {
+            "name": "Guided first flush",
+            "first_flush_sizing_method": "guided",
+            "first_flush_design_preset": "enhanced_nonpotable",
+        }
+    )
+
+    assert config.first_flush_sizing_method == "guided"
+    assert config.first_flush_design_preset == "enhanced_nonpotable"
+
+
+def test_legacy_project_keeps_manual_first_flush_sizing() -> None:
+    config = SQLiteStore._config_from_dict({"name": "Legacy first flush"})
+
+    assert config.first_flush_sizing_method == "manual"
+    assert config.first_flush_design_preset == "code_minimum"
+
+
 def test_financial_parameters_are_loaded() -> None:
     config = SQLiteStore._config_from_dict(
         {

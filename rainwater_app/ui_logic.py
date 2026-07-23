@@ -238,6 +238,7 @@ def system_object_editor_validation(
         "booster_initial_fill": "Initial fill",
         "booster_refill_level": "Refill level",
         "pump_capacity": "Pump capacity",
+        "first_flush_antecedent": "Antecedent dry period",
     }
     fields_by_type = {
         "primary_tank": (
@@ -259,6 +260,7 @@ def system_object_editor_validation(
             "booster_refill_level",
         ),
         "booster_pump": ("pump_capacity",),
+        "first_flush_diversion": ("first_flush_antecedent",),
     }
     parsed: dict[str, float] = {}
     for field in fields_by_type.get(component_type, ()):
@@ -283,6 +285,13 @@ def system_object_editor_validation(
     for field in {"booster_tank_size", "pump_capacity"}.intersection(parsed):
         if parsed[field] < 0:
             errors.append(f"{numeric_labels[field]} cannot be negative.")
+
+    if "first_flush_antecedent" in parsed and parsed["first_flush_antecedent"] < 0:
+        errors.append("Antecedent dry period cannot be negative.")
+    if component_type == "first_flush_diversion" and str(
+        values.get("first_flush_antecedent_unit", "")
+    ).casefold() not in {"days", "hours"}:
+        errors.append("Antecedent dry period unit must be days or hours.")
 
     if (
         "filtration_system_flow_gpm" in parsed
