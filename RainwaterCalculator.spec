@@ -16,7 +16,10 @@ a = Analysis(
             "rainwater_app/data",
         ),
     ],
-    hiddenimports=[],
+    hiddenimports=[
+        "weasyprint",
+        "weasyprint.text.ffi",
+    ],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],

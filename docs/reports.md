@@ -71,13 +71,13 @@ Use **Supplemental visuals** on the same sub-tab to include the system-type visu
 
 ## Preview a report
 
-Select **View > View PDF report** or **View > View HTML report**, then complete the report-information dialog. The application generates the report in a temporary directory and immediately opens it in the operating system's default PDF viewer or web browser. HTML previews are served only on the local loopback interface (`127.0.0.1`) while the application is running, avoiding browser restrictions on temporary `file://` pages. No save location is required for a preview.
+Select **View > View PDF report** or **View > View HTML report**, then complete the report-information dialog. The primary PDF uses WeasyPrint to render the same HTML document used by the HTML export. The application generates the report in a temporary directory and immediately opens it in the operating system's default PDF viewer or web browser. HTML previews are served only on the local loopback interface (`127.0.0.1`) while the application is running, avoiding browser restrictions on temporary `file://` pages. No save location is required for a preview.
 
 Temporary previews are intended for review. Export a report when a permanent project deliverable is required.
 
 ## Export a report
 
-Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
+Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location. **Export legacy PDF report...** retains the previous LaTeX/direct-PDF renderer as a secondary option during the transition.
 
 ## Compare saved projects
 
@@ -99,7 +99,9 @@ PDF and HTML use the same report metadata and normalized report content. Differe
 
 ## PDF details
 
-When `pdflatex` is available, the application saves LaTeX source and compiles it. Without a LaTeX installation, the application generates the PDF directly with `pypdf`.
+The primary PDF report is rendered from the validated HTML report with WeasyPrint. It includes print-specific page sizing, page numbers, table wrapping, and static inline SVG charts. Browser-only interactions such as tooltips, sorting, and range controls are intentionally omitted from PDF output.
+
+The secondary **Legacy PDF report** option preserves the earlier behavior: when `pdflatex` is available, the application saves LaTeX source and compiles it; without a LaTeX installation, it generates the PDF directly with `pypdf`.
 
 ## HTML details
 

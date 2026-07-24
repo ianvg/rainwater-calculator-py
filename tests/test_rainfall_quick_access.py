@@ -65,12 +65,16 @@ def test_save_rainfall_csv_exports_reloadable_daily_values_in_project_units(
         ),
         config_model=config,
         current_rainfall_csv_path=None,
+        rainfall_source_label=None,
         status_var=status,
         execution_log=SimpleNamespace(
             info=lambda *_args, **_kwargs: None,
             error=lambda *_args, **_kwargs: None,
         ),
         _apply_form_to_model=lambda: None,
+    )
+    app._default_rainfall_csv_filename = lambda: (
+        RainwaterTkApp._default_rainfall_csv_filename(app)
     )
     monkeypatch.setattr(
         tkinter_app.filedialog, "asksaveasfilename", lambda **_kwargs: str(destination)
@@ -83,3 +87,18 @@ def test_save_rainfall_csv_exports_reloadable_daily_values_in_project_units(
     assert exported["Date"].tolist() == ["2025-01-01", "2025-01-02"]
     assert exported["Precipitation"].tolist() == [25.4, 12.7]
     assert "mm" in status.value
+
+
+def test_default_rainfall_csv_filename_uses_imported_station_name() -> None:
+    config = default_project_config("Export test")
+    app = SimpleNamespace(
+        rainfall_source_label=(
+            "CENTRAL/PARK (123456) in New York via ACIS, Total precipitation"
+        ),
+        config_model=config,
+        current_rainfall_csv_path=None,
+    )
+
+    filename = RainwaterTkApp._default_rainfall_csv_filename(app)
+
+    assert filename == "CENTRAL_PARK.csv"

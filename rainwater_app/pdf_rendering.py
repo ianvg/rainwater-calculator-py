@@ -288,6 +288,7 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Selected reliability", selected_reliability),
         ("Average annual rainwater supply", f'{format_number(float(executive.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
         ("Average annual municipal makeup", f'{format_number(float(executive.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Reserve-caused shortfall", f'{format_number(float(executive.get("average_annual_operating_reserve_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
         ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
         ("Net annual savings", f'{financial.get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
         ("Simple payback", f"{format_number(float(payback), max_decimal_places=1)} years" if payback is not None else "Not achieved"),
@@ -343,9 +344,33 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     y -= 8
     line(54, y, 558, y)
     y -= 14
-    text(54, y, "Size", size=9)
-    text(330, y, f"{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {report['volume_unit']}", size=9)
-    y -= 14
+    tank_rows = [
+        ("Primary total capacity", report["selected_tank_size"]),
+        ("Primary minimum operating volume", report.get("minimum_operating_volume", 0.0)),
+        ("Primary usable capacity", report.get("usable_tank_capacity", report["selected_tank_size"])),
+        ("Primary final physical storage", report.get("final_physical_storage", 0.0)),
+        ("Primary final usable water", report.get("final_usable_water_available", 0.0)),
+    ]
+    buffer_summary = report.get("buffer_tank_summary", {})
+    if float(buffer_summary.get("capacity", 0.0)) > 0.0:
+        tank_rows.extend(
+            [
+                ("Buffer total capacity", buffer_summary.get("capacity", 0.0)),
+                ("Buffer minimum operating volume", buffer_summary.get("minimum_operating_volume", 0.0)),
+                ("Buffer usable capacity", buffer_summary.get("usable_capacity", 0.0)),
+                ("Buffer final physical storage", buffer_summary.get("final_physical_storage", 0.0)),
+                ("Buffer final usable water", buffer_summary.get("final_usable_water_available", 0.0)),
+            ]
+        )
+    for label, value in tank_rows:
+        text(54, y, label, size=9)
+        text(
+            330,
+            y,
+            f"{format_number(float(value), max_decimal_places=0)} {report['volume_unit']}",
+            size=9,
+        )
+        y -= 14
 
     heading("Candidate Performance")
     candidates = list(report.get("candidate_performance", []))

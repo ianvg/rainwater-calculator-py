@@ -237,6 +237,7 @@ def system_object_editor_validation(
         "booster_tank_size": "Tank size",
         "booster_initial_fill": "Initial fill",
         "booster_refill_level": "Refill level",
+        "booster_reserve": "Minimum operating level",
         "pump_capacity": "Pump capacity",
         "first_flush_antecedent": "Antecedent dry period",
     }
@@ -258,6 +259,7 @@ def system_object_editor_validation(
             "booster_tank_size",
             "booster_initial_fill",
             "booster_refill_level",
+            "booster_reserve",
         ),
         "booster_pump": ("pump_capacity",),
         "first_flush_diversion": ("first_flush_antecedent",),
@@ -321,6 +323,21 @@ def system_object_editor_validation(
     ):
         if field in parsed and not 0 <= parsed[field] <= 100:
             errors.append(f"{numeric_labels[field]} must be between 0 and 100%.")
+
+    for field in ("reserve", "booster_reserve"):
+        if field in parsed and not 0 <= parsed[field] < 100:
+            errors.append(
+                f"{numeric_labels[field]} must be at least 0% and less than 100%."
+            )
+
+    if (
+        "booster_reserve" in parsed
+        and "booster_refill_level" in parsed
+        and parsed["booster_refill_level"] < parsed["booster_reserve"]
+    ):
+        errors.append(
+            "Buffer refill level must be greater than or equal to its minimum operating level."
+        )
 
     if component_type == "primary_tank":
         if parsed["selected_tank_size"] <= 0:

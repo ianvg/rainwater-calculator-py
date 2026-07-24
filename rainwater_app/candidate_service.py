@@ -24,6 +24,7 @@ HYDRAULIC_COLUMNS = (
     "UnmetDemandGallons",
     "MunicipalMakeupGallons",
     "SystemUnmetDemandGallons",
+    "OperatingReserveUnmetDemandGallons",
     "OverflowGallons",
     "FirstFlushLossGallons",
     "TreatmentLossGallons",
@@ -97,6 +98,7 @@ class CandidateAnalysisService:
             "TankSizeGallons", "TotalDemandGallons", "RainwaterSuppliedGallons",
             "SewerEligibleRainwaterSuppliedGallons", "UnmetDemandGallons",
             "MunicipalMakeupGallons", "SystemUnmetDemandGallons", "OverflowGallons",
+            "OperatingReserveUnmetDemandGallons",
             "FirstFlushLossGallons", "TreatmentLossGallons", "FinalStorageGallons",
         }
         rows: list[list[str]] = []

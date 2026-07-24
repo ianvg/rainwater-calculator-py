@@ -339,6 +339,7 @@ PROJECT_FORM_VARIABLES = (
     "pump_capacity_var", "filtration_pump_capacity_var", "filter_recovery_var",
     "filtration_system_count_var",
     "booster_tank_size_var", "booster_initial_fill_var", "booster_refill_level_var",
+    "booster_reserve_var",
     "municipal_backup_enabled_var", "flushes_var", "toilet_flush_var",
     "urinal_flush_var", "graph_start_var", "graph_end_var", "graph_step_var",
     "graph_auto_step_count_var", "selected_tank_var",
@@ -1404,6 +1405,7 @@ class RainwaterTkApp(tk.Tk):
         self.booster_tank_size_var = tk.StringVar(value="0")
         self.booster_initial_fill_var = tk.StringVar(value="0")
         self.booster_refill_level_var = tk.StringVar(value="50")
+        self.booster_reserve_var = tk.StringVar(value="0")
         self.municipal_backup_enabled_var = tk.BooleanVar(value=True)
         self.pump_capacity_unit_var = tk.StringVar(value="gal/min")
         self.country_var = tk.StringVar(value=COUNTRY_LABEL_BY_CODE["USA"])
@@ -1898,6 +1900,10 @@ class RainwaterTkApp(tk.Tk):
         export_menu = tk.Menu(menubar, tearoff=False)
         export_menu.add_command(label="Export results...", command=self.export_results)
         export_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
+        export_menu.add_command(
+            label="Export legacy PDF report...",
+            command=self.export_legacy_pdf_report,
+        )
         export_menu.add_command(label="Export HTML report...", command=self.export_html_report)
         export_menu.add_separator()
         export_menu.add_command(
@@ -1912,6 +1918,10 @@ class RainwaterTkApp(tk.Tk):
 
         view_menu = tk.Menu(menubar, tearoff=False)
         view_menu.add_command(label="View PDF report", command=self.view_pdf_report)
+        view_menu.add_command(
+            label="View legacy PDF report",
+            command=self.view_legacy_pdf_report,
+        )
         view_menu.add_command(label="View HTML report", command=self.view_html_report)
         view_menu.add_separator()
         view_menu.add_command(label="Execution log", command=self.show_execution_log)
@@ -3227,6 +3237,7 @@ class RainwaterTkApp(tk.Tk):
             "booster_tank_size": tk.StringVar(),
             "booster_initial_fill": tk.StringVar(),
             "booster_refill_level": tk.StringVar(),
+            "booster_reserve": tk.StringVar(),
             "pump_capacity": tk.StringVar(),
             "municipal_backup_enabled": tk.BooleanVar(),
             "first_flush_sizing_method": self.first_flush_sizing_method_var,
@@ -3265,6 +3276,7 @@ class RainwaterTkApp(tk.Tk):
                 ("Tank size (0 = pass-through)", editor_vars["booster_tank_size"], self.tank_size_unit_var),
                 ("Initial fill", editor_vars["booster_initial_fill"], self.percent_unit_var),
                 ("Refill level", editor_vars["booster_refill_level"], self.percent_unit_var),
+                ("Minimum operating level", editor_vars["booster_reserve"], self.percent_unit_var),
             ],
             "booster_pump": [
                 ("Pump capacity (0 = unlimited)", editor_vars["pump_capacity"], self.pump_capacity_unit_var),
@@ -6357,6 +6369,7 @@ class RainwaterTkApp(tk.Tk):
             ),
             "booster_tank": (
                 "booster_tank_size", "booster_initial_fill", "booster_refill_level",
+                "booster_reserve",
             ),
             "booster_pump": ("pump_capacity",),
             "municipal_backup": ("municipal_backup_enabled",),
@@ -6414,6 +6427,9 @@ class RainwaterTkApp(tk.Tk):
                 "booster_tank_size": format_number(volume_to_display(cfg.system_parameters.booster_tank_size_gallons, cfg), cfg),
                 "booster_initial_fill": format_number(cfg.system_parameters.booster_initial_fill_percent, cfg),
                 "booster_refill_level": format_number(cfg.system_parameters.booster_refill_level_percent, cfg),
+                "booster_reserve": format_number(
+                    cfg.system_parameters.booster_minimum_operating_volume_percent, cfg
+                ),
             })
         elif component_type == "booster_pump":
             values["pump_capacity"] = (
@@ -6748,9 +6764,13 @@ class RainwaterTkApp(tk.Tk):
             )
             cfg.system_parameters.booster_initial_fill_percent = number("booster_initial_fill")
             cfg.system_parameters.booster_refill_level_percent = number("booster_refill_level")
+            cfg.system_parameters.booster_minimum_operating_volume_percent = number(
+                "booster_reserve"
+            )
             self.booster_tank_size_var.set(str(values["booster_tank_size"]))
             self.booster_initial_fill_var.set(str(values["booster_initial_fill"]))
             self.booster_refill_level_var.set(str(values["booster_refill_level"]))
+            self.booster_reserve_var.set(str(values["booster_reserve"]))
         elif component_type == "booster_pump":
             cfg.system_parameters.pump_capacity_gallons_per_hour = volume_to_internal(
                 number("pump_capacity") * 60.0, cfg
@@ -8981,6 +9001,7 @@ class RainwaterTkApp(tk.Tk):
             ("Hard operating constraint", "Primary minimum operating level", f"{format_number(cfg.tank_parameters.minimum_operating_volume_percent, cfg)}% of capacity", "System parameters / Edit"),
             ("Fixed input", "Filter recovery", f"{format_number(system.filter_recovery_percent, cfg)}%", "System parameters / Edit"),
             ("Fixed input", "Buffer initial fill / refill level", f"{format_number(system.booster_initial_fill_percent, cfg)}% / {format_number(system.booster_refill_level_percent, cfg)}%", "System parameters / Edit"),
+            ("Hard operating constraint", "Buffer minimum operating level", f"{format_number(system.booster_minimum_operating_volume_percent, cfg)}% of capacity", "System parameters / Edit"),
             ("Fixed input", "Municipal backup", "Enabled" if system.municipal_backup_enabled else "Disabled", "System parameters / Edit"),
             ("Objective", "Ranking objective", optimization.objective, "Optimization"),
             ("Constraint", "Minimum rainwater reliability", f"{format_number(optimization.minimum_reliability_percent, cfg)}%", "Optimization"),
@@ -9530,6 +9551,16 @@ class RainwaterTkApp(tk.Tk):
         ttk.Button(actions, text="View HTML report", command=self.view_html_report).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(actions, text="Export PDF...", command=self.export_pdf_report).grid(row=0, column=2, padx=(18, 0))
         ttk.Button(actions, text="Export HTML...", command=self.export_html_report).grid(row=0, column=3, padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="View legacy PDF",
+            command=self.view_legacy_pdf_report,
+        ).grid(row=1, column=0, pady=(8, 0))
+        ttk.Button(
+            actions,
+            text="Export legacy PDF...",
+            command=self.export_legacy_pdf_report,
+        ).grid(row=1, column=2, padx=(18, 0), pady=(8, 0))
 
     def _set_report_sections(self, selected: bool) -> None:
         for variable in self.report_section_vars.values():
@@ -9788,7 +9819,8 @@ class RainwaterTkApp(tk.Tk):
             "TankSizeGallons", "ReliabilityPercent", "TotalDemandGallons",
             "RainwaterSuppliedGallons", "SewerEligibleRainwaterSuppliedGallons",
             "UnmetDemandGallons", "MunicipalMakeupGallons",
-            "SystemUnmetDemandGallons", "OverflowGallons", "FirstFlushLossGallons",
+            "SystemUnmetDemandGallons", "OperatingReserveUnmetDemandGallons",
+            "OverflowGallons", "FirstFlushLossGallons",
             "TreatmentLossGallons", "FinalStorageGallons", "NetAnnualSavings",
             "SimplePaybackYears", "LifecycleNPV",
         )
@@ -9801,6 +9833,7 @@ class RainwaterTkApp(tk.Tk):
             "SewerEligibleRainwaterSuppliedGallons": "Sewer-eligible supply",
             "UnmetDemandGallons": "Rainwater shortfall", "MunicipalMakeupGallons": "Municipal makeup",
             "SystemUnmetDemandGallons": "System unmet", "OverflowGallons": "Overflow",
+            "OperatingReserveUnmetDemandGallons": "Reserve-caused shortfall",
             "FirstFlushLossGallons": "First-flush loss", "TreatmentLossGallons": "Treatment loss",
             "FinalStorageGallons": "Final storage", "NetAnnualSavings": "Net savings/year",
             "SimplePaybackYears": "Simple payback", "LifecycleNPV": "Lifecycle NPV",
@@ -9864,7 +9897,8 @@ class RainwaterTkApp(tk.Tk):
         self.hourly_tank_canvas.bind("<Configure>", self._schedule_results_chart_redraw)
         hourly_columns = (
             "datetime", "gross", "first_flush", "collected", "demand", "pump", "filter", "filter_loss", "booster",
-            "mains", "shortfall", "system_unmet", "overflow", "tank"
+            "booster_usable", "mains", "shortfall", "reserve_shortfall",
+            "system_unmet", "overflow", "tank", "tank_usable"
         )
         self.hourly_results_tree = ttk.Treeview(hourly, columns=hourly_columns, show="headings", height=12)
         for column, label in {
@@ -9872,7 +9906,10 @@ class RainwaterTkApp(tk.Tk):
             "collected": "Collected", "demand": "Demand",
             "pump": "Pump flow", "filter": "Filter throughput", "filter_loss": "Filter loss",
             "booster": "Buffer tank", "mains": "Mains makeup", "shortfall": "Rainwater shortfall",
+            "booster_usable": "Buffer usable water",
+            "reserve_shortfall": "Reserve-caused shortfall",
             "system_unmet": "System unmet", "overflow": "Overflow", "tank": "Primary tank",
+            "tank_usable": "Primary usable water",
         }.items():
             self.hourly_results_tree.heading(column, text=label)
             self.hourly_results_tree.column(column, width=145, anchor="w" if column == "datetime" else "e")
@@ -10671,6 +10708,11 @@ class RainwaterTkApp(tk.Tk):
         )
         self.booster_initial_fill_var.set(format_number(cfg.system_parameters.booster_initial_fill_percent, cfg))
         self.booster_refill_level_var.set(format_number(cfg.system_parameters.booster_refill_level_percent, cfg))
+        self.booster_reserve_var.set(
+            format_number(
+                cfg.system_parameters.booster_minimum_operating_volume_percent, cfg
+            )
+        )
         self.municipal_backup_enabled_var.set(cfg.system_parameters.municipal_backup_enabled)
         financial = cfg.financial_parameters
         self.financial_currency_var.set(financial.currency)
@@ -10901,6 +10943,16 @@ class RainwaterTkApp(tk.Tk):
         cfg.system_parameters.booster_refill_level_percent = min(
             max(_float(self.booster_refill_level_var.get(), 50.0), 0.0), 100.0
         )
+        cfg.system_parameters.booster_minimum_operating_volume_percent = min(
+            max(_float(self.booster_reserve_var.get(), 0.0), 0.0), 99.999999
+        )
+        cfg.system_parameters.booster_refill_level_percent = max(
+            cfg.system_parameters.booster_refill_level_percent,
+            cfg.system_parameters.booster_minimum_operating_volume_percent,
+        )
+        self.booster_refill_level_var.set(
+            format_number(cfg.system_parameters.booster_refill_level_percent, cfg)
+        )
         cfg.system_parameters.municipal_backup_enabled = bool(self.municipal_backup_enabled_var.get())
         self._apply_financial_form_to_model()
         cfg.optimization_parameters.minimum_reliability_percent = _float(
@@ -10956,7 +11008,7 @@ class RainwaterTkApp(tk.Tk):
         self._apply_report_options_to_model()
         cfg.tank_parameters.initial_fill_percent = min(max(_float(self.initial_fill_var.get(), 50), 0), 100)
         cfg.tank_parameters.minimum_operating_volume_percent = min(
-            max(_float(self.reserve_var.get(), 0), 0), 100
+            max(_float(self.reserve_var.get(), 0), 0), 99.999999
         )
         cfg.first_flush_sizing_method = self._selected_first_flush_sizing_method()
         cfg.first_flush_design_preset = self._selected_first_flush_design_preset()
@@ -11232,6 +11284,7 @@ class RainwaterTkApp(tk.Tk):
                 self.booster_tank_size_var,
                 self.booster_initial_fill_var,
                 self.booster_refill_level_var,
+                self.booster_reserve_var,
                 self.municipal_backup_enabled_var,
                 self.system_type_var,
             )
@@ -12390,14 +12443,9 @@ class RainwaterTkApp(tk.Tk):
             )
             return
         self._apply_form_to_model()
-        source_stem = (
-            Path(self.current_rainfall_csv_path).stem
-            if self.current_rainfall_csv_path
-            else _safe_project_file_name(self.config_model.name).replace(".db", "")
-        )
         path = filedialog.asksaveasfilename(
             title="Save daily rainfall CSV",
-            initialfile=f"{source_stem}_rainfall.csv",
+            initialfile=self._default_rainfall_csv_filename(),
             defaultextension=".csv",
             filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
         )
@@ -12421,6 +12469,23 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showerror(
                 APP_TITLE, f"Could not save rainfall CSV:\n{exc}", parent=self
             )
+
+    def _default_rainfall_csv_filename(self) -> str:
+        source_label = (
+            self.rainfall_source_label or self.config_model.rainfall_source_label or ""
+        )
+        station_match = re.match(
+            r"^(?P<name>.+) \([^()]+\).* via (?:ACIS|ECCC),", source_label
+        )
+        if station_match:
+            safe_name = _safe_project_file_name(station_match.group("name"))[0:-3]
+            return f"{safe_name}.csv"
+        source_stem = (
+            Path(self.current_rainfall_csv_path).stem
+            if self.current_rainfall_csv_path
+            else _safe_project_file_name(self.config_model.name)[0:-3]
+        )
+        return f"{source_stem}_rainfall.csv"
 
     def load_rainfall_csv(self) -> None:
         self._apply_form_to_model()
@@ -15355,22 +15420,34 @@ class RainwaterTkApp(tk.Tk):
             )
 
     def view_pdf_report(self) -> None:
-        report = self._request_report_content("PDF")
+        self._view_pdf_report(legacy=False)
+
+    def view_legacy_pdf_report(self) -> None:
+        self._view_pdf_report(legacy=True)
+
+    def _view_pdf_report(self, *, legacy: bool) -> None:
+        report_label = "legacy PDF" if legacy else "PDF"
+        report = self._request_report_content(report_label)
         if report is None:
             return
         preview_dir = self._new_report_preview_directory()
         pdf_path = preview_dir / self._default_report_filename(".pdf")
         try:
-            self.execution_log.info("Report", "Generating PDF report preview")
+            self.execution_log.info("Report", f"Generating {report_label} report preview")
             self._drain_execution_log_to_window()
             self.update_idletasks()
-            self._write_pdf_report(pdf_path, report)
+            if legacy:
+                self._write_legacy_pdf_report(pdf_path, report)
+            else:
+                self._write_pdf_report(pdf_path, report)
             self._open_local_file(pdf_path)
-            self.status_var.set(f"Opened PDF report preview: {pdf_path.name}")
-            self.execution_log.info("Report", "PDF report preview opened")
+            self.status_var.set(f"Opened {report_label} report preview: {pdf_path.name}")
+            self.execution_log.info("Report", f"{report_label} report preview opened")
         except Exception as exc:  # noqa: BLE001
-            self.execution_log.error("Report", "Could not view PDF report", exception=exc)
-            messagebox.showerror(APP_TITLE, f"Could not view PDF report:\n{exc}")
+            self.execution_log.error(
+                "Report", f"Could not view {report_label} report", exception=exc
+            )
+            messagebox.showerror(APP_TITLE, f"Could not view {report_label} report:\n{exc}")
 
     def view_html_report(self) -> None:
         report = self._request_report_content("HTML")
@@ -15391,11 +15468,18 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showerror(APP_TITLE, f"Could not view HTML report:\n{exc}")
 
     def export_pdf_report(self) -> None:
-        report = self._request_report_content("PDF")
+        self._export_pdf_report(legacy=False)
+
+    def export_legacy_pdf_report(self) -> None:
+        self._export_pdf_report(legacy=True)
+
+    def _export_pdf_report(self, *, legacy: bool) -> None:
+        report_label = "legacy PDF" if legacy else "PDF"
+        report = self._request_report_content(report_label)
         if report is None:
             return
         path = filedialog.asksaveasfilename(
-            title="Export PDF report",
+            title=f"Export {report_label} report",
             initialfile=self._default_report_filename(".pdf"),
             defaultextension=".pdf",
             filetypes=[("PDF files", "*.pdf")],
@@ -15404,15 +15488,20 @@ class RainwaterTkApp(tk.Tk):
             return
         pdf_path = Path(path)
         try:
-            self.execution_log.info("Report", "Exporting PDF report")
+            self.execution_log.info("Report", f"Exporting {report_label} report")
             self._drain_execution_log_to_window()
             self.update_idletasks()
-            self._write_pdf_report(pdf_path, report)
-            self.status_var.set(f"Exported PDF report: {pdf_path.name}")
-            self.execution_log.info("Report", f"Exported PDF report {pdf_path.name}")
+            if legacy:
+                self._write_legacy_pdf_report(pdf_path, report)
+            else:
+                self._write_pdf_report(pdf_path, report)
+            self.status_var.set(f"Exported {report_label} report: {pdf_path.name}")
+            self.execution_log.info("Report", f"Exported {report_label} report {pdf_path.name}")
         except Exception as exc:  # noqa: BLE001
-            self.execution_log.error("Report", "Could not export PDF report", exception=exc)
-            messagebox.showerror(APP_TITLE, f"Could not export PDF report:\n{exc}")
+            self.execution_log.error(
+                "Report", f"Could not export {report_label} report", exception=exc
+            )
+            messagebox.showerror(APP_TITLE, f"Could not export {report_label} report:\n{exc}")
 
     def export_html_report(self) -> None:
         report = self._request_report_content("HTML")
@@ -15459,6 +15548,12 @@ class RainwaterTkApp(tk.Tk):
         return _safe_project_file_name(self.config_model.name).replace(".db", f"_report{suffix}")
 
     def _write_pdf_report(
+        self, pdf_path: Path, report: ReportModel | dict[str, object]
+    ) -> None:
+        self.execution_log.debug("Report", "Rendering HTML report with WeasyPrint")
+        ReportRenderingService().html_pdf(pdf_path, report)
+
+    def _write_legacy_pdf_report(
         self, pdf_path: Path, report: ReportModel | dict[str, object]
     ) -> None:
         report = ReportModel.from_payload(report)
@@ -15741,7 +15836,8 @@ class RainwaterTkApp(tk.Tk):
         year_count = max(int(dates.dropna().dt.year.nunique()), 1)
         annual_columns = (
             "RainwaterSuppliedGallons", "MunicipalMakeupGallons", "SystemUnmetDemandGallons",
-            "OverflowGallons", "FirstFlushLossGallons", "TreatmentLossGallons",
+            "OperatingReserveUnmetDemandGallons", "OverflowGallons",
+            "FirstFlushLossGallons", "TreatmentLossGallons",
         )
         rows: list[dict[str, object]] = []
         for row in data.to_dict("records"):
@@ -15847,6 +15943,38 @@ class RainwaterTkApp(tk.Tk):
             application_version = importlib_metadata.version("rainwater-calculator-standalone")
         except importlib_metadata.PackageNotFoundError:
             application_version = "development build"
+        operating_results = (
+            self.hourly_results_df
+            if not self.hourly_results_df.empty
+            else self.results_df
+        )
+        primary_minimum_gallons = (
+            cfg.selected_tank_size_gal
+            * cfg.tank_parameters.minimum_operating_volume_percent
+            / 100.0
+        )
+        final_primary_storage = (
+            float(self.results_df["WaterInTankGallons"].iloc[-1])
+            if not self.results_df.empty and "WaterInTankGallons" in self.results_df
+            else 0.0
+        )
+        final_primary_usable = max(
+            final_primary_storage - primary_minimum_gallons, 0.0
+        )
+        booster_capacity = cfg.system_parameters.booster_tank_size_gallons
+        booster_minimum_gallons = (
+            booster_capacity
+            * cfg.system_parameters.booster_minimum_operating_volume_percent
+            / 100.0
+        )
+        final_booster_storage = (
+            float(self.hourly_results_df["BoosterTankGallons"].iloc[-1])
+            if not self.hourly_results_df.empty
+            and "BoosterTankGallons" in self.hourly_results_df
+            else booster_capacity
+            * cfg.system_parameters.booster_initial_fill_percent
+            / 100.0
+        )
         return ReportModel.from_payload({
             "metadata": dict(metadata),
             "notes": cfg.notes,
@@ -15882,11 +16010,34 @@ class RainwaterTkApp(tk.Tk):
             "selected_tank_size": volume_to_display(cfg.selected_tank_size_gal, cfg),
             "minimum_operating_level_percent": cfg.tank_parameters.minimum_operating_volume_percent,
             "minimum_operating_volume": volume_to_display(
-                cfg.selected_tank_size_gal
-                * cfg.tank_parameters.minimum_operating_volume_percent
-                / 100.0,
+                primary_minimum_gallons,
                 cfg,
             ),
+            "usable_tank_capacity": volume_to_display(
+                cfg.selected_tank_size_gal - primary_minimum_gallons, cfg
+            ),
+            "final_physical_storage": volume_to_display(final_primary_storage, cfg),
+            "final_usable_water_available": volume_to_display(
+                final_primary_usable, cfg
+            ),
+            "buffer_tank_summary": {
+                "capacity": volume_to_display(booster_capacity, cfg),
+                "minimum_operating_level_percent": (
+                    cfg.system_parameters.booster_minimum_operating_volume_percent
+                ),
+                "minimum_operating_volume": volume_to_display(
+                    booster_minimum_gallons, cfg
+                ),
+                "usable_capacity": volume_to_display(
+                    booster_capacity - booster_minimum_gallons, cfg
+                ),
+                "final_physical_storage": volume_to_display(
+                    final_booster_storage, cfg
+                ),
+                "final_usable_water_available": volume_to_display(
+                    max(final_booster_storage - booster_minimum_gallons, 0.0), cfg
+                ),
+            },
             "selected_reliability": selected_reliability,
             "executive_summary": {
                 "average_annual_supply": volume_to_display(
@@ -15897,6 +16048,12 @@ class RainwaterTkApp(tk.Tk):
                 ),
                 "average_annual_system_unmet": volume_to_display(
                     self._average_annual_result_total(self.results_df, "SystemUnmetDemandGallons"), cfg
+                ),
+                "average_annual_operating_reserve_unmet": volume_to_display(
+                    self._average_annual_result_total(
+                        operating_results, "OperatingReserveUnmetDemandGallons"
+                    ),
+                    cfg,
                 ),
                 "average_annual_overflow": volume_to_display(
                     self._average_annual_result_total(self.results_df, "OverflowGallons"), cfg
@@ -16155,7 +16312,10 @@ class RainwaterTkApp(tk.Tk):
             "OverflowGallons", "DemandGallons", "SewerEligibleDemandGallons",
             "RainwaterSuppliedGallons", "SewerEligibleRainwaterSuppliedGallons",
             "UnmetDemandGallons", "MainsMakeupGallons", "SystemUnmetDemandGallons",
-            "FilterLossGallons", "WaterInTankGallons",
+            "OperatingReserveUnmetDemandGallons", "FilterLossGallons",
+            "WaterInTankGallons", "MinimumOperatingVolumeGallons",
+            "UsableTankCapacityGallons", "UsableWaterAvailableGallons",
+            "OperatingReserveStoredGallons",
         ]:
             if col in out:
                 out[col] = out[col].map(lambda v: volume_to_display(float(v), cfg))
@@ -16173,8 +16333,13 @@ class RainwaterTkApp(tk.Tk):
                 "UnmetDemandGallons": f"Unmet Demand ({volume_unit(cfg)}/day)",
                 "MainsMakeupGallons": f"Municipal makeup ({volume_unit(cfg)}/day)",
                 "SystemUnmetDemandGallons": f"System unmet demand ({volume_unit(cfg)}/day)",
+                "OperatingReserveUnmetDemandGallons": f"Reserve-caused shortfall ({volume_unit(cfg)}/day)",
                 "FilterLossGallons": f"Treatment loss ({volume_unit(cfg)}/day)",
                 "WaterInTankGallons": f"Water in Tank ({volume_unit(cfg)})",
+                "MinimumOperatingVolumeGallons": f"Minimum operating volume ({volume_unit(cfg)})",
+                "UsableTankCapacityGallons": f"Usable tank capacity ({volume_unit(cfg)})",
+                "UsableWaterAvailableGallons": f"Usable water available ({volume_unit(cfg)})",
+                "OperatingReserveStoredGallons": f"Operating reserve stored ({volume_unit(cfg)})",
                 "ReliabilityPercent": "Reliability (%)",
             }
         )
@@ -16320,6 +16485,7 @@ class RainwaterTkApp(tk.Tk):
             "UnmetDemandGallons": f"Rainwater shortfall ({unit})",
             "MunicipalMakeupGallons": f"Municipal makeup ({unit})",
             "SystemUnmetDemandGallons": f"System unmet ({unit})",
+            "OperatingReserveUnmetDemandGallons": f"Reserve-caused shortfall ({unit})",
             "OverflowGallons": f"Overflow ({unit})", "FirstFlushLossGallons": f"First-flush loss ({unit})",
             "TreatmentLossGallons": f"Treatment loss ({unit})", "FinalStorageGallons": f"Final storage ({unit})",
             "NetAnnualSavings": f"Net savings/year ({currency})", "SimplePaybackYears": "Simple payback (years)",
@@ -16496,7 +16662,8 @@ class RainwaterTkApp(tk.Tk):
         unit = volume_unit(self.config_model)
         for column in (
             "gross", "first_flush", "collected", "demand", "pump", "filter", "filter_loss", "booster", "mains",
-            "shortfall", "system_unmet", "overflow", "tank",
+            "booster_usable", "shortfall", "reserve_shortfall", "system_unmet",
+            "overflow", "tank", "tank_usable",
         ):
             label = re.split(r"\s+\(", self.hourly_results_tree.heading(column, "text"), maxsplit=1)[0]
             self.hourly_results_tree.heading(column, text=f"{label} ({unit})")
@@ -16513,11 +16680,14 @@ class RainwaterTkApp(tk.Tk):
                     format_number(volume_to_display(row.FilterThroughputGallons, self.config_model), self.config_model),
                     format_number(volume_to_display(row.FilterLossGallons, self.config_model), self.config_model),
                     format_number(volume_to_display(row.BoosterTankGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(getattr(row, "BoosterUsableWaterAvailableGallons", row.BoosterTankGallons), self.config_model), self.config_model),
                     format_number(volume_to_display(row.MainsMakeupGallons, self.config_model), self.config_model),
                     format_number(volume_to_display(row.UnmetDemandGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(getattr(row, "OperatingReserveUnmetDemandGallons", 0.0), self.config_model), self.config_model),
                     format_number(volume_to_display(row.SystemUnmetDemandGallons, self.config_model), self.config_model),
                     format_number(volume_to_display(row.OverflowGallons, self.config_model), self.config_model),
                     format_number(volume_to_display(row.WaterInTankGallons, self.config_model), self.config_model),
+                    format_number(volume_to_display(getattr(row, "UsableWaterAvailableGallons", row.WaterInTankGallons), self.config_model), self.config_model),
                 )
             )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from .html_pdf_rendering import render_html_pdf
 from .pdf_rendering import render_pdf
 from .report_rendering import render_html, render_latex
 from .reporting import ReportModel
@@ -24,3 +25,9 @@ class ReportRenderingService:
         self, pdf_path: Path, report: ReportModel | dict[str, object]
     ) -> None:
         render_pdf(pdf_path, ReportModel.from_payload(report))
+
+    def html_pdf(
+        self, pdf_path: Path, report: ReportModel | dict[str, object]
+    ) -> None:
+        """Render the HTML report with WeasyPrint."""
+        render_html_pdf(pdf_path, report)

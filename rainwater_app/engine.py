@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from calendar import monthrange
 from dataclasses import dataclass
+import math
 from typing import Callable, Iterable
 
 import numpy as np
@@ -24,6 +25,24 @@ GAL_PER_CUBIC_FOOT = 7.48052
 
 class AnalysisCancelledError(RuntimeError):
     """Raised when a running simulation is cooperatively cancelled."""
+
+
+def _operating_fraction(value: object, label: str) -> float:
+    try:
+        percent = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} must be a valid percentage.") from exc
+    if not math.isfinite(percent) or not 0.0 <= percent < 100.0:
+        raise ValueError(f"{label} must be at least 0% and less than 100%.")
+    return percent / 100.0
+
+
+def _buffer_needs_refill(
+    water: float, refill_target: float, minimum_operating_volume: float
+) -> bool:
+    if minimum_operating_volume > 0.0 and refill_target <= minimum_operating_volume:
+        return water <= minimum_operating_volume + 1e-9
+    return water < refill_target
 
 
 def _validate_rainfall(rainfall_df: pd.DataFrame) -> pd.DataFrame:
@@ -492,11 +511,19 @@ def simulate_hourly_indirect_aggregates(
     booster_water = booster_capacity * min(max(float(params.booster_initial_fill_percent) / 100.0, 0.0), 1.0)
     booster_rainwater = booster_water
     booster_municipal = 0.0
+    booster_minimum_fraction = _operating_fraction(
+        params.booster_minimum_operating_volume_percent,
+        "Buffer minimum operating level",
+    )
+    booster_minimum_volume = booster_capacity * booster_minimum_fraction
     refill_target = booster_capacity * min(max(float(params.booster_refill_level_percent) / 100.0, 0.0), 1.0)
-    refill_active = booster_capacity > 0.0 and booster_water < refill_target
+    refill_active = booster_capacity > 0.0 and _buffer_needs_refill(
+        booster_water, refill_target, booster_minimum_volume
+    )
     water = tank_size_gallons * min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
-    minimum_volume = tank_size_gallons * min(
-        max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    minimum_volume = tank_size_gallons * _operating_fraction(
+        config.tank_parameters.minimum_operating_volume_percent,
+        "Primary minimum operating level",
     )
     annual_supplied = np.zeros(prepared.year_count, dtype=np.float64)
     annual_sewer_eligible_supplied = np.zeros(prepared.year_count, dtype=np.float64)
@@ -532,14 +559,18 @@ def simulate_hourly_indirect_aggregates(
                 if booster_water >= booster_capacity - 1e-9:
                     refill_active = False
             total_before_demand = booster_water
-            total_supplied = min(total_before_demand, demand)
+            total_supplied = min(
+                max(total_before_demand - booster_minimum_volume, 0.0), demand
+            )
             rainwater_fraction = booster_rainwater / total_before_demand if total_before_demand > 0.0 else 0.0
             rainwater_supplied = total_supplied * rainwater_fraction
             mains_supplied = total_supplied - rainwater_supplied
             booster_rainwater = max(booster_rainwater - rainwater_supplied, 0.0)
             booster_municipal = max(booster_municipal - mains_supplied, 0.0)
             booster_water = booster_rainwater + booster_municipal
-            if booster_water < refill_target:
+            if _buffer_needs_refill(
+                booster_water, refill_target, booster_minimum_volume
+            ):
                 refill_active = True
         else:
             requested_input = demand / recovery if recovery > 0.0 else 0.0
@@ -627,18 +658,21 @@ def simulate_tank(
     collected = collection["CollectedGallons"]
 
     initial_fill = min(max(params.initial_fill_percent / 100.0, 0.0), 1.0)
-    minimum_operating_fraction = min(
-        max(params.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    minimum_operating_fraction = _operating_fraction(
+        params.minimum_operating_volume_percent,
+        "Primary minimum operating level",
     )
     minimum_operating_volume = tank_size_gallons * minimum_operating_fraction
     water_level: list[float] = []
     demand_met: list[bool] = []
     usable_water_available: list[float] = []
+    operating_reserve_stored: list[float] = []
     unmet_demand: list[float] = []
     supplied_demand: list[float] = []
     sewer_eligible_supplied: list[float] = []
     municipal_makeup: list[float] = []
     system_unmet_demand: list[float] = []
+    reserve_unmet_demand: list[float] = []
     treatment_loss: list[float] = []
     pump_flow: list[float] = []
     overflow: list[float] = []
@@ -659,6 +693,7 @@ def simulate_tank(
         )
         available_for_withdrawal = max(water - minimum_operating_volume, 0.0)
         supplied_today = 0.0
+        unrestricted_supplied_today = 0.0
         withdrawn_today = 0.0
         if system.primary_reaches_end_uses:
             if system.filtration_path:
@@ -673,14 +708,26 @@ def simulate_tank(
                 if daily_capacity > 0.0:
                     withdrawn_today = min(withdrawn_today, daily_capacity)
                 supplied_today = min(withdrawn_today * recovery, demand_today)
+                unrestricted_withdrawal = min(water, requested_input)
+                if daily_capacity > 0.0:
+                    unrestricted_withdrawal = min(
+                        unrestricted_withdrawal, daily_capacity
+                    )
+                unrestricted_supplied_today = min(
+                    unrestricted_withdrawal * recovery, demand_today
+                )
             else:
                 supplied_today = min(available_for_withdrawal, demand_today)
+                unrestricted_supplied_today = min(water, demand_today)
                 if system.distribution_pump_path:
                     daily_capacity = max(
                         config.system_parameters.pump_capacity_gallons_per_hour, 0.0
                     ) * 24.0
                     if daily_capacity > 0.0:
                         supplied_today = min(supplied_today, daily_capacity)
+                        unrestricted_supplied_today = min(
+                            unrestricted_supplied_today, daily_capacity
+                        )
                 withdrawn_today = supplied_today
         met_today = supplied_today >= demand_today
         unmet_today = max(demand_today - supplied_today, 0.0)
@@ -691,6 +738,10 @@ def simulate_tank(
             else 0.0
         )
         system_unmet_today = max(unmet_today - municipal_makeup_today, 0.0)
+        reserve_unmet_today = min(
+            unmet_today,
+            max(unrestricted_supplied_today - supplied_today, 0.0),
+        )
         treatment_loss_today = max(withdrawn_today - supplied_today, 0.0)
         pump_flow_today = (
             withdrawn_today
@@ -709,11 +760,13 @@ def simulate_tank(
         water_level.append(float(water))
         demand_met.append(bool(met_today))
         usable_water_available.append(float(max(water - minimum_operating_volume, 0.0)))
+        operating_reserve_stored.append(float(min(water, minimum_operating_volume)))
         unmet_demand.append(float(unmet_today))
         supplied_demand.append(float(supplied_today))
         sewer_eligible_supplied.append(float(sewer_eligible_supplied_today))
         municipal_makeup.append(float(municipal_makeup_today))
         system_unmet_demand.append(float(system_unmet_today))
+        reserve_unmet_demand.append(float(reserve_unmet_today))
         treatment_loss.append(float(treatment_loss_today))
         pump_flow.append(float(pump_flow_today))
         overflow.append(float(overflow_today))
@@ -738,7 +791,11 @@ def simulate_tank(
             "RainwaterSuppliedGallons": supplied_demand,
             "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_supplied,
             "MinimumOperatingVolumeGallons": minimum_operating_volume,
+            "TankCapacityGallons": tank_size_gallons,
+            "UsableTankCapacityGallons": tank_size_gallons - minimum_operating_volume,
             "UsableWaterAvailableGallons": usable_water_available,
+            "OperatingReserveStoredGallons": operating_reserve_stored,
+            "OperatingReserveUnmetDemandGallons": reserve_unmet_demand,
             "UnmetDemandGallons": unmet_demand,
             "MainsMakeupGallons": municipal_makeup,
             "SystemUnmetDemandGallons": system_unmet_demand,
@@ -785,11 +842,18 @@ def simulate_hourly_tank(
     booster_water = booster_capacity * booster_fill
     booster_rainwater = booster_water
     booster_municipal_water = 0.0
+    booster_minimum_fraction = _operating_fraction(
+        component_params.booster_minimum_operating_volume_percent,
+        "Buffer minimum operating level",
+    )
+    booster_minimum_volume = booster_capacity * booster_minimum_fraction
     booster_refill_level = min(
         max(float(component_params.booster_refill_level_percent) / 100.0, 0.0), 1.0
     )
     booster_refill_target = booster_capacity * booster_refill_level
-    refill_active = booster_capacity > 0.0 and booster_water < booster_refill_target
+    refill_active = booster_capacity > 0.0 and _buffer_needs_refill(
+        booster_water, booster_refill_target, booster_minimum_volume
+    )
     hourly_rainfall = expand_hourly_rainfall(
         data, use_synthetic=config.use_synthetic_hourly_rainfall
     )
@@ -823,8 +887,9 @@ def simulate_hourly_tank(
         min(max(config.financial_parameters.sewer_eligible_percent, 0.0), 100.0) / 100.0
     )
     initial_fill = min(max(config.tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
-    minimum_operating_fraction = min(
-        max(config.tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    minimum_operating_fraction = _operating_fraction(
+        config.tank_parameters.minimum_operating_volume_percent,
+        "Primary minimum operating level",
     )
     minimum_operating_volume = tank_size_gallons * minimum_operating_fraction
     water = tank_size_gallons * initial_fill
@@ -911,6 +976,8 @@ def simulate_hourly_tank(
             mains_makeup = 0.0
             mains_supplied = 0.0
             rainwater_supplied = 0.0
+            reserve_unmet = 0.0
+            reserve_counterfactual_booster_addition = 0.0
             if indirect and system.primary_reaches_end_uses:
                 if booster_capacity > 0.0:
                     if refill_active:
@@ -928,18 +995,43 @@ def simulate_hourly_tank(
                         pump_flow = min(available_primary_water, requested_input)
                         if filtration_pump_capacity > 0.0:
                             pump_flow = min(pump_flow, filtration_pump_capacity)
+                        unrestricted_pump_flow = min(water, requested_input)
+                        if filtration_pump_capacity > 0.0:
+                            unrestricted_pump_flow = min(
+                                unrestricted_pump_flow, filtration_pump_capacity
+                            )
                         filter_throughput = pump_flow * filter_recovery
                         filter_loss = pump_flow - filter_throughput
                         water = max(water - pump_flow, 0.0)
                         if component_params.municipal_backup_enabled and system.municipal_reaches_booster:
                             mains_makeup = max(requested_delivery - filter_throughput, 0.0)
+                        else:
+                            reserve_counterfactual_booster_addition = min(
+                                max(
+                                    (unrestricted_pump_flow - pump_flow)
+                                    * filter_recovery,
+                                    0.0,
+                                ),
+                                max(booster_space - filter_throughput, 0.0),
+                            )
                         booster_rainwater += filter_throughput
                         booster_municipal_water += mains_makeup
                         booster_water = min(booster_rainwater + booster_municipal_water, booster_capacity)
                         if booster_water >= booster_capacity - 1e-9:
                             refill_active = False
                     total_before_demand = booster_water
-                    total_supplied = min(total_before_demand, demand_hour)
+                    available_booster_water = max(
+                        total_before_demand - booster_minimum_volume, 0.0
+                    )
+                    total_supplied = min(available_booster_water, demand_hour)
+                    counterfactual_total_supplied = min(
+                        total_before_demand
+                        + reserve_counterfactual_booster_addition,
+                        demand_hour,
+                    )
+                    reserve_unmet = max(
+                        counterfactual_total_supplied - total_supplied, 0.0
+                    )
                     rainwater_fraction = (
                         booster_rainwater / total_before_demand if total_before_demand > 0.0 else 0.0
                     )
@@ -948,7 +1040,11 @@ def simulate_hourly_tank(
                     booster_rainwater = max(booster_rainwater - rainwater_supplied, 0.0)
                     booster_municipal_water = max(booster_municipal_water - mains_supplied, 0.0)
                     booster_water = booster_rainwater + booster_municipal_water
-                    if booster_water < booster_refill_target:
+                    if _buffer_needs_refill(
+                        booster_water,
+                        booster_refill_target,
+                        booster_minimum_volume,
+                    ):
                         refill_active = True
                 else:
                     requested_input = demand_hour / filter_recovery if filter_recovery > 0.0 else 0.0
@@ -956,19 +1052,40 @@ def simulate_hourly_tank(
                     pump_flow = min(available_primary_water, requested_input)
                     if filtration_pump_capacity > 0.0:
                         pump_flow = min(pump_flow, filtration_pump_capacity)
+                    unrestricted_pump_flow = min(water, requested_input)
+                    if filtration_pump_capacity > 0.0:
+                        unrestricted_pump_flow = min(
+                            unrestricted_pump_flow, filtration_pump_capacity
+                        )
                     filter_throughput = pump_flow * filter_recovery
                     filter_loss = pump_flow - filter_throughput
                     water = max(water - pump_flow, 0.0)
                     rainwater_supplied = min(filter_throughput, demand_hour)
+                    reserve_unmet = max(
+                        min(
+                            unrestricted_pump_flow * filter_recovery,
+                            demand_hour,
+                        )
+                        - rainwater_supplied,
+                        0.0,
+                    )
             elif system.primary_reaches_end_uses:
                 available_primary_water = max(water - minimum_operating_volume, 0.0)
                 rainwater_supplied = min(available_primary_water, demand_hour)
+                unrestricted_rainwater_supplied = min(water, demand_hour)
                 if system.distribution_pump_path and pump_capacity > 0.0:
                     rainwater_supplied = min(rainwater_supplied, pump_capacity)
+                    unrestricted_rainwater_supplied = min(
+                        unrestricted_rainwater_supplied, pump_capacity
+                    )
+                reserve_unmet = max(
+                    unrestricted_rainwater_supplied - rainwater_supplied, 0.0
+                )
                 pump_flow = rainwater_supplied
                 water = max(water - rainwater_supplied, 0.0)
             met = rainwater_supplied >= demand_hour
             unmet = max(demand_hour - rainwater_supplied, 0.0)
+            reserve_unmet = min(reserve_unmet, unmet)
             if not (indirect and booster_capacity > 0.0):
                 mains_makeup = (
                     unmet
@@ -1011,6 +1128,7 @@ def simulate_hourly_tank(
                     "SewerEligibleRainwaterSuppliedGallons": sewer_eligible_rainwater_supplied,
                     "UnmetDemandGallons": unmet,
                     "SystemUnmetDemandGallons": system_unmet,
+                    "OperatingReserveUnmetDemandGallons": reserve_unmet,
                     "MainsMakeupGallons": mains_makeup,
                     "MainsSuppliedGallons": mains_supplied,
                     "PumpFlowGallons": pump_flow,
@@ -1019,13 +1137,31 @@ def simulate_hourly_tank(
                     "PrimaryTankBeginningGallons": primary_tank_beginning,
                     "BoosterTankBeginningGallons": booster_tank_beginning,
                     "BoosterTankGallons": booster_water,
+                    "BoosterTankCapacityGallons": booster_capacity,
+                    "BoosterMinimumOperatingVolumeGallons": booster_minimum_volume,
+                    "BoosterUsableTankCapacityGallons": (
+                        booster_capacity - booster_minimum_volume
+                    ),
+                    "BoosterUsableWaterAvailableGallons": max(
+                        booster_water - booster_minimum_volume, 0.0
+                    ),
+                    "BoosterOperatingReserveStoredGallons": min(
+                        booster_water, booster_minimum_volume
+                    ),
                     "BoosterRefillActive": refill_active,
                     "OverflowGallons": overflow,
                     "OverflowBeginningCumulativeGallons": overflow_beginning_cumulative,
                     "CumulativeOverflowGallons": cumulative_overflow,
                     "WaterInTankGallons": water,
+                    "TankCapacityGallons": tank_size_gallons,
                     "MinimumOperatingVolumeGallons": minimum_operating_volume,
+                    "UsableTankCapacityGallons": (
+                        tank_size_gallons - minimum_operating_volume
+                    ),
                     "UsableWaterAvailableGallons": max(water - minimum_operating_volume, 0.0),
+                    "OperatingReserveStoredGallons": min(
+                        water, minimum_operating_volume
+                    ),
                 }
             )
     reliability = met_hours / len(rows) * 100.0 if rows else 0.0
@@ -1048,8 +1184,9 @@ def _daily_curve_from_prepared(
         config.system_type, config.system_layout, config.system_connections
     )
     initial_fill = min(max(tank_parameters.initial_fill_percent / 100.0, 0.0), 1.0)
-    minimum_fraction = min(
-        max(tank_parameters.minimum_operating_volume_percent / 100.0, 0.0), 1.0
+    minimum_fraction = _operating_fraction(
+        tank_parameters.minimum_operating_volume_percent,
+        "Primary minimum operating level",
     )
     minimum_volumes = capacities * minimum_fraction
     water = capacities * initial_fill
@@ -1059,6 +1196,7 @@ def _daily_curve_from_prepared(
     unmet_total = np.zeros(candidate_count, dtype=np.float64)
     makeup_total = np.zeros(candidate_count, dtype=np.float64)
     system_unmet_total = np.zeros(candidate_count, dtype=np.float64)
+    reserve_unmet_total = np.zeros(candidate_count, dtype=np.float64)
     overflow_total = np.zeros(candidate_count, dtype=np.float64)
     treatment_loss_total = np.zeros(candidate_count, dtype=np.float64)
     pump_total = np.zeros(candidate_count, dtype=np.float64)
@@ -1087,6 +1225,7 @@ def _daily_curve_from_prepared(
         )
         available = np.maximum(water - minimum_volumes, 0.0)
         supplied = np.zeros(candidate_count, dtype=np.float64)
+        unrestricted_supplied = np.zeros(candidate_count, dtype=np.float64)
         withdrawn = np.zeros(candidate_count, dtype=np.float64)
         if system.primary_reaches_end_uses:
             if system.filtration_path:
@@ -1095,10 +1234,22 @@ def _daily_curve_from_prepared(
                 if transfer_capacity > 0.0:
                     withdrawn = np.minimum(withdrawn, transfer_capacity)
                 supplied = np.minimum(withdrawn * recovery, demand_today)
+                unrestricted_withdrawal = np.minimum(water, requested)
+                if transfer_capacity > 0.0:
+                    unrestricted_withdrawal = np.minimum(
+                        unrestricted_withdrawal, transfer_capacity
+                    )
+                unrestricted_supplied = np.minimum(
+                    unrestricted_withdrawal * recovery, demand_today
+                )
             else:
                 supplied = np.minimum(available, demand_today)
+                unrestricted_supplied = np.minimum(water, demand_today)
                 if system.distribution_pump_path and distribution_capacity > 0.0:
                     supplied = np.minimum(supplied, distribution_capacity)
+                    unrestricted_supplied = np.minimum(
+                        unrestricted_supplied, distribution_capacity
+                    )
                 withdrawn = supplied
         unmet = np.maximum(demand_today - supplied, 0.0)
         makeup = (
@@ -1108,6 +1259,9 @@ def _daily_curve_from_prepared(
             else np.zeros(candidate_count, dtype=np.float64)
         )
         system_unmet = np.maximum(unmet - makeup, 0.0)
+        reserve_unmet = np.minimum(
+            unmet, np.maximum(unrestricted_supplied - supplied, 0.0)
+        )
         treatment_loss = np.maximum(withdrawn - supplied, 0.0)
         pump = (
             withdrawn
@@ -1131,6 +1285,7 @@ def _daily_curve_from_prepared(
         unmet_total += unmet
         makeup_total += makeup
         system_unmet_total += system_unmet
+        reserve_unmet_total += reserve_unmet
         overflow_total += overflow
         treatment_loss_total += treatment_loss
         pump_total += pump
@@ -1161,10 +1316,14 @@ def _daily_curve_from_prepared(
             "UnmetDemandGallons": unmet_total,
             "MunicipalMakeupGallons": makeup_total,
             "SystemUnmetDemandGallons": system_unmet_total,
+            "OperatingReserveUnmetDemandGallons": reserve_unmet_total,
             "OverflowGallons": overflow_total,
             "FirstFlushLossGallons": first_flush_total,
             "TreatmentLossGallons": treatment_loss_total,
             "FinalStorageGallons": water,
+            "FinalUsableWaterAvailableGallons": np.maximum(
+                water - minimum_volumes, 0.0
+            ),
         }
     )
 

@@ -392,6 +392,7 @@ class SystemComponentParameters:
     booster_tank_size_gallons: float = 0.0
     booster_initial_fill_percent: float = 0.0
     booster_refill_level_percent: float = 50.0
+    booster_minimum_operating_volume_percent: float = 0.0
     municipal_backup_enabled: bool = True
 
     def synchronize_filtration_flow(self) -> None:

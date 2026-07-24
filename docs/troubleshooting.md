@@ -28,7 +28,7 @@ Verify units first. Then review rainfall completeness, collection areas, runoff 
 
 ## PDF generation fails
 
-The application can generate a PDF with `pypdf` when `pdflatex` is unavailable. If LaTeX is installed but compilation fails, inspect the saved `.tex` source and LaTeX error details. HTML report generation is an alternative that requires no LaTeX installation.
+The primary PDF renderer requires WeasyPrint and its native text-layout libraries. Install the project dependencies from `pyproject.toml`; on Windows, verify the packaged application contains the required WeasyPrint libraries. If primary PDF generation is unavailable, use **View/Export legacy PDF report**. The legacy option uses `pdflatex` when available and falls back to direct generation with `pypdf`; if LaTeX compilation fails, inspect the saved `.tex` source and error details. HTML report generation remains available without LaTeX.
 
 ## Local user guide is unavailable
 

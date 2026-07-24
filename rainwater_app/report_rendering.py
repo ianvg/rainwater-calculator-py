@@ -135,6 +135,7 @@ def render_latex(
             ("Selected reliability", f'{format_number(float(report.get("selected_reliability") or 0.0))}%'),
             ("Average annual rainwater supply", f'{format_number(float(executive.get("average_annual_supply", 0.0)), max_decimal_places=0)} {volume}/year'),
             ("Average annual municipal makeup", f'{format_number(float(executive.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {volume}/year'),
+            ("Reserve-caused shortfall", f'{format_number(float(executive.get("average_annual_operating_reserve_unmet", 0.0)), max_decimal_places=0)} {volume}/year'),
             ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {volume}/year'),
             ("Net annual savings", f'{report.get("financial_summary", {}).get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
             ("Simple payback", f'{format_number(float(executive["simple_payback_years"]), max_decimal_places=1)} years' if executive.get("simple_payback_years") is not None else "Not achieved"),
@@ -150,6 +151,25 @@ def render_latex(
         )
         for row in report.get("candidate_performance", [])
     ) or _latex_row("No candidate results", "--", "--", "--", "--")
+    tank_rows_latex = [
+        _latex_row("Primary total capacity", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {volume}'),
+        _latex_row("Primary minimum operating volume", f'{format_number(float(report.get("minimum_operating_volume", 0.0)), max_decimal_places=0)} {volume}'),
+        _latex_row("Primary usable capacity", f'{format_number(float(report.get("usable_tank_capacity", report["selected_tank_size"])), max_decimal_places=0)} {volume}'),
+        _latex_row("Primary final physical storage", f'{format_number(float(report.get("final_physical_storage", 0.0)), max_decimal_places=0)} {volume}'),
+        _latex_row("Primary final usable water", f'{format_number(float(report.get("final_usable_water_available", 0.0)), max_decimal_places=0)} {volume}'),
+    ]
+    buffer_summary = report.get("buffer_tank_summary", {})
+    if float(buffer_summary.get("capacity", 0.0)) > 0.0:
+        tank_rows_latex.extend(
+            [
+                _latex_row("Buffer total capacity", f'{format_number(float(buffer_summary.get("capacity", 0.0)), max_decimal_places=0)} {volume}'),
+                _latex_row("Buffer minimum operating volume", f'{format_number(float(buffer_summary.get("minimum_operating_volume", 0.0)), max_decimal_places=0)} {volume}'),
+                _latex_row("Buffer usable capacity", f'{format_number(float(buffer_summary.get("usable_capacity", 0.0)), max_decimal_places=0)} {volume}'),
+                _latex_row("Buffer final physical storage", f'{format_number(float(buffer_summary.get("final_physical_storage", 0.0)), max_decimal_places=0)} {volume}'),
+                _latex_row("Buffer final usable water", f'{format_number(float(buffer_summary.get("final_usable_water_available", 0.0)), max_decimal_places=0)} {volume}'),
+            ]
+        )
+    tank_rows_latex_text = "\n".join(tank_rows_latex)
     balance = report.get("water_balance", {})
     balance_rows_latex = "\n".join(
         _latex_row(label, f'{format_number(float(balance.get(key, 0.0)), max_decimal_places=1)} {volume}')
@@ -557,7 +577,7 @@ Average annual volume & Value \\
 \toprule
 Tank property & Value \\
 \midrule
-Size & {_latex_number(report['selected_tank_size'])} {_latex_escape(volume)} \\
+{tank_rows_latex_text}
 \bottomrule
 \end{{tabular}}
 
@@ -1059,6 +1079,7 @@ def render_html(
             ("Average annual supply", f'{format_number(float(summary.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("Municipal makeup", f'{format_number(float(summary.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("System unmet demand", f'{format_number(float(summary.get("average_annual_system_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+            ("Reserve-caused shortfall", f'{format_number(float(summary.get("average_annual_operating_reserve_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("Overflow", f'{format_number(float(summary.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("First-flush loss", f'{format_number(float(summary.get("average_annual_first_flush_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
             ("Treatment loss", f'{format_number(float(summary.get("average_annual_treatment_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
@@ -1071,6 +1092,7 @@ def render_html(
         ("RainwaterSuppliedGallons", "Supply/year", "number"),
         ("MunicipalMakeupGallons", "Municipal makeup/year", "number"),
         ("SystemUnmetDemandGallons", "System unmet/year", "number"),
+        ("OperatingReserveUnmetDemandGallons", "Reserve-caused shortfall/year", "number"),
         ("OverflowGallons", "Overflow/year", "number"),
         ("FirstFlushLossGallons", "First flush/year", "number"),
         ("TreatmentLossGallons", "Treatment loss/year", "number"),
@@ -1431,6 +1453,28 @@ def render_html(
             ("Total usable average rain", "total_usable_average_rain"),
         )
     )
+    tank_summary_values = [
+        ("Primary total capacity", report["selected_tank_size"]),
+        ("Primary minimum operating volume", report.get("minimum_operating_volume", 0.0)),
+        ("Primary usable capacity", report.get("usable_tank_capacity", report["selected_tank_size"])),
+        ("Primary final physical storage", report.get("final_physical_storage", 0.0)),
+        ("Primary final usable water", report.get("final_usable_water_available", 0.0)),
+    ]
+    buffer_summary = report.get("buffer_tank_summary", {})
+    if float(buffer_summary.get("capacity", 0.0)) > 0.0:
+        tank_summary_values.extend(
+            [
+                ("Buffer total capacity", buffer_summary.get("capacity", 0.0)),
+                ("Buffer minimum operating volume", buffer_summary.get("minimum_operating_volume", 0.0)),
+                ("Buffer usable capacity", buffer_summary.get("usable_capacity", 0.0)),
+                ("Buffer final physical storage", buffer_summary.get("final_physical_storage", 0.0)),
+                ("Buffer final usable water", buffer_summary.get("final_usable_water_available", 0.0)),
+            ]
+        )
+    tank_summary_rows = "".join(
+        f'<tr><td>{escape(label)}</td><td>{format_number(float(value), max_decimal_places=0)} {escape(report["volume_unit"])}</td></tr>'
+        for label, value in tank_summary_values
+    )
     document = f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{escape(metadata['project_name'])} - {escape(report_title)}</title>
@@ -1464,7 +1508,25 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} .toc-collapsed .toc-toggle {{ height:auto; writing-mode:horizontal-tb; transform:none; text-align:left; }} main {{ box-shadow:none; }} }}
 @media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
-@media print {{ body {{ background:#fff; }} .report-shell {{ display:block; width:100%; margin:0; }} .toc {{ display:none; }} main {{ width:100%; margin:0; box-shadow:none; }} section {{ break-inside:avoid; }} }}
+@page {{ size:A4; margin:14mm 12mm 18mm; @bottom-center {{ content:"Page " counter(page) " of " counter(pages); color:#64747c; font:9pt Arial,Helvetica,sans-serif; }} }}
+@media print {{
+  body {{ background:#fff; font-size:9.5pt; }}
+  .report-shell {{ display:block; width:100%; margin:0; }}
+  .toc {{ display:none; }}
+  main {{ width:100%; margin:0; box-shadow:none; }}
+  header {{ padding:22px 26px 20px; }}
+  main section {{ padding:18px 26px; }}
+  section {{ break-inside:auto; }}
+  h1,h2,h3 {{ break-after:avoid; }}
+  table,figure,.chart,.metric-grid,.balance-grid,.location-map {{ break-inside:avoid; }}
+  th,td {{ padding:6px 7px; overflow-wrap:anywhere; }}
+  .table-scroll {{ overflow:visible; }}
+  .table-scroll table {{ min-width:0; font-size:8pt; }}
+  .chart {{ overflow:visible; }}
+  svg {{ min-width:0; }}
+  .history-mode-controls,.history-controls,.history-range-controls,.series-toggle input {{ display:none; }}
+  footer {{ padding:14px 26px; }}
+}}
 </style></head><body><div class="report-shell">
 <nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#first-flush-summary">First-flush diversion</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
 <main>
@@ -1475,7 +1537,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="design-recommendations"><h2>Design recommendations and review conditions</h2><p>{escape(recommendation_assumptions)}</p><p>These are decision aids based on the simulated candidates and stated assumptions, not a universal optimum.</p><div class="table-scroll"><table><thead><tr><th>Decision aid</th><th>Tank size</th><th>Reliability</th><th>Basis and tradeoff</th></tr></thead><tbody>{recommendation_rows}</tbody></table></div>{warnings_section}</section>
 <section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {format_number(float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))))} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {format_number(int(report.get('first_flush_event_count', 0)), max_decimal_places=0)}. Diverted volume: {format_number(float(report.get('first_flush_loss', 0.0)), max_decimal_places=1)} {escape(report['volume_unit'])}.</p></section>
 <section id="rainfall-volume-summary"><h2>Rainfall volume summary</h2><p>Average annual volumes are calculated from the simulated calendar-year totals. Total average rain is gross runoff after surface runoff coefficients and before first flush. Total usable average rain is net collected volume after first-flush diversion.</p><table><thead><tr><th>Average annual volume</th><th>Value</th></tr></thead><tbody>{rainfall_volume_rows}</tbody></table></section>
-<section id="tank-summary"><h2>Tank summary</h2><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody><tr><td>Size</td><td>{format_number(float(report['selected_tank_size']), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr><tr><td>Minimum operating level</td><td>{format_number(float(report.get('minimum_operating_level_percent', 0.0)), max_decimal_places=1)}% of capacity</td></tr><tr><td>Minimum operating volume</td><td>{format_number(float(report.get('minimum_operating_volume', 0.0)), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
+<section id="tank-summary"><h2>Tank summary</h2><p>Minimum operating volumes remain physically stored but are unavailable to normal demand and pump transfers. Overflow is based on total physical capacity.</p><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody>{tank_summary_rows}</tbody></table></section>
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
 {system_visualization_html}

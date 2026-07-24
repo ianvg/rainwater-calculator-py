@@ -76,12 +76,24 @@ def test_report_rendering_service_renders_validated_html_and_latex() -> None:
     assert "Test" in latex
 
 
-def test_report_rendering_service_writes_pdf(tmp_path) -> None:
+def test_report_rendering_service_writes_legacy_pdf(tmp_path) -> None:
     target = tmp_path / "report.pdf"
 
     ReportRenderingService().pdf(target, _renderable_report())
 
     assert target.read_bytes().startswith(b"%PDF")
+
+
+def test_report_rendering_service_writes_html_pdf_with_weasyprint(tmp_path) -> None:
+    target = tmp_path / "html-report.pdf"
+
+    ReportRenderingService().html_pdf(target, _renderable_report())
+
+    reader = PdfReader(target)
+    pdf_text = "\n".join(page.extract_text() or "" for page in reader.pages)
+    assert target.read_bytes().startswith(b"%PDF")
+    assert "Test" in pdf_text
+    assert "Page 1 of" in pdf_text
 
 
 def test_average_annual_rainfall_volumes_reconcile_gross_first_flush_and_usable() -> None:
