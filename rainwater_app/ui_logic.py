@@ -316,7 +316,6 @@ def system_object_editor_validation(
 
     for field in (
         "initial_fill",
-        "reserve",
         "filter_recovery",
         "booster_initial_fill",
         "booster_refill_level",

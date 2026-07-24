@@ -36,6 +36,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.system_parameters.filtration_pump_capacity_gallons_per_hour == 1200.0
     assert config.system_parameters.filter_recovery_percent == 100.0
     assert config.system_parameters.booster_refill_level_percent == 50.0
+    assert config.system_parameters.booster_minimum_operating_volume_percent == 0.0
     assert config.system_parameters.municipal_backup_enabled is True
     assert config.financial_parameters.currency == "USD"
     assert config.financial_parameters.tariff_billing_unit == "per 1,000 gal"
@@ -124,6 +125,21 @@ def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     assert loaded.report_sections == config.report_sections
     assert loaded.report_include_system_visualization is True
     assert loaded.report_include_multitank_charts is True
+
+
+def test_operating_levels_round_trip_with_project(tmp_path) -> None:
+    database = tmp_path / "operating-levels.db"
+    store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")
+    config = default_project_config()
+    config.name = "Operating levels"
+    config.tank_parameters.minimum_operating_volume_percent = 12.5
+    config.system_parameters.booster_minimum_operating_volume_percent = 20.0
+
+    store.save_project(config)
+    loaded, _rainfall = store.load_project(config.name)
+
+    assert loaded.tank_parameters.minimum_operating_volume_percent == 12.5
+    assert loaded.system_parameters.booster_minimum_operating_volume_percent == 20.0
 
 
 def test_storage_and_project_schema_versions_are_explicit(tmp_path) -> None:
@@ -256,6 +272,7 @@ def test_system_component_parameters_are_loaded() -> None:
     assert config.system_parameters.booster_tank_size_gallons == 250.0
     assert config.system_parameters.booster_initial_fill_percent == 40.0
     assert config.system_parameters.booster_refill_level_percent == 35.0
+    assert config.system_parameters.booster_minimum_operating_volume_percent == 0.0
     assert config.system_parameters.municipal_backup_enabled is False
 
 

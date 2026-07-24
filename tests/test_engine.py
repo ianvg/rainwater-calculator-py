@@ -666,7 +666,11 @@ def test_minimum_operating_level_protects_primary_tank_storage() -> None:
     assert result.loc[0, "UnmetDemandGallons"] == 50.0
     assert result.loc[0, "WaterInTankGallons"] == 50.0
     assert result.loc[0, "MinimumOperatingVolumeGallons"] == 50.0
+    assert result.loc[0, "TankCapacityGallons"] == 100.0
+    assert result.loc[0, "UsableTankCapacityGallons"] == 50.0
     assert result.loc[0, "UsableWaterAvailableGallons"] == 0.0
+    assert result.loc[0, "OperatingReserveStoredGallons"] == 50.0
+    assert result.loc[0, "OperatingReserveUnmetDemandGallons"] == 50.0
     assert result.loc[0, "ReliabilityPercent"] == 0.0
 
 
@@ -685,6 +689,41 @@ def test_hourly_simulation_respects_primary_tank_minimum_operating_level() -> No
     assert result["WaterInTankGallons"].min() == 50.0
     assert result["MinimumOperatingVolumeGallons"].eq(50.0).all()
     assert result["UnmetDemandGallons"].sum() == pytest.approx(2350.0)
+    assert result["OperatingReserveUnmetDemandGallons"].sum() == pytest.approx(50.0)
+
+
+@pytest.mark.parametrize("reserve", [-0.1, 100.0, 120.0, float("nan")])
+def test_simulation_rejects_invalid_primary_minimum_operating_level(
+    reserve: float,
+) -> None:
+    cfg = default_project_config()
+    cfg.tank_parameters.minimum_operating_volume_percent = reserve
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [0.0]}
+    )
+
+    with pytest.raises(ValueError, match="at least 0% and less than 100%"):
+        simulate_tank(cfg, rainfall, 100.0)
+
+
+def test_primary_overflow_uses_total_physical_capacity() -> None:
+    cfg = default_project_config()
+    cfg.surfaces[0].area = 1_200.0
+    cfg.surfaces[0].runoff_coefficient = 1.0
+    cfg.demand.simple_daily_demand_gallons = 0.0
+    cfg.tank_parameters.initial_fill_percent = 100.0
+    cfg.tank_parameters.minimum_operating_volume_percent = 90.0
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [1.0]}
+    )
+
+    result = simulate_tank(cfg, rainfall, 100.0)
+
+    assert result.loc[0, "OverflowGallons"] == pytest.approx(
+        result.loc[0, "CollectedGallons"]
+    )
+    assert result.loc[0, "WaterInTankGallons"] == 100.0
+    assert result.loc[0, "UsableWaterAvailableGallons"] == pytest.approx(10.0)
 
 
 def test_simple_daily_demand_is_added_to_daily_demand() -> None:
@@ -1116,6 +1155,50 @@ def test_booster_storage_and_disabled_mains_are_applied() -> None:
     assert result["UnmetDemandGallons"].sum() == pytest.approx(14.0)
     assert result["MainsMakeupGallons"].sum() == pytest.approx(0.0)
     assert result["SystemUnmetDemandGallons"].sum() == pytest.approx(14.0)
+
+
+def test_buffer_minimum_operating_level_protects_storage_and_attributes_shortfall() -> None:
+    cfg = default_project_config()
+    cfg.system_type = "Indirect system"
+    cfg.demand.hourly_schedule_enabled = True
+    cfg.demand.simple_daily_demand_gallons = 80.0
+    cfg.demand.hourly_weekly_fractions = {
+        day: [1.0] + [0.0] * 23 for day in cfg.demand.hourly_weekly_fractions
+    }
+    cfg.tank_parameters.initial_fill_percent = 0.0
+    cfg.system_parameters.booster_tank_size_gallons = 100.0
+    cfg.system_parameters.booster_initial_fill_percent = 100.0
+    cfg.system_parameters.booster_refill_level_percent = 50.0
+    cfg.system_parameters.booster_minimum_operating_volume_percent = 40.0
+    cfg.system_parameters.municipal_backup_enabled = False
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [0.0]}
+    )
+
+    result = simulate_hourly_tank(cfg, rainfall, 1_000.0)
+
+    assert result["RainwaterSuppliedGallons"].sum() == pytest.approx(60.0)
+    assert result["UnmetDemandGallons"].sum() == pytest.approx(20.0)
+    assert result["OperatingReserveUnmetDemandGallons"].sum() == pytest.approx(20.0)
+    assert result["BoosterTankGallons"].min() == pytest.approx(40.0)
+    assert result["BoosterMinimumOperatingVolumeGallons"].eq(40.0).all()
+    assert result["BoosterUsableTankCapacityGallons"].eq(60.0).all()
+    assert result["BoosterUsableWaterAvailableGallons"].min() == pytest.approx(0.0)
+    assert result["BoosterOperatingReserveStoredGallons"].iloc[-1] == pytest.approx(40.0)
+
+
+@pytest.mark.parametrize("reserve", [-1.0, 100.0, 101.0])
+def test_hourly_simulation_rejects_invalid_buffer_minimum_operating_level(
+    reserve: float,
+) -> None:
+    cfg = default_project_config()
+    cfg.system_parameters.booster_minimum_operating_volume_percent = reserve
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [0.0]}
+    )
+
+    with pytest.raises(ValueError, match="at least 0% and less than 100%"):
+        simulate_hourly_tank(cfg, rainfall, 1_000.0)
 
 
 def test_indirect_booster_refill_cycles_from_setpoint_until_full() -> None:

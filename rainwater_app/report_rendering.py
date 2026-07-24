@@ -1518,7 +1518,9 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
   main section {{ padding:18px 26px; }}
   section {{ break-inside:auto; }}
   h1,h2,h3 {{ break-after:avoid; }}
-  table,figure,.chart,.metric-grid,.balance-grid,.location-map {{ break-inside:avoid; }}
+  figure,.chart,.metric-grid,.balance-grid,.location-map {{ break-inside:avoid; }}
+  thead {{ display:table-header-group; }}
+  tr {{ break-inside:avoid; }}
   th,td {{ padding:6px 7px; overflow-wrap:anywhere; }}
   .table-scroll {{ overflow:visible; }}
   .table-scroll table {{ min-width:0; font-size:8pt; }}

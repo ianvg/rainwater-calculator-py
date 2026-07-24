@@ -365,6 +365,8 @@ PROJECT_FORM_VARIABLES = (
 ACIS_SOURCE_URL = "https://www.rcc-acis.org/"
 ECCC_SOURCE_URL = "https://climate.weather.gc.ca/"
 OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+STATION_MAP_FULLSCREEN_ICON_ASSET = "assets/bootstrap-icons/fullscreen.svg"
+STATION_MAP_FULLSCREEN_EXIT_ICON_ASSET = "assets/bootstrap-icons/fullscreen-exit.svg"
 OPTIMIZATION_SECTION_HELP = {
     "Problem assumptions": (
         "Design variables remain open to the optimizer. Fixed project inputs are read directly from their "
@@ -567,6 +569,32 @@ def _resource_path(relative_path: str) -> Path:
     return bundled_root / relative_path
 
 
+def _load_svg_icon(
+    master: tk.Misc,
+    relative_path: str,
+    *,
+    size: int,
+    color: str,
+) -> ImageTk.PhotoImage | None:
+    """Render a bundled SVG as a Tk image, returning None for a missing or invalid asset."""
+    asset_path = _resource_path(relative_path)
+    if not asset_path.is_file():
+        return None
+    try:
+        svg = asset_path.read_text(encoding="utf-8").replace("currentColor", color)
+        png = resvg_py.svg_to_bytes(
+            svg_string=svg,
+            width=size,
+            height=size,
+            skip_system_fonts=True,
+        )
+        with Image.open(io.BytesIO(png)) as source:
+            image = source.convert("RGBA")
+        return ImageTk.PhotoImage(image, master=master)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _help_index_path() -> Path | None:
     bundled_root = Path(getattr(sys, "_MEIPASS", _app_dir()))
     candidates = [bundled_root / "help" / "index.html", _app_dir() / "site" / "index.html"]
@@ -747,7 +775,150 @@ class _StationMapView(TkinterMapView):
         self._pending_tile_requests: set[tuple[int, int, int, int, int]] = set()
         self._pil_tile_cache: dict[tuple[int, int, int], Image.Image] = {}
         self._tile_loader = shared_tile_loader()
+        self._fullscreen_control_image: ImageTk.PhotoImage | None = None
+        self._fullscreen_control_rect: int | None = None
+        self._fullscreen_control_icon: int | None = None
+        self._fullscreen_tooltip_after_id: str | None = None
+        self._fullscreen_tooltip_window: tk.Toplevel | None = None
         super().__init__(*args, **kwargs)
+
+    def add_fullscreen_control(
+        self,
+        command: Callable[[], None],
+        *,
+        icon_asset: str = STATION_MAP_FULLSCREEN_ICON_ASSET,
+        tooltip_text: str = "Full screen",
+    ) -> None:
+        """Add a fullscreen-mode control directly below tkintermapview's zoom controls."""
+        zoom_out = self.button_zoom_out
+        gap = zoom_out.canvas_position[1] - (
+            self.button_zoom_in.canvas_position[1] + self.button_zoom_in.height
+        )
+        x = zoom_out.canvas_position[0]
+        y = zoom_out.canvas_position[1] + zoom_out.height + gap
+
+        # Read the live zoom-control colors so the custom control stays visually identical.
+        normal_fill = self.canvas.itemcget(zoom_out.canvas_rect, "fill")
+        foreground = self.canvas.itemcget(zoom_out.canvas_text, "fill")
+        hover_fill = "gray50"  # CanvasButton's hover color in tkintermapview 1.29.
+        self._fullscreen_control_image = _load_svg_icon(
+            self.canvas,
+            icon_asset,
+            size=18,
+            color=foreground,
+        )
+        control_tag = "station-map-fullscreen-control"
+        self._fullscreen_control_rect = self.canvas.create_polygon(
+            x,
+            y,
+            x + zoom_out.width,
+            y,
+            x + zoom_out.width,
+            y + zoom_out.height,
+            x,
+            y + zoom_out.height,
+            width=zoom_out.border_width,
+            fill=normal_fill,
+            outline=normal_fill,
+            tags=("button", control_tag),
+        )
+        center = (math.floor(x + zoom_out.width / 2), math.floor(y + zoom_out.height / 2))
+        if self._fullscreen_control_image is not None:
+            self._fullscreen_control_icon = self.canvas.create_image(
+                *center,
+                image=self._fullscreen_control_image,
+                tags=("button", control_tag),
+            )
+        else:
+            # Keep the control usable if an incomplete package omits the SVG asset.
+            self._fullscreen_control_icon = self.canvas.create_text(
+                *center,
+                text="⛶",
+                fill=foreground,
+                font="Tahoma 16",
+                tags=("button", control_tag),
+            )
+
+        def hover_on(event: tk.Event) -> None:
+            self.canvas.itemconfigure(
+                self._fullscreen_control_rect, fill=hover_fill, outline=hover_fill
+            )
+            self.canvas.configure(cursor="pointinghand" if sys.platform == "darwin" else "hand2")
+            self._schedule_fullscreen_tooltip(
+                x, y, zoom_out.width, zoom_out.height, tooltip_text
+            )
+
+        def hover_off(event: tk.Event) -> None:
+            self.canvas.itemconfigure(
+                self._fullscreen_control_rect, fill=normal_fill, outline=normal_fill
+            )
+            self.canvas.configure(cursor="arrow")
+            self._hide_fullscreen_tooltip()
+
+        def click(event: tk.Event) -> None:
+            self._hide_fullscreen_tooltip()
+            command()
+
+        self.canvas.tag_bind(control_tag, "<Button-1>", click)
+        self.canvas.tag_bind(control_tag, "<Enter>", hover_on)
+        self.canvas.tag_bind(control_tag, "<Leave>", hover_off)
+        self.canvas.bind(
+            "<Destroy>", lambda _event: self._hide_fullscreen_tooltip(), add="+"
+        )
+
+    def _schedule_fullscreen_tooltip(
+        self, x: int, y: int, width: int, height: int, text: str
+    ) -> None:
+        self._hide_fullscreen_tooltip()
+        # A short delay prevents the label from flashing while crossing the map controls.
+        self._fullscreen_tooltip_after_id = self.canvas.after(
+            450, lambda: self._show_fullscreen_tooltip(x, y, width, height, text)
+        )
+
+    def _show_fullscreen_tooltip(
+        self, x: int, y: int, width: int, height: int, text: str
+    ) -> None:
+        self._fullscreen_tooltip_after_id = None
+        if not self.winfo_exists():
+            return
+        tooltip = tk.Toplevel(self)
+        tooltip.overrideredirect(True)
+        tooltip.attributes("-topmost", True)
+        tk.Label(
+            tooltip,
+            text=text,
+            background="#fffbea",
+            foreground="#17242b",
+            relief="solid",
+            borderwidth=1,
+            padx=6,
+            pady=3,
+            font=("Segoe UI", 9),
+        ).pack()
+        tooltip.update_idletasks()
+        tooltip_x = self.canvas.winfo_rootx() + x + (
+            width - tooltip.winfo_reqwidth()
+        ) // 2
+        tooltip_y = self.canvas.winfo_rooty() + y + height + 5
+        tooltip_x = max(
+            0, min(tooltip_x, self.canvas.winfo_screenwidth() - tooltip.winfo_reqwidth())
+        )
+        tooltip.geometry(f"+{tooltip_x}+{tooltip_y}")
+        self._fullscreen_tooltip_window = tooltip
+
+    def _hide_fullscreen_tooltip(self) -> None:
+        if self._fullscreen_tooltip_after_id is not None:
+            try:
+                self.canvas.after_cancel(self._fullscreen_tooltip_after_id)
+            except tk.TclError:
+                pass
+            self._fullscreen_tooltip_after_id = None
+        if self._fullscreen_tooltip_window is not None:
+            try:
+                self._fullscreen_tooltip_window.destroy()
+            except tk.TclError:
+                pass
+            self._fullscreen_tooltip_window = None
 
     @staticmethod
     def _tile_cache_key(zoom: int, x: int, y: int) -> str:
@@ -7694,16 +7865,12 @@ class RainwaterTkApp(tk.Tk):
             text="Select a station marker or expand the map for a larger view.",
             foreground="#5f6b70",
         ).grid(row=0, column=0, sticky="w")
-        ttk.Button(
-            map_toolbar,
-            text="Full screen",
-            command=self._open_station_map_fullscreen,
-        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
         self.station_map = _StationMapView(station_map_frame, width=800, height=560, corner_radius=0)
         self.station_map_embedded = self.station_map
         self.station_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
         self.station_map.set_position(39.5, -98.35)
         self.station_map.set_zoom(3)
+        self.station_map.add_fullscreen_control(self._open_station_map_fullscreen)
         self.station_map.grid(row=1, column=0, sticky="nsew")
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
             self.station_map.canvas.bind(sequence, self._station_map_view_changed, add="+")
@@ -10459,17 +10626,17 @@ class RainwaterTkApp(tk.Tk):
             toolbar,
             text="Press Esc to return",
             foreground="#5f6b70",
-        ).grid(row=0, column=1, sticky="e", padx=(12, 8))
-        ttk.Button(
-            toolbar,
-            text="Exit full screen",
-            command=self._close_station_map_fullscreen,
-        ).grid(row=0, column=2, sticky="e")
+        ).grid(row=0, column=1, sticky="e", padx=(12, 0))
 
         fullscreen_map = _StationMapView(window, width=1200, height=760, corner_radius=0)
         fullscreen_map.set_tile_server(OSM_TILE_URL, max_zoom=19)
         fullscreen_map.set_position(*center)
         fullscreen_map.set_zoom(zoom)
+        fullscreen_map.add_fullscreen_control(
+            self._close_station_map_fullscreen,
+            icon_asset=STATION_MAP_FULLSCREEN_EXIT_ICON_ASSET,
+            tooltip_text="Exit full screen",
+        )
         fullscreen_map.grid(row=1, column=0, sticky="nsew")
         for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>", "<ButtonRelease-1>"):
             fullscreen_map.canvas.bind(sequence, self._station_map_view_changed, add="+")

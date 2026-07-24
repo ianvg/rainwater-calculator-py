@@ -19,6 +19,8 @@ if (-not (Test-Path $python)) {
 Invoke-Checked $python @("-m", "pip", "install", "--require-hashes", "-r", (Join-Path $PSScriptRoot "requirements\desktop-build.txt"))
 Invoke-Checked $python @("-m", "pip", "install", "--no-build-isolation", "--no-deps", "-e", $PSScriptRoot)
 
+& (Join-Path $PSScriptRoot "prepare_weasyprint.ps1")
+
 Invoke-Checked $python @("-m", "mkdocs", "build", "--clean", "--strict")
 Invoke-Checked $python @("-m", "pip_audit", "--strict", "--progress-spinner", "off")
 Invoke-Checked $python @("-m", "PyInstaller", "--clean", "--noconfirm", "RainwaterCalculator.spec")

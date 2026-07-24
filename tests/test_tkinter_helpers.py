@@ -113,6 +113,16 @@ def test_system_builder_uses_real_svg_asset_for_every_component() -> None:
         assert tkinter_app._resource_path(relative_path).is_file()
 
 
+def test_station_map_fullscreen_icons_are_bundled_svgs() -> None:
+    for relative_path in (
+        tkinter_app.STATION_MAP_FULLSCREEN_ICON_ASSET,
+        tkinter_app.STATION_MAP_FULLSCREEN_EXIT_ICON_ASSET,
+    ):
+        icon_path = tkinter_app._resource_path(relative_path)
+        assert icon_path.is_file()
+        assert icon_path.read_text(encoding="utf-8").lstrip().startswith("<svg")
+
+
 def test_demand_quantity_summary_uses_selected_number_format() -> None:
     app = object.__new__(RainwaterTkApp)
     app.config_model = default_project_config()
@@ -550,6 +560,36 @@ def _valid_primary_editor_values() -> dict[str, object]:
 
 def test_system_object_editor_accepts_valid_primary_parameters() -> None:
     assert _system_object_editor_validation("primary_tank", _valid_primary_editor_values()) == []
+
+
+def test_system_object_editor_enforces_strict_primary_operating_level() -> None:
+    values = _valid_primary_editor_values()
+    values["reserve"] = "100"
+
+    assert _system_object_editor_validation("primary_tank", values) == [
+        "Minimum operating level must be at least 0% and less than 100%."
+    ]
+
+
+def test_system_object_editor_validates_buffer_operating_level_and_refill() -> None:
+    values = {
+        "name": "Buffer tank",
+        "booster_tank_size": "100",
+        "booster_initial_fill": "100",
+        "booster_refill_level": "50",
+        "booster_reserve": "40",
+    }
+
+    assert _system_object_editor_validation("booster_tank", values) == []
+    values["booster_refill_level"] = "30"
+    assert _system_object_editor_validation("booster_tank", values) == [
+        "Buffer refill level must be greater than or equal to its minimum operating level."
+    ]
+    values["booster_refill_level"] = "100"
+    values["booster_reserve"] = "100"
+    assert _system_object_editor_validation("booster_tank", values) == [
+        "Minimum operating level must be at least 0% and less than 100%."
+    ]
 
 
 @pytest.mark.parametrize(

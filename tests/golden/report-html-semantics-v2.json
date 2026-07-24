@@ -38,7 +38,7 @@
     "surface-area-summary: Surface | Area (sq ft) | Runoff coefficient | First flush (in)",
     "rainfall-volume-summary: Average annual volume | Value",
     "tank-summary: Tank property | Value",
-    "candidate-performance: Tank size | Reliability | Supply/year | Municipal makeup/year | System unmet/year | Overflow/year | First flush/year | Treatment loss/year | Final storage | Net savings/year | Payback | Lifecycle NPV",
+    "candidate-performance: Tank size | Reliability | Supply/year | Municipal makeup/year | System unmet/year | Reserve-caused shortfall/year | Overflow/year | First flush/year | Treatment loss/year | Final storage | Net savings/year | Payback | Lifecycle NPV",
     "water-balance: Component | Volume",
     "water-balance: Component | Volume",
     "demand-summary: Month | Demand (gal/day) | Demand (gal/month) | Month | Demand (gal/day) | Demand (gal/month)",

@@ -96,6 +96,8 @@ M = C x f_min
 
 The minimum operating volume remains part of the displayed physical tank level but cannot be withdrawn for normal demand. It is not an additional demand target.
 
+The hourly indirect model applies the same rule independently to its buffer tank. A buffer refill setpoint cannot be below the buffer minimum operating level. Normal simulations never draw either reserve; overflow still uses the tank's total physical capacity. Emergency withdrawal and maintenance drain-down are not modeled as normal demand operations.
+
 ## 5. Apply the daily mass balance
 
 The daily calculation order is important. Demand is withdrawn from opening storage before that day's collected rainfall is added. This conservative convention prevents same-day rainfall from satisfying demand on that date.
@@ -141,6 +143,8 @@ S[t-1] + I[t] = S[t] + Q[t] + O[t]
 ```
 
 On the first day, replace `S[t-1]` with `initial storage`. Unmet demand is not part of the water balance because it is water requested but never present in the tank.
+
+Reserve-caused unmet demand is evaluated with a stateful counterfactual run of the same rainfall, demand, equipment, and initial-fill inputs with minimum operating levels set to zero. This prevents the same protected water from being counted repeatedly across later timesteps.
 
 ## Worked example
 

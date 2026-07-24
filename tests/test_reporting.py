@@ -50,6 +50,20 @@ def _renderable_report() -> dict[str, object]:
         total_annual_demand=0.0,
         yearly_reliability=[],
         tank_level_distribution=[],
+        minimum_operating_level_percent=10.0,
+        minimum_operating_volume=100.0,
+        usable_tank_capacity=900.0,
+        final_physical_storage=500.0,
+        final_usable_water_available=400.0,
+        buffer_tank_summary={
+            "capacity": 100.0,
+            "minimum_operating_level_percent": 20.0,
+            "minimum_operating_volume": 20.0,
+            "usable_capacity": 80.0,
+            "final_physical_storage": 50.0,
+            "final_usable_water_available": 30.0,
+        },
+        executive_summary={"average_annual_operating_reserve_unmet": 25.0},
     )
     return report
 
@@ -72,8 +86,14 @@ def test_report_rendering_service_renders_validated_html_and_latex() -> None:
 
     assert "<!doctype html>" in html
     assert "Test" in html
+    assert "Reserve-caused shortfall" in html
+    assert "Primary usable capacity" in html
+    assert "Buffer usable capacity" in html
     assert "\\documentclass" in latex
     assert "Test" in latex
+    assert "Reserve-caused shortfall" in latex
+    assert "Primary usable capacity" in latex
+    assert "Buffer usable capacity" in latex
 
 
 def test_report_rendering_service_writes_legacy_pdf(tmp_path) -> None:

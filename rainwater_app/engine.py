@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from calendar import monthrange
-from dataclasses import dataclass
+from copy import deepcopy
+from dataclasses import dataclass, replace
 import math
 from typing import Callable, Iterable
 
@@ -776,7 +777,7 @@ def simulate_tank(
 
     reliability = (reliable_days / len(data)) * 100 if len(data) else 0.0
 
-    return pd.DataFrame(
+    result = pd.DataFrame(
         {
             "Date": data["Date"],
             "Precipitation": data["Precipitation"],
@@ -805,6 +806,23 @@ def simulate_tank(
             "WaterInTankGallons": water_level,
         }
     ).assign(ReliabilityPercent=reliability)
+    if minimum_operating_fraction > 0.0:
+        unrestricted = simulate_tank(
+            config,
+            rainfall_df,
+            tank_size_gallons,
+            tank_parameters=replace(
+                params, minimum_operating_volume_percent=0.0
+            ),
+            cancel_callback=cancel_callback,
+            prepared_inputs=prepared_inputs,
+        )
+        result["OperatingReserveUnmetDemandGallons"] = np.maximum(
+            unrestricted["RainwaterSuppliedGallons"].to_numpy(dtype=float)
+            - result["RainwaterSuppliedGallons"].to_numpy(dtype=float),
+            0.0,
+        )
+    return result
 
 
 def simulate_hourly_tank(
@@ -1165,7 +1183,24 @@ def simulate_hourly_tank(
                 }
             )
     reliability = met_hours / len(rows) * 100.0 if rows else 0.0
-    return pd.DataFrame(rows).assign(ReliabilityPercent=reliability)
+    result = pd.DataFrame(rows).assign(ReliabilityPercent=reliability)
+    if minimum_operating_fraction > 0.0 or booster_minimum_fraction > 0.0:
+        unrestricted_config = deepcopy(config)
+        unrestricted_config.tank_parameters.minimum_operating_volume_percent = 0.0
+        unrestricted_config.system_parameters.booster_minimum_operating_volume_percent = 0.0
+        unrestricted = simulate_hourly_tank(
+            unrestricted_config,
+            rainfall_df,
+            tank_size_gallons,
+            cancel_callback=cancel_callback,
+            result_start_date=result_start_date,
+        )
+        result["OperatingReserveUnmetDemandGallons"] = np.maximum(
+            unrestricted["RainwaterSuppliedGallons"].to_numpy(dtype=float)
+            - result["RainwaterSuppliedGallons"].to_numpy(dtype=float),
+            0.0,
+        )
+    return result
 
 
 def _daily_curve_from_prepared(
@@ -1297,7 +1332,7 @@ def _daily_curve_from_prepared(
         if system.rain_reaches_primary
         else 0.0
     )
-    return pd.DataFrame(
+    result = pd.DataFrame(
         {
             "TankSizeGallons": capacities,
             "ReliabilityPercent": (
@@ -1326,6 +1361,20 @@ def _daily_curve_from_prepared(
             ),
         }
     )
+    if minimum_fraction > 0.0:
+        unrestricted = _daily_curve_from_prepared(
+            config,
+            prepared,
+            tank_sizes,
+            replace(tank_parameters, minimum_operating_volume_percent=0.0),
+            cancel_callback=cancel_callback,
+        )
+        result["OperatingReserveUnmetDemandGallons"] = np.maximum(
+            unrestricted["RainwaterSuppliedGallons"].to_numpy(dtype=float)
+            - result["RainwaterSuppliedGallons"].to_numpy(dtype=float),
+            0.0,
+        )
+    return result
 
 
 def reliability_curve(

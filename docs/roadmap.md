@@ -146,17 +146,17 @@ Implementation requirements include:
 
 ## Unusable tank volume and operating levels
 
-The first minimum-operating-level implementation is complete for primary tanks. The simulation distinguishes physical tank capacity from water available for normal withdrawal, and the setting remains separate from initial fill.
+Minimum operating levels are implemented independently for primary and buffer tanks. The simulation distinguishes physical tank capacity from water available for normal withdrawal, and each setting remains separate from initial fill.
 
 Implementation requirements include:
 
 - [Implemented as percentage of capacity] Add a minimum operating level normalized internally to volume. Absolute-volume entry remains planned.
 - [Implemented] Prevent normal demand and pump withdrawals from reducing tank level below the minimum operating volume while still including that water in the displayed physical tank level.
-- Define whether emergency withdrawal, maintenance drain-down, and overflow calculations use total or usable capacity.
-- Apply the same concept consistently to primary and buffer tanks where configured.
-- Report total capacity, unusable volume, usable capacity, physical water level, usable water available, and unmet demand attributable to the operating limit.
-- Migrate existing projects with zero unusable volume so prior results remain unchanged.
-- Add boundary tests for empty, partially filled, exactly-at-minimum, full, and oversized minimum-volume configurations.
+- [Implemented] Base overflow on total physical capacity. Normal simulations cannot consume the reserve; emergency withdrawal and maintenance drain-down remain explicit future operations and must not be included in normal reliability.
+- [Implemented] Apply the same concept consistently to primary and buffer tanks where configured. Buffer refill level must be at least its minimum operating level.
+- [Implemented] Report total capacity, unusable volume, usable capacity, physical water level, usable water available, and unmet demand attributable to the operating limit using a stateful zero-reserve counterfactual.
+- [Implemented] Migrate existing projects with zero unusable volume so prior results remain unchanged.
+- [Implemented] Add boundary tests for empty, partially filled, exactly-at-minimum, full, and invalid minimum-level configurations.
 
 ## Candidate tank performance comparison
 

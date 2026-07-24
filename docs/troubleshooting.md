@@ -28,7 +28,7 @@ Verify units first. Then review rainfall completeness, collection areas, runoff 
 
 ## PDF generation fails
 
-The primary PDF renderer requires WeasyPrint and its native text-layout libraries. Install the project dependencies from `pyproject.toml`; on Windows, verify the packaged application contains the required WeasyPrint libraries. If primary PDF generation is unavailable, use **View/Export legacy PDF report**. The legacy option uses `pdflatex` when available and falls back to direct generation with `pypdf`; if LaTeX compilation fails, inspect the saved `.tex` source and error details. HTML report generation remains available without LaTeX.
+The primary PDF renderer requires WeasyPrint and its native text-layout libraries. On Windows, run `powershell -ExecutionPolicy Bypass -File .\prepare_weasyprint.ps1` for local development; executable builds run this step automatically and bundle the pinned standalone renderer. On other platforms, install the project dependencies from `pyproject.toml`. You can also set `RWH_WEASYPRINT_EXECUTABLE` to a trusted standalone WeasyPrint executable. If primary PDF generation is unavailable, use **View/Export legacy PDF report**. The legacy option uses `pdflatex` when available and falls back to direct generation with `pypdf`; if LaTeX compilation fails, inspect the saved `.tex` source and error details. HTML report generation remains available without LaTeX.
 
 ## Local user guide is unavailable
 

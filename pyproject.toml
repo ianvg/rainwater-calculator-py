@@ -17,7 +17,7 @@ dependencies = [
   "requests>=2.31",
   "resvg_py==0.3.3",
   "tkintermapview>=1.29,<2",
-  "weasyprint>=69,<70",
+  "weasyprint>=69,<70; platform_system != 'Windows'",
 ]
 
 [project.optional-dependencies]

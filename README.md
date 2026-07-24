@@ -86,6 +86,14 @@ python -m pip install --upgrade pip
 python -m pip install -e ".[dev]"
 ```
 
+On Windows, prepare the pinned standalone WeasyPrint renderer used by PDF reports:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\prepare_weasyprint.ps1
+```
+
+The executable build runs this preparation step automatically and verifies the downloaded archive's SHA-256 checksum.
+
 ### Build the user documentation
 
 The end-user guide is written in Markdown under `docs/` and built with MkDocs Material:
