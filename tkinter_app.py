@@ -84,7 +84,6 @@ from rainwater_app.engine import (
     simulate_hourly_tank,
 )
 from rainwater_app.equipment_catalog import (
-    CANDIDATE_DISPOSITIONS,
     EQUIPMENT_CATEGORIES,
     built_in_equipment_library,
     candidate_from_product,
@@ -206,6 +205,12 @@ from rainwater_app.pdf_rendering import (
     _write_pdf_with_pypdf as write_pdf_with_pypdf,
 )
 from rainwater_app.project_state import WorkingDraftStore, project_state_fingerprint
+from rainwater_app.project_comparison import (
+    ProjectComparisonModel,
+    ProjectComparisonRenderingService,
+    ProjectComparisonSelection,
+    ProjectComparisonService,
+)
 from rainwater_app.storage import SQLiteStore
 from rainwater_app.system_model import (
     compile_builder_system,
@@ -1088,6 +1093,169 @@ class UnsavedChangesDialog(tk.Toplevel):
         self.destroy()
 
 
+class MultiProjectComparisonDialog(tk.Toplevel):
+    def __init__(
+        self,
+        parent: "RainwaterTkApp",
+        selections: list[ProjectComparisonSelection],
+        initial_project_name: str | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Select projects to compare")
+        self.transient(parent)
+        self.resizable(True, True)
+        self.minsize(460, 390)
+        self.result: tuple[list[ProjectComparisonSelection], str] | None = None
+        self.selections = list(selections)
+        self.source_paths = {
+            Path(getattr(selection.store, "db_path", "")).resolve()
+            for selection in self.selections
+            if getattr(selection.store, "db_path", None)
+        }
+        self.title_var = tk.StringVar(value="Multi-project comparison")
+        self.message_var = tk.StringVar(value="Select at least two saved, analyzed projects.")
+
+        body = ttk.Frame(self, padding=18)
+        body.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        body.rowconfigure(2, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        ttk.Label(body, text="Report title").grid(row=0, column=0, sticky="w")
+        title_entry = ttk.Entry(body, textvariable=self.title_var)
+        title_entry.grid(row=1, column=0, sticky="ew", pady=(4, 14))
+
+        list_frame = ttk.Frame(body)
+        list_frame.grid(row=2, column=0, sticky="nsew")
+        list_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        self.project_list = tk.Listbox(
+            list_frame,
+            selectmode=tk.MULTIPLE,
+            exportselection=False,
+            activestyle="dotbox",
+        )
+        scrollbar = ttk.Scrollbar(
+            list_frame, orient="vertical", command=self.project_list.yview
+        )
+        self.project_list.configure(yscrollcommand=scrollbar.set)
+        self.project_list.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        for selection in self.selections:
+            self.project_list.insert(
+                tk.END, f"{selection.project_name} — {selection.source_name}"
+            )
+        initial_index = next(
+            (
+                index
+                for index, selection in enumerate(self.selections)
+                if selection.project_name == initial_project_name
+            ),
+            0,
+        )
+        if self.selections:
+            self.project_list.selection_set(initial_index)
+            if len(self.selections) > 1:
+                self.project_list.selection_set(0 if initial_index != 0 else 1)
+
+        ttk.Label(
+            body,
+            textvariable=self.message_var,
+            foreground="#5f6b70",
+            wraplength=500,
+        ).grid(row=3, column=0, sticky="w", pady=(10, 12))
+        actions = ttk.Frame(body)
+        actions.grid(row=4, column=0, sticky="ew")
+        actions.columnconfigure(1, weight=1)
+        ttk.Button(
+            actions,
+            text="Add project database...",
+            command=self._add_databases,
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(actions, text="Cancel", command=self._cancel).grid(row=0, column=2)
+        compare_button = ttk.Button(actions, text="Continue", command=self._accept)
+        compare_button.grid(row=0, column=3, padx=(8, 0))
+
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.bind("<Escape>", lambda _event: self._cancel())
+        self.bind("<Return>", lambda _event: self._accept())
+        self.update_idletasks()
+        x = parent.winfo_rootx() + max((parent.winfo_width() - self.winfo_width()) // 2, 0)
+        y = parent.winfo_rooty() + max((parent.winfo_height() - self.winfo_height()) // 2, 0)
+        self.geometry(f"+{x}+{y}")
+        self.grab_set()
+        title_entry.focus_set()
+
+    def _accept(self) -> None:
+        selections = [self.selections[index] for index in self.project_list.curselection()]
+        if len(selections) < 2:
+            self.message_var.set("Select at least two projects before continuing.")
+            self.bell()
+            return
+        title = self.title_var.get().strip()
+        if not title:
+            self.message_var.set("Enter a report title before continuing.")
+            self.bell()
+            return
+        self.result = (selections, title)
+        self.destroy()
+
+    def _add_databases(self) -> None:
+        paths = filedialog.askopenfilenames(
+            parent=self,
+            title="Add rainwater project databases",
+            filetypes=[("Rainwater project databases", "*.db"), ("All files", "*.*")],
+        )
+        for path_text in paths:
+            path = Path(path_text).resolve()
+            if path in self.source_paths:
+                continue
+            try:
+                store = SQLiteStore(str(path), read_only=True)
+                project_names = store.list_projects()
+            except Exception as exc:  # noqa: BLE001
+                messagebox.showerror(
+                    APP_TITLE,
+                    f"Could not open {path.name} for read-only comparison:\n{exc}",
+                    parent=self,
+                )
+                continue
+            if not project_names:
+                messagebox.showinfo(
+                    APP_TITLE,
+                    f"{path.name} does not contain any saved projects.",
+                    parent=self,
+                )
+                continue
+            used_sources = {selection.source_name for selection in self.selections}
+            source_name = path.name
+            suffix = 2
+            while source_name in used_sources:
+                source_name = f"{path.name} ({suffix})"
+                suffix += 1
+            start_index = len(self.selections)
+            for project_name in project_names:
+                selection = ProjectComparisonSelection(
+                    source_name=source_name,
+                    project_name=project_name,
+                    store=store,
+                )
+                self.selections.append(selection)
+                self.project_list.insert(
+                    tk.END, f"{selection.project_name} — {selection.source_name}"
+                )
+            self.source_paths.add(path)
+            self.project_list.selection_set(start_index, len(self.selections) - 1)
+        if paths:
+            self.message_var.set(
+                "External databases are opened read-only. Select at least two projects."
+            )
+
+    def _cancel(self) -> None:
+        self.destroy()
+
+
 class RainwaterTkApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -1731,6 +1899,15 @@ class RainwaterTkApp(tk.Tk):
         export_menu.add_command(label="Export results...", command=self.export_results)
         export_menu.add_command(label="Export PDF report...", command=self.export_pdf_report)
         export_menu.add_command(label="Export HTML report...", command=self.export_html_report)
+        export_menu.add_separator()
+        export_menu.add_command(
+            label="Export project comparison as PDF...",
+            command=self.export_project_comparison_pdf,
+        )
+        export_menu.add_command(
+            label="Export project comparison as HTML...",
+            command=self.export_project_comparison_html,
+        )
         menubar.add_cascade(label="Export", menu=export_menu)
 
         view_menu = tk.Menu(menubar, tearoff=False)
@@ -4872,11 +5049,14 @@ class RainwaterTkApp(tk.Tk):
                     label_y = 15.0 + (min(source_top, target_top) - min_y) * scale
                     label_y -= max(9.0 * scale, 7.0)
                 else:
+                    label_x, label_y = self._point_along_system_connection(
+                        screen_points, 0.15
+                    )
                     before_x, before_y = self._point_along_system_connection(
-                        screen_points, 0.46
+                        screen_points, 0.12
                     )
                     after_x, after_y = self._point_along_system_connection(
-                        screen_points, 0.54
+                        screen_points, 0.18
                     )
                     if abs(after_y - before_y) > abs(after_x - before_x):
                         label_x += max(22.0 * scale, 16.0)
@@ -6737,10 +6917,10 @@ class RainwaterTkApp(tk.Tk):
         return {
             "rainwater_input": "assets/bootstrap-icons/cloud-rain.svg",
             "primary_tank": "assets/tabler-icons/cylinder.svg",
-            "filtration_pump": "assets/bootstrap-icons/arrow-right-circle-fill.svg",
+            "filtration_pump": "assets/material-design-icons/pump.svg",
             "filtration_system": "assets/bootstrap-icons/filter-square.svg",
             "booster_tank": "assets/tabler-icons/cylinder.svg",
-            "booster_pump": "assets/bootstrap-icons/speedometer2.svg",
+            "booster_pump": "assets/material-design-icons/pump.svg",
             "municipal_backup": "assets/bootstrap-icons/buildings-fill.svg",
             "end_uses": "assets/bootstrap-icons/house-door-fill.svg",
             "first_flush_diversion": "assets/bootstrap-icons/funnel-fill.svg",
@@ -6806,7 +6986,9 @@ class RainwaterTkApp(tk.Tk):
                     skip_system_fonts=True,
                 )
                 with Image.open(io.BytesIO(icon_png)) as icon_source:
-                    icon = icon_source.convert("RGBA")
+                    icon_alpha = icon_source.convert("RGBA").getchannel("A")
+                    icon = Image.new("RGBA", icon_source.size, outline)
+                    icon.putalpha(icon_alpha)
                 center_y = render_height / 2.0 - 10.0 * zoom * supersample
                 icon_left = round((render_width - icon.width) / 2.0)
                 icon_top = round(center_y - icon.height / 2.0)
@@ -15084,6 +15266,94 @@ class RainwaterTkApp(tk.Tk):
             self.execution_log.error("Export", "Could not export results", exception=exc)
             messagebox.showerror(APP_TITLE, f"Could not export results:\n{exc}")
 
+    def _request_project_comparison(self) -> ProjectComparisonModel | None:
+        project_names = self.store.list_projects()
+        source_name = Path(self.store.db_path).name
+        selections = [
+            ProjectComparisonSelection(
+                source_name=source_name,
+                project_name=project_name,
+                store=self.store,
+            )
+            for project_name in project_names
+        ]
+        dialog = MultiProjectComparisonDialog(
+            self,
+            selections,
+            initial_project_name=self.active_project_name,
+        )
+        self.wait_window(dialog)
+        if dialog.result is None:
+            self.execution_log.info("Report", "Project comparison cancelled")
+            return None
+        selected_projects, title = dialog.result
+        try:
+            return ProjectComparisonService.build_selections(
+                selected_projects, title=title
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Report", "Could not prepare project comparison", exception=exc
+            )
+            messagebox.showerror(APP_TITLE, f"Could not prepare project comparison:\n{exc}")
+            return None
+
+    def export_project_comparison_pdf(self) -> None:
+        comparison = self._request_project_comparison()
+        if comparison is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export project comparison as PDF",
+            initialfile="multi_project_comparison.pdf",
+            defaultextension=".pdf",
+            filetypes=[("PDF files", "*.pdf")],
+        )
+        if not path:
+            return
+        pdf_path = Path(path)
+        try:
+            self.execution_log.info("Report", "Exporting PDF project comparison")
+            ProjectComparisonRenderingService().pdf(pdf_path, comparison)
+            self.status_var.set(f"Exported project comparison: {pdf_path.name}")
+            self.execution_log.info(
+                "Report", f"Exported PDF project comparison {pdf_path.name}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Report", "Could not export PDF project comparison", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"Could not export PDF project comparison:\n{exc}"
+            )
+
+    def export_project_comparison_html(self) -> None:
+        comparison = self._request_project_comparison()
+        if comparison is None:
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export project comparison as HTML",
+            initialfile="multi_project_comparison.html",
+            defaultextension=".html",
+            filetypes=[("HTML files", "*.html;*.htm")],
+        )
+        if not path:
+            return
+        html_path = Path(path)
+        try:
+            self.execution_log.info("Report", "Exporting HTML project comparison")
+            ProjectComparisonRenderingService().write_html(html_path, comparison)
+            self.status_var.set(f"Exported project comparison: {html_path.name}")
+            self.execution_log.info(
+                "Report", f"Exported HTML project comparison {html_path.name}"
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Report", "Could not export HTML project comparison", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"Could not export HTML project comparison:\n{exc}"
+            )
+
     def view_pdf_report(self) -> None:
         report = self._request_report_content("PDF")
         if report is None:
@@ -16110,7 +16380,11 @@ class RainwaterTkApp(tk.Tk):
         location = ""
         if station.get("latitude") is not None and station.get("longitude") is not None:
             location = f" ({station['latitude']:.3f}, {station['longitude']:.3f})"
-        distance = f" - {format_number(float(station['distance_km']), self.config_model, max_decimal_places=1)} km" if station.get("distance_km") is not None else ""
+        distance = (
+            f" - {format_number(float(station['distance_km']), max_decimal_places=1)} km"
+            if station.get("distance_km") is not None
+            else ""
+        )
         airport_id = str(
             station.get("airport_icao")
             or station.get("airport_faa")

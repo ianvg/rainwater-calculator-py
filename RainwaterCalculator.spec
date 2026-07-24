@@ -8,6 +8,7 @@ a = Analysis(
         ("site", "help"),
         ("assets/app_icon.png", "assets"),
         ("assets/bootstrap-icons", "assets/bootstrap-icons"),
+        ("assets/material-design-icons", "assets/material-design-icons"),
         ("assets/tabler-icons", "assets/tabler-icons"),
         ("assets/third_party/weather", "assets/third_party/weather"),
         (

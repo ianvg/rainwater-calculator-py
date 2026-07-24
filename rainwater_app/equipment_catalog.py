@@ -315,7 +315,6 @@ def evaluate_combination_compatibility(
     items = [normalize_product(item) for item in products]
     categories = {item["category"] for item in items}
     rules = normalized_constraints(constraints)
-    strict = bool(rules["require_constraint_values"])
     failures: list[str] = []
     warnings: list[str] = []
     for item in items:

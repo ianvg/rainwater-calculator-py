@@ -58,9 +58,15 @@ class SQLiteStore:
         *,
         backup_dir: str | Path | None = None,
         backup_retention: int = DEFAULT_BACKUP_RETENTION,
+        read_only: bool = False,
     ) -> None:
         self.db_path = Path(db_path)
-        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            if not self.db_path.is_file():
+                raise FileNotFoundError(f"Project database not found: {self.db_path}")
+        else:
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.backup_dir = (
             Path(backup_dir)
             if backup_dir is not None
@@ -69,19 +75,66 @@ class SQLiteStore:
         self.backup_retention = max(int(backup_retention), 1)
         self.recovery_notice: str | None = None
         self.last_backup_error: str | None = None
-        self._recover_if_needed()
-        self._init_db()
+        if self.read_only:
+            self._validate_read_only_db()
+        else:
+            self._recover_if_needed()
+            self._init_db()
 
     @contextmanager
     def _connect(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.db_path, timeout=30.0)
+        if self.read_only:
+            database = f"{self.db_path.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(database, timeout=30.0, uri=True)
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=30.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA synchronous = FULL")
+        if self.read_only:
+            conn.execute("PRAGMA query_only = ON")
+        else:
+            conn.execute("PRAGMA synchronous = FULL")
         try:
             yield conn
         finally:
             conn.close()
+
+    def _validate_read_only_db(self) -> None:
+        if not self._database_is_valid(self.db_path):
+            raise StorageRecoveryError(
+                f"Project database is missing, damaged, or not a SQLite database: {self.db_path}"
+            )
+        with self._connect() as conn:
+            storage_version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+            tables = {
+                str(row["name"])
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type = 'table'"
+                ).fetchall()
+            }
+            if storage_version > STORAGE_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Project database schema {storage_version} is newer than the supported "
+                    f"schema {STORAGE_SCHEMA_VERSION}. Upgrade the application before opening it."
+                )
+            missing_tables = {"projects", "rainfall_data"}.difference(tables)
+            if missing_tables:
+                raise StorageRecoveryError(
+                    "Selected file is not a compatible project database; missing tables: "
+                    + ", ".join(sorted(missing_tables))
+                )
+            project_columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+            }
+            missing_columns = {
+                "name", "config_json", "curve_json", "results_json"
+            }.difference(project_columns)
+            if missing_columns:
+                raise StorageRecoveryError(
+                    "Selected project database is too old for read-only comparison; missing "
+                    "columns: " + ", ".join(sorted(missing_columns))
+                )
 
     def _init_db(self) -> None:
         with self._connect() as conn:

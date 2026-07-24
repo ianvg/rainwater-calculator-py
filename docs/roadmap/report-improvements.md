@@ -26,8 +26,8 @@ This subpage records report work that remains after the executive summary, candi
 
 ## Verification
 
-- Add golden tests for the normalized report model and representative HTML output.
-- Validate generated HTML and run automated accessibility checks.
+- [Implemented] Add golden tests for the normalized report model and representative HTML output. The HTML golden records semantic structure rather than volatile presentation markup.
+- [Implemented initial offline checks] Validate generated HTML structure and accessibility basics, including landmarks, headings, table headers, accessible chart names, image alternatives, button names, unique IDs, and internal links. Browser-based accessibility auditing remains part of future visual-regression coverage.
 - Add browser visual-regression coverage at desktop and mobile widths plus print-preview coverage.
 - [Implemented for core report sections, recommendations, and review conditions] Add cross-format parity checks for every required section and reported value. Expand assertions as new schema fields are introduced.
 - Cover special characters, long notes, missing optional data, empty charts, large candidate sets, zero-value financial inputs, and extreme unit conversions.

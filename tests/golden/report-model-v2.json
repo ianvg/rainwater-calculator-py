@@ -1,0 +1,221 @@
+{
+  "area_unit": "sq ft",
+  "average_annual_precipitation": 40.25,
+  "average_annual_rainfall_volumes": {},
+  "curve": [
+    {
+      "reliability": 72.5,
+      "tank_size": 1000.0
+    },
+    {
+      "reliability": 88.0,
+      "tank_size": 2000.0
+    }
+  ],
+  "first_flush_event_summary": [
+    {
+      "diversion_percent": 5.0,
+      "end": "2024-06-02T00:00:00",
+      "event_id": 2,
+      "first_flush_loss": 10.0,
+      "gross_runoff": 200.0,
+      "net_collected": 190.0,
+      "start": "2024-06-01T00:00:00",
+      "wet_timesteps": 2
+    }
+  ],
+  "first_flush_yearly_summary": [
+    {
+      "diversion_percent": 5.0,
+      "event_count": 2,
+      "first_flush_loss": 50.0,
+      "gross_runoff": 1000.0,
+      "net_collected": 950.0,
+      "year": 2024
+    }
+  ],
+  "metadata": {
+    "author_name": "QA Team",
+    "client_name": "Example Client",
+    "date": "2026-07-24",
+    "end_uses": "Toilets and irrigation",
+    "location": "Lyon & Rh\u00f4ne",
+    "project_name": "Golden Report <A>"
+  },
+  "monthly_demand": [
+    {
+      "demand_per_day": 10.0,
+      "demand_per_month": 300.0,
+      "month": "Jan"
+    },
+    {
+      "demand_per_day": 20.0,
+      "demand_per_month": 600.0,
+      "month": "Feb"
+    },
+    {
+      "demand_per_day": 30.0,
+      "demand_per_month": 900.0,
+      "month": "Mar"
+    },
+    {
+      "demand_per_day": 40.0,
+      "demand_per_month": 1200.0,
+      "month": "Apr"
+    },
+    {
+      "demand_per_day": 50.0,
+      "demand_per_month": 1500.0,
+      "month": "May"
+    },
+    {
+      "demand_per_day": 60.0,
+      "demand_per_month": 1800.0,
+      "month": "Jun"
+    },
+    {
+      "demand_per_day": 70.0,
+      "demand_per_month": 2100.0,
+      "month": "Jul"
+    },
+    {
+      "demand_per_day": 80.0,
+      "demand_per_month": 2400.0,
+      "month": "Aug"
+    },
+    {
+      "demand_per_day": 90.0,
+      "demand_per_month": 2700.0,
+      "month": "Sep"
+    },
+    {
+      "demand_per_day": 100.0,
+      "demand_per_month": 3000.0,
+      "month": "Oct"
+    },
+    {
+      "demand_per_day": 110.0,
+      "demand_per_month": 3300.0,
+      "month": "Nov"
+    },
+    {
+      "demand_per_day": 120.0,
+      "demand_per_month": 3600.0,
+      "month": "Dec"
+    }
+  ],
+  "notes": "Representative deterministic report fixture.",
+  "precipitation_basis": "Total precipitation",
+  "precipitation_unit": "in",
+  "provenance": {
+    "generated_at": "2026-07-24T12:00:00+02:00",
+    "rainfall_source": "Golden station",
+    "record_end": "2024-12-31",
+    "record_start": "2024-01-01"
+  },
+  "rainfall_event_summary": {
+    "antecedent_dry_days": 1.0,
+    "average_event_precipitation": 0.75,
+    "event_count": 2,
+    "largest_event_precipitation": 1.0,
+    "largest_events": [
+      {
+        "duration_days": 2,
+        "end": "2024-06-02",
+        "event_number": 2,
+        "precipitation": 1.0,
+        "start": "2024-06-01",
+        "wet_days": 2
+      }
+    ]
+  },
+  "rainfall_quality": {
+    "completeness_percent": 99.7,
+    "completeness_rating": "High",
+    "duplicate_dates": 0,
+    "expected_days": 366,
+    "invalid_precipitation_rows": 0,
+    "missing_days": 1,
+    "missing_periods": [
+      {
+        "days": 1,
+        "end": "2024-02-29",
+        "start": "2024-02-29"
+      }
+    ],
+    "observed_days": 365,
+    "partial_years": [
+      2024
+    ]
+  },
+  "recommendations": [],
+  "report_sections": {
+    "analysis_provenance": true,
+    "candidate_performance": true,
+    "demand_summary": true,
+    "design_recommendations": true,
+    "end_use_performance": true,
+    "executive_summary": true,
+    "financial_analysis": true,
+    "first_flush_summary": true,
+    "notes": true,
+    "project_information": true,
+    "rainfall_events": true,
+    "rainfall_quality": true,
+    "rainfall_volume_summary": true,
+    "reliability_curve": true,
+    "surface_area_summary": true,
+    "tank_level_distribution": true,
+    "tank_summary": true,
+    "water_balance": true,
+    "yearly_demand_reliability": true,
+    "yearly_rainfall": true
+  },
+  "review_warnings": [],
+  "schema_version": 2,
+  "selected_reliability": 88.0,
+  "selected_tank_size": 2000.0,
+  "surfaces": [
+    {
+      "area": 1200.0,
+      "first_flush_depth": 0.04,
+      "name": "North roof & canopy",
+      "runoff_coefficient": 0.9
+    }
+  ],
+  "tank_level_distribution": [
+    {
+      "count": 120,
+      "high": 1000.0,
+      "low": 0.0
+    },
+    {
+      "count": 246,
+      "high": 2000.0,
+      "low": 1000.0
+    }
+  ],
+  "total_annual_demand": 23400.0,
+  "volume_unit": "gal",
+  "yearly_rainfall_summary": [
+    {
+      "completeness_percent": 99.7,
+      "missing_days": 1,
+      "observed_days": 365,
+      "partial_year": true,
+      "precipitation": 40.25,
+      "wet_days": 104,
+      "year": 2024
+    }
+  ],
+  "yearly_reliability": [
+    {
+      "met_days": 322,
+      "met_percent": 87.9781420765,
+      "total_days": 366,
+      "unmet_days": 44,
+      "unmet_percent": 12.0218579235,
+      "year": 2024
+    }
+  ]
+}

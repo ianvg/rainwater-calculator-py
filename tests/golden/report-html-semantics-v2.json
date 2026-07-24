@@ -1,0 +1,79 @@
+{
+  "document": {
+    "h1": [
+      "Golden Report <A>"
+    ],
+    "lang": "en",
+    "title": "Golden Report <A> - RWH Calculator Report"
+  },
+  "sections": [
+    "project-information: Project information",
+    "executive-summary: Executive design summary",
+    "notes: Notes",
+    "design-recommendations: Design recommendations and review conditions",
+    "surface-area-summary: Surface area summary",
+    "rainfall-volume-summary: Rainfall volume summary",
+    "tank-summary: Tank summary",
+    "candidate-performance: Candidate tank performance",
+    "water-balance: Reconciled water balance",
+    "demand-summary: Demand summary",
+    "end-use-performance: End-use demand and savings",
+    "financial-analysis: Financial assumptions and results",
+    "rainfall-quality: Rainfall quality and completeness",
+    "yearly-rainfall: Yearly rainfall summary",
+    "rainfall-events: Rainfall-event summary",
+    "first-flush-summary: First-flush diversion summary",
+    "analysis-provenance: Analysis provenance and reproducibility",
+    "reliability-curve: Reliability curve",
+    "yearly-demand-reliability: Yearly demand reliability - 2,000 gal tank",
+    "tank-level-distribution: Tank level distribution"
+  ],
+  "svg_labels": [
+    "Reliability versus tank size chart",
+    "Yearly percentage of days demand was met or not met",
+    "Distribution of days by tank level range"
+  ],
+  "tables": [
+    "design-recommendations: Decision aid | Tank size | Reliability | Basis and tradeoff",
+    "surface-area-summary: Surface | Area (sq ft) | Runoff coefficient | First flush (in)",
+    "rainfall-volume-summary: Average annual volume | Value",
+    "tank-summary: Tank property | Value",
+    "candidate-performance: Tank size | Reliability | Supply/year | Municipal makeup/year | System unmet/year | Overflow/year | First flush/year | Treatment loss/year | Final storage | Net savings/year | Payback | Lifecycle NPV",
+    "water-balance: Component | Volume",
+    "water-balance: Component | Volume",
+    "demand-summary: Month | Demand (gal/day) | Demand (gal/month) | Month | Demand (gal/day) | Demand (gal/month)",
+    "end-use-performance: End use | Type | Schedule | Sewer basis | Demand (gal/year) | Supply (gal/year) | Demand met | Water savings/year | Sewer savings/year",
+    "financial-analysis: Item | Value",
+    "financial-analysis: Year | Nominal net cash flow | Discounted cash flow | Cumulative discounted cash flow",
+    "rainfall-quality: Start | End | Days",
+    "yearly-rainfall: Year | Observed days | Missing days | Completeness | Precipitation (in) | Wet days | Status",
+    "rainfall-events: Event | Start | End | Duration (days) | Wet days | Precipitation (in)",
+    "first-flush-summary: Year | Events started | Gross runoff (gal) | First-flush diversion (gal) | Net collected (gal) | Diverted",
+    "first-flush-summary: Event | Start | End | Wet timesteps | Gross runoff (gal) | First-flush diversion (gal) | Net collected (gal) | Diverted",
+    "reliability-curve: Tank size (gal) | Reliability",
+    "yearly-demand-reliability: Year | Days met | Met | Days not met | Not met",
+    "tank-level-distribution: Tank level range (gal) | Days"
+  ],
+  "toc_targets": [
+    "project-information",
+    "executive-summary",
+    "notes",
+    "design-recommendations",
+    "surface-area-summary",
+    "rainfall-volume-summary",
+    "tank-summary",
+    "candidate-performance",
+    "water-balance",
+    "demand-summary",
+    "end-use-performance",
+    "financial-analysis",
+    "rainfall-quality",
+    "yearly-rainfall",
+    "rainfall-events",
+    "first-flush-summary",
+    "analysis-provenance",
+    "reliability-curve",
+    "yearly-demand-reliability",
+    "tank-level-distribution"
+  ]
+}

@@ -54,6 +54,61 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.report_include_multitank_charts is False
 
 
+def test_read_only_store_loads_without_modifying_database(tmp_path: Path) -> None:
+    database = tmp_path / "projects.db"
+    writable = SQLiteStore(str(database))
+    config = default_project_config()
+    config.name = "Read only project"
+    rainfall = pd.DataFrame(
+        {"Date": pd.to_datetime(["2025-01-01"]), "Precipitation": [1.0]}
+    )
+    curve = pd.DataFrame(
+        {"TankSizeGallons": [1000.0], "ReliabilityPercent": [80.0]}
+    )
+    results = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-01-01"]),
+            "ReliabilityPercent": [80.0],
+            "DemandGallons": [100.0],
+        }
+    )
+    writable.save_project(config, rainfall, curve, results)
+    before = database.read_bytes()
+
+    read_only = SQLiteStore(str(database), read_only=True)
+    loaded, _rainfall, _curve, loaded_results = read_only.load_project_with_analysis(
+        config.name
+    )
+
+    assert loaded.name == config.name
+    assert loaded_results["ReliabilityPercent"].tolist() == [80.0]
+    assert database.read_bytes() == before
+    with pytest.raises(sqlite3.OperationalError, match="readonly|read-only"):
+        read_only.save_project(config, rainfall, curve, results)
+
+
+def test_read_only_store_rejects_missing_and_incompatible_files(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError):
+        SQLiteStore(str(tmp_path / "missing.db"), read_only=True)
+
+    incompatible = tmp_path / "incompatible.db"
+    with sqlite3.connect(incompatible) as connection:
+        connection.execute("CREATE TABLE unrelated (id INTEGER)")
+
+    with pytest.raises(Exception, match="compatible project database"):
+        SQLiteStore(str(incompatible), read_only=True)
+
+
+def test_read_only_store_rejects_newer_storage_schema(tmp_path: Path) -> None:
+    database = tmp_path / "future-read-only.db"
+    SQLiteStore(str(database))
+    with sqlite3.connect(database) as connection:
+        connection.execute("PRAGMA user_version = 999")
+
+    with pytest.raises(RuntimeError, match="newer than the supported schema"):
+        SQLiteStore(str(database), read_only=True)
+
+
 def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     database = tmp_path / "report-options.db"
     store = SQLiteStore(str(database), backup_dir=tmp_path / "backups")

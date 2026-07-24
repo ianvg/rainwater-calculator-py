@@ -20,6 +20,8 @@ The **Analysis provenance and reproducibility** section identifies the rainfall 
 
 All report formats consume the same validated report model. The model currently uses report schema version 2 and rejects missing required sections, unsupported schema versions, and non-finite numeric values before rendering. The HTML, LaTeX, and direct PDF outputs include the same design recommendations, review conditions, rainfall quality, yearly rainfall, rainfall-event, first-flush diversion, lifecycle financial, and provenance sections.
 
+Report regression tests compare a deterministic representative report model with a versioned golden fixture. HTML tests snapshot its semantic section, table, navigation, and chart-label structure and perform offline validation of document landmarks, headings, accessible names, IDs, and internal links. Browser-based visual regression and accessibility auditing remain separate future checks.
+
 Reliability curves, yearly reliability rows, tank-level distributions, and multi-tank series are prepared by shared UI-independent chart-data helpers. The desktop canvases and report renderers therefore consume the same converted units and aggregated values, while each output remains responsible for its own drawing and interaction behavior.
 
 The HTML report embeds its styles, scripts, charts, and map layout without requiring Leaflet or another JavaScript mapping library. When project or weather-station coordinates are available, the static map loads the configured OpenStreetMap tiles and overlays labeled project and station markers. Map imagery requires an internet connection, while the coordinate table remains available offline. Every HTML chart includes a data table directly beneath it, so its values remain available when JavaScript is disabled, in print, and to assistive technology.
@@ -76,6 +78,14 @@ Temporary previews are intended for review. Export a report when a permanent pro
 ## Export a report
 
 Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location.
+
+## Compare saved projects
+
+Select **Export > Export project comparison as PDF...** or **Export > Export project comparison as HTML...**. Choose at least two saved, analyzed projects and enter a report title. The selector initially lists projects in the current database; use **Add project database...** to include projects from one or more other rainwater project `.db` files. External databases are validated and opened read-only, and generating the comparison does not switch, save, rerun, or otherwise modify the active project.
+
+The comparison reports project source, location, rainfall provenance and period, analysis status, collection area, mean annual precipitation, area-weighted runoff coefficient, selected tank, reliability, annual demand and water-balance results, first-flush and treatment losses, basic economics, and review conditions. Annual result volumes are calendar-year averages from saved analysis rows. If every selected project is Metric (SI), common areas, precipitation, tank sizes, and volumes use metric units; otherwise common comparison quantities use English units, with mixed-unit normalization called out in the report. Duplicate project names from different databases are labelled with their source database.
+
+Projects without usable saved results cannot be included. Results whose saved analysis signature no longer matches their project inputs are labelled stale; older results without a signature are labelled not verifiable. The comparison never silently reruns either case.
 
 Select **Include system-type visualization** under **Results > Report generation > Supplemental visuals** to place a schematic of the applied direct or indirect system in the report. The schematic identifies the primary analyzed tank size and the principal flow path to the end uses.
 
