@@ -514,6 +514,7 @@ class ProjectConfig:
     system_parameters: SystemComponentParameters = field(default_factory=SystemComponentParameters)
     financial_parameters: FinancialParameters = field(default_factory=FinancialParameters)
     optimization_parameters: OptimizationParameters = field(default_factory=OptimizationParameters)
+    reporting_precipitation_normal: Dict[str, object] | None = None
     report_sections: Dict[str, bool] = field(default_factory=dict)
     report_include_system_visualization: bool = False
     report_include_multitank_charts: bool = False

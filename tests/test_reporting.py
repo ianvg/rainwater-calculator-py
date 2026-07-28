@@ -96,6 +96,114 @@ def test_report_rendering_service_renders_validated_html_and_latex() -> None:
     assert "Buffer usable capacity" in latex
 
 
+def test_html_report_groups_related_sections_in_navigation_and_body() -> None:
+    html = ReportRenderingService().html(_renderable_report())
+
+    expected_groups = {
+        "Project overview": "project-overview-content",
+        "Precipitation report": "precipitation-report-content",
+        "System design and performance": "system-design-content",
+        "Demand and financial analysis": "demand-financial-content",
+        "Reliability analysis": "reliability-analysis-content",
+    }
+    for label, content_id in expected_groups.items():
+        assert f'<span class="toc-group-label">{label}</span>' in html
+        assert (
+            '<button class="report-group-toggle" type="button" '
+            f'aria-expanded="true" aria-controls="{content_id}">{label}</button>'
+        ) in html
+        assert f'<div id="{content_id}" class="report-group-content">' in html
+
+    body_markers = [
+        'aria-controls="project-overview-content">Project overview</button>',
+        'id="project-information"',
+        'id="executive-summary"',
+        'id="notes"',
+        'id="design-recommendations"',
+        'aria-controls="precipitation-report-content">Precipitation report</button>',
+        'id="rainfall-volume-summary"',
+        'id="rainfall-quality"',
+        'id="yearly-rainfall"',
+        'id="rainfall-events"',
+        'aria-controls="system-design-content">System design and performance</button>',
+        'id="surface-area-summary"',
+        'id="tank-summary"',
+        'id="candidate-performance"',
+        'id="water-balance"',
+        'id="first-flush-summary"',
+        'aria-controls="demand-financial-content">Demand and financial analysis</button>',
+        'id="demand-summary"',
+        'id="end-use-performance"',
+        'id="financial-analysis"',
+        'aria-controls="reliability-analysis-content">Reliability analysis</button>',
+        'id="reliability-curve"',
+        'id="yearly-demand-reliability"',
+        'id="tank-level-distribution"',
+        'id="analysis-provenance"',
+    ]
+    marker_positions = [html.index(marker, html.index("<main>")) for marker in body_markers]
+    assert marker_positions == sorted(marker_positions)
+    assert "function setReportGroupExpanded" in html
+    assert "target.closest('.report-group-content')" in html
+    reliability_group_start = html.index(
+        '<span class="toc-group-label">Reliability analysis</span>'
+    )
+    reliability_group_end = html.index("</ul></li>", reliability_group_start)
+    provenance_link = html.index('href="#analysis-provenance"')
+    assert reliability_group_start < provenance_link < reliability_group_end
+    reliability_content_start = html.index('id="reliability-analysis-content"')
+    reliability_content_end = html.index("</div>", html.index('id="analysis-provenance"'))
+    assert reliability_content_start < html.index('id="analysis-provenance"') < reliability_content_end
+    assert "@media (max-width:900px)" in html
+    assert ".toc { position:sticky; top:0; z-index:100; max-height:100vh;" in html
+    assert ".toc-toggle { position:sticky; top:0; z-index:1; }" in html
+    assert "main section { scroll-margin-top:52px; }" in html
+    assert "const narrowTocQuery=window.matchMedia('(max-width:900px)');" in html
+    assert "!document.querySelector('.toc').contains(event.target)" in html
+
+
+def test_html_report_wraps_long_provenance_values() -> None:
+    report = _renderable_report()
+    signature = "abcdef0123456789" * 8
+    report["provenance"] = {"analysis_input_signature": signature}
+
+    html = ReportRenderingService().html(report)
+
+    assert f"<dd>{signature}</dd>" in html
+    assert ".fact { min-width:0;" in html
+    assert "dd { min-width:0; margin:3px 0 0; overflow-wrap:anywhere; }" in html
+
+
+def test_historical_average_annual_precipitation_label_includes_record_dates() -> None:
+    report = _renderable_report()
+    report["provenance"] = {
+        "rainfall_data_type": "Observed station data",
+        "record_start": "1994-01-01",
+        "record_end": "2023-12-31",
+    }
+
+    html = ReportRenderingService().html(report)
+    latex = ReportRenderingService().latex(report)
+
+    expected = "Average annual precipitation from 1994-01-01 to 2023-12-31"
+    assert expected in html
+    assert expected in latex
+
+
+def test_synthetic_average_annual_precipitation_label_omits_record_dates() -> None:
+    report = _renderable_report()
+    report["provenance"] = {
+        "rainfall_data_type": "Synthetic rainfall data",
+        "record_start": "1994-01-01",
+        "record_end": "2023-12-31",
+    }
+
+    html = ReportRenderingService().html(report)
+
+    assert "Average annual precipitation from" not in html
+    assert "Average annual precipitation" in html
+
+
 def test_report_rendering_service_writes_legacy_pdf(tmp_path) -> None:
     target = tmp_path / "report.pdf"
 

@@ -58,6 +58,8 @@ from rainwater_app.app_paths import (
     user_data_dir,
 )
 from rainwater_app.climate_normals import (
+    CLIMATE_NORMALS_DATASET,
+    CLIMATE_NORMALS_PRODUCT_VERSION,
     ClimateNormalRequestCancelled,
     NCEI_CLIMATE_NORMALS_URL,
     NCEI_BULK_ARCHIVE_SIZE_BYTES,
@@ -69,6 +71,7 @@ from rainwater_app.climate_normals import (
     fetch_annual_precipitation_normal,
     fetch_us_annual_precipitation_normal_catalog,
     filter_climate_normal_stations,
+    reporting_precipitation_normal_snapshot,
     remove_climate_normals_bulk_archive,
 )
 from rainwater_app.defaults import DEFAULT_SURFACES, default_project_config, default_surface_runoff
@@ -217,7 +220,12 @@ from rainwater_app.system_model import (
     ensure_primary_overflow_paths,
     validate_builder_system,
 )
-from rainwater_app.stations import bounding_box, filter_stations, nearest_stations
+from rainwater_app.stations import (
+    bounding_box,
+    filter_stations,
+    nearest_stations,
+    station_distance_km,
+)
 from rainwater_app.ui_logic import (
     antecedent_dry_period_from_days as _antecedent_dry_period_from_days,
     antecedent_dry_period_to_days as _antecedent_dry_period_to_days,
@@ -1534,6 +1542,7 @@ class RainwaterTkApp(tk.Tk):
         self.climate_normal_search_results: list[dict[str, object]] = []
         self.climate_normal_catalog: list[dict[str, object]] = []
         self.climate_normal_comparison_rows: dict[str, dict[str, object]] = {}
+        self.climate_normal_config_identity = id(self.config_model)
         self.climate_normal_sort_column = "annual"
         self.climate_normal_sort_descending = True
         self.climate_normal_map_markers: list[object] = []
@@ -1797,6 +1806,7 @@ class RainwaterTkApp(tk.Tk):
         self.climate_normal_status_var = tk.StringVar(
             value="Open this tab to load NOAA 1991-2020 Climate Normals stations."
         )
+        self.reporting_climate_normal_var = tk.StringVar(value="No report normal selected.")
         self.climate_normal_archive_status_var = tk.StringVar()
         self.climate_normal_archive_progress_var = tk.DoubleVar(value=0.0)
         self.climate_normal_archive_in_progress = False
@@ -3225,7 +3235,7 @@ class RainwaterTkApp(tk.Tk):
             system_builder_content, text="System builder", padding=10
         )
         self.indirect_system_diagram_frame.grid(row=0, column=0, sticky="nsew", padx=8, pady=8)
-        self.indirect_system_diagram_frame.columnconfigure(0, weight=1)
+        self.indirect_system_diagram_frame.columnconfigure(1, weight=1)
         self.system_builder_zoom = 1.0
         self.system_builder_pan_x = 0.0
         self.system_builder_pan_y = 0.0
@@ -3233,22 +3243,29 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_zoom_var = tk.StringVar(value="100%")
         self.system_builder_view_var = tk.StringVar(value="icon-graph")
         canvas_column = ttk.Frame(self.indirect_system_diagram_frame)
-        canvas_column.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        canvas_column.grid(row=0, column=1, sticky="nsew")
         canvas_column.columnconfigure(0, weight=1)
         canvas_column.rowconfigure(1, weight=1)
         zoom_bar = ttk.Frame(canvas_column)
         zoom_bar.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        self.system_builder_side_panel_visible = True
+        self.system_builder_side_panel_button = ttk.Button(
+            zoom_bar,
+            text="Hide controls",
+            command=self._toggle_system_builder_side_panel,
+        )
+        self.system_builder_side_panel_button.grid(row=0, column=0, sticky="w")
         ttk.Button(
             zoom_bar, text="Zoom out 10%", command=lambda: self._change_system_builder_zoom(-0.1)
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=1, sticky="w", padx=(12, 0))
         ttk.Label(zoom_bar, textvariable=self.system_builder_zoom_var, width=6, anchor="center").grid(
-            row=0, column=1, padx=6
+            row=0, column=2, padx=6
         )
         ttk.Button(
             zoom_bar, text="Zoom in 10%", command=lambda: self._change_system_builder_zoom(0.1)
-        ).grid(row=0, column=2, sticky="w")
+        ).grid(row=0, column=3, sticky="w")
         view_switch = ttk.Frame(zoom_bar)
-        view_switch.grid(row=0, column=3, sticky="w", padx=(14, 0))
+        view_switch.grid(row=0, column=4, sticky="w", padx=(14, 0))
         ttk.Radiobutton(
             view_switch,
             text="Block graph",
@@ -3265,7 +3282,7 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=0, column=1, sticky="w", padx=(8, 0))
         ttk.Label(
             zoom_bar, text="Shift+wheel: zoom  |  Middle-drag: pan", foreground="#667278"
-        ).grid(row=0, column=4, sticky="w", padx=(12, 0))
+        ).grid(row=0, column=5, sticky="w", padx=(12, 0))
         self.system_builder_canvas = tk.Canvas(
             canvas_column,
             width=760,
@@ -3286,7 +3303,9 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_canvas.bind("<Delete>", lambda _event: self.delete_selected_system_component())
         self.system_builder_canvas.bind("<Escape>", self._cancel_system_link)
         self.system_builder_side_tabs = ttk.Notebook(self.indirect_system_diagram_frame)
-        self.system_builder_side_tabs.grid(row=0, column=1, sticky="nsew")
+        self.system_builder_side_tabs.grid(
+            row=0, column=0, sticky="nsew", padx=(0, 10)
+        )
         system_library = ttk.Frame(self.system_builder_side_tabs, padding=8)
         system_templates = ttk.Frame(self.system_builder_side_tabs, padding=8)
         system_edit = ttk.Frame(self.system_builder_side_tabs, padding=8)
@@ -3688,6 +3707,20 @@ class RainwaterTkApp(tk.Tk):
         self._build_system_animation_tab(system_animation_page)
         self._refresh_system_component_editor()
         self._render_system_builder()
+
+    def _toggle_system_builder_side_panel(self) -> None:
+        """Show or hide the builder controls while preserving their current state."""
+        self.system_builder_side_panel_visible = (
+            not self.system_builder_side_panel_visible
+        )
+        if self.system_builder_side_panel_visible:
+            self.system_builder_side_tabs.grid()
+            self.system_builder_side_panel_button.configure(text="Hide controls")
+        else:
+            self.system_builder_side_tabs.grid_remove()
+            self.system_builder_side_panel_button.configure(text="Show controls")
+        self.after_idle(self._update_system_builder_scroll_region)
+        self.after_idle(self._render_system_builder)
 
     @staticmethod
     def _system_component_templates() -> dict[str, str]:
@@ -8115,9 +8148,19 @@ class RainwaterTkApp(tk.Tk):
         comparison_actions.grid(row=3, column=0, columnspan=2, sticky="w", pady=(8, 0))
         ttk.Button(
             comparison_actions,
+            text="Use selected in report",
+            command=self.use_selected_climate_normal_in_report,
+        ).pack(side="left")
+        ttk.Button(
+            comparison_actions,
+            text="Clear report normal",
+            command=self.clear_reporting_climate_normal,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            comparison_actions,
             text="Remove selected",
             command=self.remove_selected_climate_normal,
-        ).pack(side="left")
+        ).pack(side="left", padx=(18, 0))
         ttk.Button(
             comparison_actions,
             text="Clear comparison",
@@ -8128,6 +8171,11 @@ class RainwaterTkApp(tk.Tk):
             text="Export CSV...",
             command=self.export_climate_normal_comparison,
         ).pack(side="left", padx=(8, 0))
+        ttk.Label(
+            comparison_frame,
+            textvariable=self.reporting_climate_normal_var,
+            foreground="#315f49",
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     def _build_collection_tab(self) -> None:
         self.collection_tab.columnconfigure(0, weight=1)
@@ -11031,6 +11079,17 @@ class RainwaterTkApp(tk.Tk):
         self._refresh_optimization_assumptions()
         self._refresh_design_recommendations()
         if hasattr(self, "climate_normal_tree"):
+            config_identity = id(cfg)
+            if config_identity != getattr(self, "climate_normal_config_identity", None):
+                self.climate_normal_comparison_rows.clear()
+                reporting_normal = cfg.reporting_precipitation_normal
+                if reporting_normal:
+                    station_id = str(reporting_normal.get("station_id", ""))
+                    if station_id:
+                        self.climate_normal_comparison_rows[station_id] = dict(
+                            reporting_normal
+                        )
+                self.climate_normal_config_identity = config_identity
             self._refresh_climate_normal_comparison()
 
     def _update_setting_unit_labels(self) -> None:
@@ -13660,6 +13719,8 @@ class RainwaterTkApp(tk.Tk):
 
     def _refresh_climate_normal_comparison(self) -> None:
         unit = precip_unit(self.config_model)
+        reporting_normal = self.config_model.reporting_precipitation_normal or {}
+        reporting_station_id = str(reporting_normal.get("station_id", ""))
         comparison_frame = self.__dict__.get("climate_normal_comparison_frame")
         if comparison_frame is not None:
             comparison_frame.configure(text=f"Precipitation normals ({unit})")
@@ -13671,13 +13732,96 @@ class RainwaterTkApp(tk.Tk):
                 "end",
                 iid=str(record["station_id"]),
                 values=(
-                    f"{record.get('name', '')} [{record.get('station_id', '')}]",
+                    (
+                        "★ " if str(record.get("station_id", "")) == reporting_station_id else ""
+                    )
+                    + f"{record.get('name', '')} [{record.get('station_id', '')}]",
                     *(
                         format_number(precip_to_display(float(record[key]), self.config_model), self.config_model)
                         for key in PRECIPITATION_NORMAL_RECORD_KEYS
                     ),
                 ),
             )
+        status_variable = self.__dict__.get("reporting_climate_normal_var")
+        if status_variable is not None:
+            if reporting_normal:
+                status_variable.set(
+                    "Executive-summary reference: "
+                    f"{reporting_normal.get('name', '')} "
+                    f"[{reporting_normal.get('station_id', '')}], "
+                    f"{reporting_normal.get('period', '1991-2020')}."
+                )
+            else:
+                status_variable.set("No report normal selected.")
+
+    def use_selected_climate_normal_in_report(self) -> None:
+        selection = self.climate_normal_tree.selection()
+        if not selection:
+            messagebox.showinfo(
+                APP_TITLE,
+                "Select a station in the precipitation-normal comparison first.",
+                parent=self,
+            )
+            return
+        station_id = str(selection[0])
+        record = self.climate_normal_comparison_rows.get(station_id)
+        if record is None or not all(
+            key in record for key in PRECIPITATION_NORMAL_RECORD_KEYS
+        ):
+            messagebox.showerror(
+                APP_TITLE,
+                "The selected station does not contain a complete precipitation normal.",
+                parent=self,
+            )
+            return
+        origin = self._reporting_normal_distance_origin()
+        if origin is not None:
+            distance_km = station_distance_km(record, origin[0], origin[1])
+            if distance_km is not None and distance_km > 100.0:
+                distance_text = (
+                    f"{format_number(distance_km * 0.621371, self.config_model, max_decimal_places=1)} miles"
+                    if not is_metric(self.config_model)
+                    else f"{format_number(distance_km, self.config_model, max_decimal_places=1)} km"
+                )
+                if not messagebox.askyesno(
+                    APP_TITLE,
+                    f"This NOAA station is {distance_text} from the {origin[2]}. "
+                    "Use it as the executive-summary reference anyway?",
+                    parent=self,
+                ):
+                    return
+        self.config_model.reporting_precipitation_normal = (
+            reporting_precipitation_normal_snapshot(
+                record,
+                retrieved_at=dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+            )
+        )
+        self._refresh_climate_normal_comparison()
+        self.climate_normal_status_var.set(
+            f"{record['name']} will appear in the report executive summary."
+        )
+
+    def clear_reporting_climate_normal(self) -> None:
+        self.config_model.reporting_precipitation_normal = None
+        self._refresh_climate_normal_comparison()
+        self.climate_normal_status_var.set(
+            "Removed the NOAA precipitation normal from generated reports."
+        )
+
+    def _reporting_normal_distance_origin(self) -> tuple[float, float, str] | None:
+        cfg = self.config_model
+        if cfg.latitude is not None and cfg.longitude is not None:
+            return float(cfg.latitude), float(cfg.longitude), "project location"
+        if (
+            cfg.weather_station_latitude is not None
+            and cfg.weather_station_longitude is not None
+        ):
+            return (
+                float(cfg.weather_station_latitude),
+                float(cfg.weather_station_longitude),
+                "rainfall station",
+            )
+        return None
 
     def remove_selected_climate_normal(self) -> None:
         for station_id in self.climate_normal_tree.selection():
@@ -16142,13 +16286,74 @@ class RainwaterTkApp(tk.Tk):
             * cfg.system_parameters.booster_initial_fill_percent
             / 100.0
         )
+        average_annual_precipitation = _report_average_annual_precipitation(
+            self.rainfall_df, cfg
+        )
+        reporting_normal_summary: dict[str, object] | None = None
+        reporting_normal = cfg.reporting_precipitation_normal
+        if reporting_normal:
+            normal_precipitation = precip_to_display(
+                float(reporting_normal["annual_precipitation_inches"]), cfg
+            )
+            difference = average_annual_precipitation - normal_precipitation
+            difference_percent = (
+                difference / normal_precipitation * 100.0
+                if normal_precipitation > 0.0
+                else None
+            )
+            reporting_normal_summary = {
+                "station_id": str(reporting_normal.get("station_id", "")),
+                "station_name": str(reporting_normal.get("name", "")),
+                "period": str(reporting_normal.get("period", "1991-2020")),
+                "dataset": str(
+                    reporting_normal.get("dataset", CLIMATE_NORMALS_DATASET)
+                ),
+                "product_version": str(
+                    reporting_normal.get(
+                        "product_version", CLIMATE_NORMALS_PRODUCT_VERSION
+                    )
+                ),
+                "provider": str(
+                    reporting_normal.get(
+                        "provider", "NOAA NCEI U.S. Climate Normals"
+                    )
+                ),
+                "retrieved_at": reporting_normal.get("retrieved_at"),
+                "annual_precipitation": normal_precipitation,
+                "difference": difference,
+                "difference_percent": difference_percent,
+                "seasonal_precipitation": {
+                    season: precip_to_display(
+                        float(reporting_normal[f"{season}_precipitation_inches"]),
+                        cfg,
+                    )
+                    for season in ("winter", "spring", "summer", "autumn")
+                },
+            }
+            origin = self._reporting_normal_distance_origin()
+            if origin is not None:
+                distance_km = station_distance_km(
+                    reporting_normal, origin[0], origin[1]
+                )
+                if distance_km is not None:
+                    reporting_normal_summary.update(
+                        {
+                            "distance": (
+                                distance_km
+                                if is_metric(cfg)
+                                else distance_km * 0.621371
+                            ),
+                            "distance_unit": "km" if is_metric(cfg) else "mi",
+                            "distance_basis": origin[2],
+                        }
+                    )
         return ReportModel.from_payload({
             "metadata": dict(metadata),
             "notes": cfg.notes,
             "area_unit": area_unit(cfg),
             "volume_unit": volume_unit(cfg),
             "precipitation_unit": precip_unit(cfg),
-            "average_annual_precipitation": _report_average_annual_precipitation(self.rainfall_df, cfg),
+            "average_annual_precipitation": average_annual_precipitation,
             "precipitation_basis": CANADIAN_PRECIPITATION_LABELS.get(
                 precipitation_field, "Total precipitation"
             ),
@@ -16207,6 +16412,7 @@ class RainwaterTkApp(tk.Tk):
             },
             "selected_reliability": selected_reliability,
             "executive_summary": {
+                "precipitation_normal": reporting_normal_summary,
                 "average_annual_supply": volume_to_display(
                     self._average_annual_result_total(self.results_df, "RainwaterSuppliedGallons"), cfg
                 ),

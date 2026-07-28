@@ -20,6 +20,7 @@ from .first_flush import (
     normalize_first_flush_design_preset,
     normalize_first_flush_sizing_method,
 )
+from .climate_normals import normalize_reporting_precipitation_normal
 from .system_model import ensure_primary_overflow_paths
 from .models import (
     DemandObject,
@@ -43,7 +44,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 14
+PROJECT_SCHEMA_VERSION = 15
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -764,6 +765,9 @@ class SQLiteStore:
             system_parameters=system_params,
             financial_parameters=financial_params,
             optimization_parameters=optimization_params,
+            reporting_precipitation_normal=normalize_reporting_precipitation_normal(
+                payload.get("reporting_precipitation_normal")
+            ),
             report_sections={
                 str(key): bool(value)
                 for key, value in payload.get("report_sections", {}).items()

@@ -6,6 +6,7 @@ import hashlib
 import http.client
 import io
 import json
+import math
 import os
 import re
 import socket
@@ -55,6 +56,21 @@ PRECIPITATION_NORMAL_FIELDS = (
 PRECIPITATION_NORMAL_RECORD_KEYS = tuple(
     f"{season}_precipitation_inches" for season, _field in PRECIPITATION_NORMAL_FIELDS
 )
+REPORTING_PRECIPITATION_NORMAL_METADATA_KEYS = (
+    "station_id",
+    "name",
+    "state",
+    "latitude",
+    "longitude",
+    "elevation_m",
+    "period",
+    "dataset",
+    "product_version",
+    "provider",
+    "attributes",
+    "completeness",
+    "retrieved_at",
+)
 USER_AGENT = "RWH-Calculator/0.1.2 (+https://github.com/ianvg/rainwater-calculator-py)"
 _STATION_ID_PATTERN = re.compile(r"[A-Z0-9]{11}", re.IGNORECASE)
 _QUICK_ACCESS_STATION_PATTERN = re.compile(
@@ -96,6 +112,74 @@ US_STATE_CODES = frozenset(
     "MO MT NE NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY".split()
 )
 _annual_value_cache_lock = threading.Lock()
+
+
+def reporting_precipitation_normal_snapshot(
+    record: dict[str, Any], *, retrieved_at: str
+) -> dict[str, Any]:
+    """Return the reproducible subset of a NOAA normal used by project reports."""
+    snapshot = {
+        key: record[key]
+        for key in REPORTING_PRECIPITATION_NORMAL_METADATA_KEYS
+        if record.get(key) not in (None, "")
+    }
+    snapshot.update(
+        {
+            "station_id": str(record.get("station_id", "")).strip().upper(),
+            "name": str(record.get("name", "")).strip(),
+            "period": str(record.get("period") or "1991-2020"),
+            "dataset": str(record.get("dataset") or CLIMATE_NORMALS_DATASET),
+            "product_version": str(
+                record.get("product_version") or CLIMATE_NORMALS_PRODUCT_VERSION
+            ),
+            "provider": str(
+                record.get("provider") or "NOAA NCEI U.S. Climate Normals"
+            ),
+            "retrieved_at": retrieved_at,
+        }
+    )
+    for key in PRECIPITATION_NORMAL_RECORD_KEYS:
+        snapshot[key] = float(record[key])
+    normalized = normalize_reporting_precipitation_normal(snapshot)
+    if normalized is None:
+        raise ValueError("The selected NOAA precipitation-normal record is incomplete.")
+    return normalized
+
+
+def normalize_reporting_precipitation_normal(value: object) -> dict[str, Any] | None:
+    """Validate a persisted reporting normal while tolerating older projects."""
+    if not isinstance(value, dict):
+        return None
+    station_id = str(value.get("station_id", "")).strip().upper()
+    name = str(value.get("name", "")).strip()
+    if not _STATION_ID_PATTERN.fullmatch(station_id) or not name:
+        return None
+    normalized: dict[str, Any] = {"station_id": station_id, "name": name}
+    for key in PRECIPITATION_NORMAL_RECORD_KEYS:
+        try:
+            number = float(value[key])
+        except (KeyError, TypeError, ValueError):
+            return None
+        if not math.isfinite(number) or number < 0.0:
+            return None
+        normalized[key] = number
+    for key in REPORTING_PRECIPITATION_NORMAL_METADATA_KEYS:
+        if key in normalized or value.get(key) in (None, ""):
+            continue
+        if key in {"latitude", "longitude", "elevation_m"}:
+            try:
+                number = float(value[key])
+            except (TypeError, ValueError):
+                continue
+            if math.isfinite(number):
+                normalized[key] = number
+            continue
+        normalized[key] = str(value[key])
+    normalized.setdefault("period", "1991-2020")
+    normalized.setdefault("dataset", CLIMATE_NORMALS_DATASET)
+    normalized.setdefault("product_version", CLIMATE_NORMALS_PRODUCT_VERSION)
+    normalized.setdefault("provider", "NOAA NCEI U.S. Climate Normals")
+    return normalized
 
 
 class ClimateNormalRequestCancelled(RuntimeError):

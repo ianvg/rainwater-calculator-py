@@ -63,6 +63,48 @@ def test_system_builder_view_normalization(value: object, expected: str) -> None
     assert RainwaterTkApp._normalized_system_builder_view(value) == expected
 
 
+def test_system_builder_side_panel_toggle_hides_and_restores_controls() -> None:
+    class Tabs:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def grid_remove(self) -> None:
+            self.calls.append("hide")
+
+        def grid(self) -> None:
+            self.calls.append("show")
+
+    class Button:
+        def __init__(self) -> None:
+            self.labels: list[str] = []
+
+        def configure(self, *, text: str) -> None:
+            self.labels.append(text)
+
+    app = RainwaterTkApp.__new__(RainwaterTkApp)
+    app.system_builder_side_panel_visible = True
+    app.system_builder_side_tabs = Tabs()
+    app.system_builder_side_panel_button = Button()
+    idle_callbacks: list[object] = []
+    app.after_idle = idle_callbacks.append
+
+    app._toggle_system_builder_side_panel()
+    app._toggle_system_builder_side_panel()
+
+    assert app.system_builder_side_panel_visible is True
+    assert app.system_builder_side_tabs.calls == ["hide", "show"]
+    assert app.system_builder_side_panel_button.labels == [
+        "Show controls",
+        "Hide controls",
+    ]
+    assert idle_callbacks == [
+        app._update_system_builder_scroll_region,
+        app._render_system_builder,
+        app._update_system_builder_scroll_region,
+        app._render_system_builder,
+    ]
+
+
 def test_scaled_canvas_proxy_redraws_geometry_and_type_at_target_zoom() -> None:
     class RecordingCanvas:
         def __init__(self) -> None:
@@ -1042,6 +1084,47 @@ def test_climate_normal_comparison_displays_seasons_in_project_units() -> None:
     ]
 
 
+def test_selected_climate_normal_becomes_persisted_report_snapshot() -> None:
+    class Tree:
+        @staticmethod
+        def selection() -> tuple[str]:
+            return ("USW00013873",)
+
+    class Variable:
+        value = ""
+
+        def set(self, value: str) -> None:
+            self.value = value
+
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = default_project_config()
+    app.climate_normal_tree = Tree()
+    app.climate_normal_status_var = Variable()
+    app.climate_normal_comparison_rows = {
+        "USW00013873": {
+            "station_id": "USW00013873",
+            "name": "ATHENS BEN EPPS AP",
+            "latitude": 33.948,
+            "longitude": -83.327,
+            **{key: 10.0 for key in PRECIPITATION_NORMAL_RECORD_KEYS},
+        }
+    }
+    app._refresh_climate_normal_comparison = lambda: None
+
+    app.use_selected_climate_normal_in_report()
+
+    snapshot = app.config_model.reporting_precipitation_normal
+    assert snapshot is not None
+    assert snapshot["station_id"] == "USW00013873"
+    assert snapshot["period"] == "1991-2020"
+    assert snapshot["dataset"] == "normals-annualseasonal-1991-2020"
+    assert snapshot["product_version"] == "1991-2020-v1.0.1"
+    assert snapshot["retrieved_at"]
+    assert app.climate_normal_status_var.value == (
+        "ATHENS BEN EPPS AP will appear in the report executive summary."
+    )
+
+
 def test_multi_site_mousewheel_scrolls_page_outside_nested_controls() -> None:
     class Notebook:
         def __init__(self, selected: object) -> None:
@@ -1325,6 +1408,17 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
         "selected_tank_size": 750.0,
         "selected_reliability": 65.0,
         "executive_summary": {
+            "precipitation_normal": {
+                "station_id": "USW00013873",
+                "station_name": "ATHENS BEN EPPS AP",
+                "period": "1991-2020",
+                "annual_precipitation": 44.2,
+                "difference": -1.825,
+                "difference_percent": -4.12896,
+                "distance": 18.4,
+                "distance_unit": "mi",
+                "distance_basis": "project location",
+            },
             "average_annual_supply": 120000.0,
             "average_annual_municipal_makeup": 45000.0,
             "average_annual_system_unmet": 0.0,
@@ -1525,6 +1619,11 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Rain only" in html_executive
     assert "Average annual precipitation" in html_executive
     assert "42.38 in" in html_executive
+    assert "NOAA 1991-2020 annual normal" in html_executive
+    assert "44.2 in" in html_executive
+    assert "1.82 in below normal (4.1%)" in html_executive
+    assert "ATHENS BEN EPPS AP [USW00013873]" in html_executive
+    assert "18.4 mi from project location" in html_executive
     assert "Precipitation basis" not in html_project_information
     assert "Average annual precipitation" not in html_project_information
     assert "Selected tank size" not in html_project_information
@@ -1663,7 +1762,9 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Precipitation basis & Rain only" in latex_executive
     assert "Selected tank & 750 gal" in latex_executive
     assert "Selected reliability & 65\\%" in latex_executive
-    assert "Average annual precipitation & 42.38 in" in latex_executive
+    assert "Average annual precipitation from 2024-01-01 to 2025-12-31 & 42.38 in" in latex_executive
+    assert "NOAA 1991-2020 annual normal & 44.2 in" in latex_executive
+    assert r"ATHENS BEN EPPS AP [USW00013873]" in latex_executive
     assert "Precipitation basis" not in latex_project_information
     assert "Average annual precipitation" not in latex_project_information
     assert "Selected tank size" not in latex_project_information
@@ -1737,7 +1838,9 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert "Precipitation basis: Rain only" in pdf_executive
     assert "Selected tank: 750 gal" in pdf_executive
     assert "Selected reliability: 65%" in pdf_executive
-    assert "Average annual precipitation: 42.38 in" in pdf_executive
+    assert "Average annual precipitation from 2024-01-01 to 2025-12-31: 42.38 in" in pdf_executive
+    assert "NOAA 1991-2020 annual normal: 44.2 in" in pdf_executive
+    assert "ATHENS BEN EPPS AP [USW00013873]" in pdf_executive
     assert "Precipitation basis" not in pdf_project_information
     assert "Average annual precipitation" not in pdf_project_information
     assert "Selected tank size" not in pdf_project_information

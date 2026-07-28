@@ -17,6 +17,10 @@ from .reporting import (
     pdf_escape as _pdf_escape,
     wrap_pdf_text as _wrap_pdf_text,
 )
+from .report_rendering import (
+    _average_annual_precipitation_label,
+    _precipitation_normal_summary_rows,
+)
 
 
 def render_pdf(pdf_path: Path, report: ReportModel) -> None:
@@ -278,9 +282,9 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
     executive = report.get("executive_summary", {})
     financial = report.get("financial_summary", {})
     payback = executive.get("simple_payback_years")
-    for label, value in (
+    executive_rows = [
         (
-            "Average annual precipitation",
+            _average_annual_precipitation_label(report),
             f"{format_number(float(report['average_annual_precipitation']))} {report['precipitation_unit']}",
         ),
         ("Precipitation basis", report["precipitation_basis"]),
@@ -292,7 +296,9 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
         ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
         ("Net annual savings", f'{financial.get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
         ("Simple payback", f"{format_number(float(payback), max_decimal_places=1)} years" if payback is not None else "Not achieved"),
-    ):
+    ]
+    executive_rows[2:2] = _precipitation_normal_summary_rows(report)
+    for label, value in executive_rows:
         add_wrapped(f"{label}: {value}")
     y -= 4
 

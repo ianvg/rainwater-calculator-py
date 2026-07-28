@@ -24,6 +24,69 @@ def _enabled_report_section_keys(report: ReportModel) -> set[str]:
     return {key for key, enabled in choices.items() if enabled}
 
 
+def _precipitation_normal_summary_rows(
+    report: ReportModel | dict[str, object],
+) -> list[tuple[str, str]]:
+    executive = report.get("executive_summary", {})
+    normal = executive.get("precipitation_normal") if isinstance(executive, dict) else None
+    if not isinstance(normal, dict):
+        return []
+    unit = str(report["precipitation_unit"])
+    difference = float(normal.get("difference", 0.0))
+    difference_percent = normal.get("difference_percent")
+    if abs(difference) < 1e-9:
+        difference_text = f"0 {unit} (matches normal)"
+    else:
+        direction = "above" if difference > 0.0 else "below"
+        percent_text = (
+            f" ({format_number(abs(float(difference_percent)), max_decimal_places=1)}%)"
+            if difference_percent is not None
+            else ""
+        )
+        difference_text = (
+            f"{format_number(abs(difference))} {unit} {direction} normal{percent_text}"
+        )
+    rows = [
+        (
+            f"NOAA {normal.get('period', '1991-2020')} annual normal",
+            f"{format_number(float(normal.get('annual_precipitation', 0.0)))} {unit}",
+        ),
+        ("Analyzed record difference", difference_text),
+        (
+            "NOAA reference station",
+            f"{normal.get('station_name', '')} [{normal.get('station_id', '')}]",
+        ),
+    ]
+    if normal.get("distance") is not None:
+        rows.append(
+            (
+                "Reference-station distance",
+                f"{format_number(float(normal['distance']), max_decimal_places=1)} "
+                f"{normal.get('distance_unit', 'km')} from "
+                f"{normal.get('distance_basis', 'project location')}",
+            )
+        )
+    return rows
+
+
+def _average_annual_precipitation_label(
+    report: ReportModel | dict[str, object],
+) -> str:
+    label = "Average annual precipitation"
+    provenance = report.get("provenance", {})
+    if not isinstance(provenance, dict):
+        return label
+    data_type = str(provenance.get("rainfall_data_type", "")).casefold()
+    if "synthetic" in data_type or "forecast" in data_type:
+        return label
+    record_start = str(provenance.get("record_start", "")).strip()
+    record_end = str(provenance.get("record_end", "")).strip()
+    unavailable = {"", "not available", "not recorded", "none"}
+    if record_start.casefold() in unavailable or record_end.casefold() in unavailable:
+        return label
+    return f"{label} from {record_start} to {record_end}"
+
+
 def _filter_latex_report_sections(document: str, report: ReportModel) -> str:
     enabled = _enabled_report_section_keys(report)
     for key, _label, _html_id, title in REPORT_SECTION_DEFINITIONS:
@@ -123,11 +186,9 @@ def render_latex(
         rf"\item {_latex_escape(warning)}" for warning in report.get("review_warnings", [])
     ) or r"\item No configured review conditions were triggered."
     executive = report.get("executive_summary", {})
-    executive_rows_latex = "\n".join(
-        _latex_row(label, value)
-        for label, value in (
+    executive_rows = [
             (
-                "Average annual precipitation",
+                _average_annual_precipitation_label(report),
                 f'{format_number(float(report["average_annual_precipitation"]))} {report["precipitation_unit"]}',
             ),
             ("Precipitation basis", report["precipitation_basis"]),
@@ -139,7 +200,10 @@ def render_latex(
             ("Average annual overflow", f'{format_number(float(executive.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {volume}/year'),
             ("Net annual savings", f'{report.get("financial_summary", {}).get("currency", "USD")} {format_number(float(executive.get("net_annual_savings", 0.0)))}/year'),
             ("Simple payback", f'{format_number(float(executive["simple_payback_years"]), max_decimal_places=1)} years' if executive.get("simple_payback_years") is not None else "Not achieved"),
-        )
+    ]
+    executive_rows[2:2] = _precipitation_normal_summary_rows(report)
+    executive_rows_latex = "\n".join(
+        _latex_row(label, value) for label, value in executive_rows
     )
     candidate_rows_latex = "\n".join(
         _latex_row(
@@ -1066,25 +1130,27 @@ def render_html(
         + (f'{format_number(float(summary_payback), max_decimal_places=1)} years payback' if summary_payback is not None else 'payback not achieved')
         if summary.get("financial_configured") else "Financial assumptions not configured"
     )
+    executive_card_rows = [
+        (
+            _average_annual_precipitation_label(report),
+            f"{format_number(float(report['average_annual_precipitation']))} {report['precipitation_unit']}",
+        ),
+        ("Precipitation basis", report["precipitation_basis"]),
+        ("Selected tank", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {report["volume_unit"]}'),
+        ("Reliability", selected_text),
+        ("Average annual supply", f'{format_number(float(summary.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Municipal makeup", f'{format_number(float(summary.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("System unmet demand", f'{format_number(float(summary.get("average_annual_system_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Reserve-caused shortfall", f'{format_number(float(summary.get("average_annual_operating_reserve_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Overflow", f'{format_number(float(summary.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("First-flush loss", f'{format_number(float(summary.get("average_annual_first_flush_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Treatment loss", f'{format_number(float(summary.get("average_annual_treatment_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
+        ("Financial result", summary_financial),
+    ]
+    executive_card_rows[2:2] = _precipitation_normal_summary_rows(report)
     executive_cards = "".join(
         f'<div class="metric"><span>{escape(label)}</span><strong>{escape(value)}</strong></div>'
-        for label, value in (
-            (
-                "Average annual precipitation",
-                f"{format_number(float(report['average_annual_precipitation']))} {report['precipitation_unit']}",
-            ),
-            ("Precipitation basis", report["precipitation_basis"]),
-            ("Selected tank", f'{format_number(float(report["selected_tank_size"]), max_decimal_places=0)} {report["volume_unit"]}'),
-            ("Reliability", selected_text),
-            ("Average annual supply", f'{format_number(float(summary.get("average_annual_supply", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("Municipal makeup", f'{format_number(float(summary.get("average_annual_municipal_makeup", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("System unmet demand", f'{format_number(float(summary.get("average_annual_system_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("Reserve-caused shortfall", f'{format_number(float(summary.get("average_annual_operating_reserve_unmet", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("Overflow", f'{format_number(float(summary.get("average_annual_overflow", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("First-flush loss", f'{format_number(float(summary.get("average_annual_first_flush_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("Treatment loss", f'{format_number(float(summary.get("average_annual_treatment_loss", 0.0)), max_decimal_places=0)} {report["volume_unit"]}/year'),
-            ("Financial result", summary_financial),
-        )
+        for label, value in executive_card_rows
     )
 
     candidate_columns = (
@@ -1486,11 +1552,12 @@ main {{ width:100%; min-width:0; background:var(--paper); box-shadow:0 12px 36px
 header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
 .eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
 h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
+.report-group-heading {{ padding:22px 52px; border-bottom:1px solid var(--line); background:#edf6f2; }} .report-group-heading h2 {{ margin:0; font-size:24px; }} .report-group-toggle {{ display:flex; width:100%; align-items:center; justify-content:space-between; gap:16px; padding:0; border:0; background:transparent; color:var(--green); font:inherit; font-weight:700; text-align:left; cursor:pointer; }} .report-group-toggle::after {{ content:""; flex:0 0 auto; width:10px; height:10px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg); transition:transform .15s ease; }} .report-group-toggle[aria-expanded="false"]::after {{ transform:rotate(-45deg); }} .report-group-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:6px; }} .report-group-content[hidden] {{ display:none; }}
 main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
-.fact {{ padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ margin:3px 0 0; }}
+.fact {{ min-width:0; padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ min-width:0; margin:3px 0 0; overflow-wrap:anywhere; }}
 .location-map {{ height:230px; margin-top:20px; border:1px solid var(--line); border-radius:6px; }} .map-star {{ width:24px!important; height:24px!important; margin:-12px 0 0 -12px!important; background:transparent; border:0; font-size:25px; line-height:24px; text-align:center; text-shadow:0 1px 2px #fff,0 0 2px #fff; }} .map-legend {{ margin-top:7px; color:var(--muted); font-size:12px; }} .map-legend span {{ margin-left:12px; font-size:17px; }} .map-legend span:first-child {{ margin-left:0; }} .project-star {{ color:#1565c0; }} .station-star {{ color:#d71920; }}
-.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
+.toc {{ position:sticky; top:20px; max-height:calc(100vh - 40px); overflow:auto; background:var(--paper); border-top:5px solid var(--green); box-shadow:0 8px 24px rgba(23,36,43,.09); }} .toc-toggle {{ display:block; width:100%; padding:9px 12px; border:0; border-bottom:1px solid var(--line); background:#edf6f2; color:var(--green); font:700 12px/1.2 Arial,Helvetica,sans-serif; text-align:left; cursor:pointer; }} .toc-toggle:hover {{ background:#e2f0ea; }} .toc-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-3px; }} .toc-inner {{ padding:16px 18px 20px; }} .toc h2 {{ margin:0 0 10px; font-size:16px; }} .toc ul {{ margin:0; padding:0; list-style:none; }} .toc li {{ border-bottom:1px solid var(--line); }} .toc .toc-group {{ padding:10px 4px 4px; }} .toc-group-label {{ display:block; margin-bottom:3px; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.06em; text-transform:uppercase; }} .toc .toc-group ul {{ padding-left:8px; }} .toc .toc-group li {{ border-bottom:0; }} .toc a {{ display:block; padding:8px 4px; color:var(--blue); font-size:13px; font-weight:700; line-height:1.3; text-decoration:none; border-left:3px solid transparent; }} .toc a:hover,.toc a:focus-visible {{ color:var(--green); border-left-color:var(--green); padding-left:9px; }} .toc a.active {{ color:var(--green); border-left-color:var(--green); background:#edf6f2; padding-left:9px; }} .report-shell.toc-collapsed {{ grid-template-columns:44px minmax(0,1040px); }} .toc-collapsed .toc {{ overflow:hidden; }} .toc-collapsed .toc-inner {{ display:none; }} .toc-collapsed .toc-toggle {{ height:120px; padding:8px 5px; text-align:center; writing-mode:vertical-rl; transform:rotate(180deg); }} .notes-text {{ margin:0; white-space:pre-wrap; }}
 table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font-size:12px; text-align:left; text-transform:uppercase; }} th,td {{ padding:11px 12px; border-bottom:1px solid var(--line); }} th:nth-child(n+2),td:nth-child(n+2) {{ text-align:right; }}
 .metric-grid {{ display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }} .metric {{ min-width:0; padding:16px; border:1px solid var(--line); border-radius:6px; background:#f8fbfa; }} .metric span {{ display:block; color:var(--muted); font-size:11px; font-weight:700; letter-spacing:.04em; text-transform:uppercase; }} .metric strong {{ display:block; margin-top:5px; font-size:17px; overflow-wrap:anywhere; }}
 .table-scroll {{ overflow-x:auto; }} .table-scroll table {{ min-width:1040px; }} .selected-row {{ background:#e8f4ef; font-weight:700; }} .sort-button {{ width:100%; padding:0; border:0; background:transparent; color:inherit; font:inherit; text-align:inherit; text-transform:inherit; cursor:pointer; }} .sort-button::after {{ content:' \2195'; color:#93a1a7; }} .notice {{ padding:10px 12px; border-left:4px solid #d17a00; background:#fff7e8; }} .balance-grid {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }} .balance-grid h3 {{ margin:0 0 8px; font-size:16px; }}
@@ -1506,8 +1573,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
-@media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:relative; top:auto; max-height:none; box-shadow:none; border-bottom:1px solid var(--line); }} .toc-inner {{ padding:18px 22px; }} .toc ul {{ columns:2; column-gap:28px; }} .toc-collapsed .toc-toggle {{ height:auto; writing-mode:horizontal-tb; transform:none; text-align:left; }} main {{ box-shadow:none; }} }}
-@media (max-width:700px) {{ .toc ul {{ columns:1; }} header,main section {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
+@media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:sticky; top:0; z-index:100; max-height:100vh; overflow:auto; box-shadow:0 4px 14px rgba(23,36,43,.12); border-bottom:1px solid var(--line); }} .toc-toggle {{ position:sticky; top:0; z-index:1; }} .toc-inner {{ padding:18px 22px; }} .toc-inner > ul {{ columns:2; column-gap:28px; }} .toc-group {{ break-inside:avoid; }} .toc-collapsed .toc-toggle {{ height:40px; writing-mode:horizontal-tb; transform:none; text-align:left; }} main section {{ scroll-margin-top:52px; }} main {{ box-shadow:none; }} }}
+@media (max-width:700px) {{ .toc-inner > ul {{ columns:1; }} header,main section,.report-group-heading {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @page {{ size:A4; margin:14mm 12mm 18mm; @bottom-center {{ content:"Page " counter(page) " of " counter(pages); color:#64747c; font:9pt Arial,Helvetica,sans-serif; }} }}
 @media print {{
   body {{ background:#fff; font-size:9.5pt; }}
@@ -1515,6 +1582,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
   .toc {{ display:none; }}
   main {{ width:100%; margin:0; box-shadow:none; }}
   header {{ padding:22px 26px 20px; }}
+  .report-group-heading {{ padding:14px 26px; }}
+  .report-group-content[hidden] {{ display:block!important; }}
   main section {{ padding:18px 26px; }}
   section {{ break-inside:auto; }}
   h1,h2,h3 {{ break-after:avoid; }}
@@ -1530,27 +1599,40 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
   footer {{ padding:14px 26px; }}
 }}
 </style></head><body><div class="report-shell">
-<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li><li><a href="#rainfall-quality">Rainfall quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li><li><a href="#first-flush-summary">First-flush diversion</a></li><li><a href="#analysis-provenance">Analysis provenance</a></li><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}</ul></div></nav>
+<nav class="toc" aria-label="Table of contents"><button id="toc-toggle" class="toc-toggle" type="button" aria-expanded="true" aria-controls="toc-links">Hide contents</button><div id="toc-links" class="toc-inner"><h2>Table of contents</h2><ul><li class="toc-group"><span class="toc-group-label">Project overview</span><ul><li><a href="#project-information">Project information</a></li><li><a href="#executive-summary">Executive summary</a></li><li><a href="#notes">Notes</a></li><li><a href="#design-recommendations">Design recommendations</a></li></ul></li><li class="toc-group"><span class="toc-group-label">Precipitation report</span><ul><li><a href="#rainfall-volume-summary">Rainfall volume summary</a></li><li><a href="#rainfall-quality">Rainfall data quality</a></li><li><a href="#yearly-rainfall">Yearly rainfall</a></li><li><a href="#rainfall-events">Rainfall events</a></li></ul></li><li class="toc-group"><span class="toc-group-label">System design and performance</span><ul><li><a href="#surface-area-summary">Surface area summary</a></li><li><a href="#tank-summary">Tank summary</a></li><li><a href="#candidate-performance">Candidate performance</a></li><li><a href="#water-balance">Water balance</a></li>{'<li><a href="#system-visualization">System visualization</a></li>' if report.get('include_system_visualization') else ''}<li><a href="#first-flush-summary">First-flush diversion</a></li></ul></li><li class="toc-group"><span class="toc-group-label">Demand and financial analysis</span><ul><li><a href="#demand-summary">Demand summary</a></li><li><a href="#end-use-performance">End-use performance</a></li><li><a href="#financial-analysis">Financial analysis</a></li></ul></li><li class="toc-group"><span class="toc-group-label">Reliability analysis</span><ul><li><a href="#reliability-curve">Reliability curve</a></li><li><a href="#yearly-demand-reliability">Yearly demand reliability</a></li><li><a href="#tank-level-distribution">Tank level distribution</a></li>{multitank_toc_html}<li><a href="#analysis-provenance">Analysis provenance</a></li></ul></li></ul></div></nav>
 <main>
 <header><div class="eyebrow">Rainwater harvesting analysis</div><h1>{escape(metadata['project_name'])}</h1><p>{escape(report_title)}</p>{author_html}</header>
+<div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="project-overview-content">Project overview</button></h2></div>
+<div id="project-overview-content" class="report-group-content">
 <section id="project-information"><h2>Project information</h2><dl>{info_rows}</dl>{project_location_map_html}</section>
 <section id="executive-summary"><h2>Executive design summary</h2><div class="metric-grid">{executive_cards}</div></section>
 <section id="notes"><h2>Notes</h2><p class="notes-text">{notes_html}</p></section>
 <section id="design-recommendations"><h2>Design recommendations and review conditions</h2><p>{escape(recommendation_assumptions)}</p><p>These are decision aids based on the simulated candidates and stated assumptions, not a universal optimum.</p><div class="table-scroll"><table><thead><tr><th>Decision aid</th><th>Tank size</th><th>Reliability</th><th>Basis and tradeoff</th></tr></thead><tbody>{recommendation_rows}</tbody></table></div>{warnings_section}</section>
-<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {format_number(float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))))} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {format_number(int(report.get('first_flush_event_count', 0)), max_decimal_places=0)}. Diverted volume: {format_number(float(report.get('first_flush_loss', 0.0)), max_decimal_places=1)} {escape(report['volume_unit'])}.</p></section>
+</div>
+<div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="precipitation-report-content">Precipitation report</button></h2></div>
+<div id="precipitation-report-content" class="report-group-content">
 <section id="rainfall-volume-summary"><h2>Rainfall volume summary</h2><p>Average annual volumes are calculated from the simulated calendar-year totals. Total average rain is gross runoff after surface runoff coefficients and before first flush. Total usable average rain is net collected volume after first-flush diversion.</p><table><thead><tr><th>Average annual volume</th><th>Value</th></tr></thead><tbody>{rainfall_volume_rows}</tbody></table></section>
+<section id="rainfall-quality"><h2>Rainfall quality and completeness</h2><dl>{rainfall_quality_rows}</dl><h3>Missing periods</h3><p>Up to 20 missing periods are shown, including partial-year boundary periods.</p><table><thead><tr><th>Start</th><th>End</th><th>Days</th></tr></thead><tbody>{missing_period_rows}</tbody></table></section>
+<section id="yearly-rainfall"><h2>Yearly rainfall summary</h2><div class="table-scroll"><table><thead><tr><th>Year</th><th>Observed days</th><th>Missing days</th><th>Completeness</th><th>Precipitation ({escape(report['precipitation_unit'])})</th><th>Wet days</th><th>Status</th></tr></thead><tbody>{yearly_rainfall_rows}</tbody></table></div></section>
+<section id="rainfall-events"><h2>Rainfall-event summary</h2><p>{format_number(int(event_summary.get('event_count', 0)), max_decimal_places=0)} event(s) were identified using an antecedent dry threshold of {format_number(float(event_summary.get('antecedent_dry_days', 1.0)))} day(s). Average event precipitation: {format_number(float(event_summary.get('average_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}; largest event: {format_number(float(event_summary.get('largest_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}. The table lists up to the 10 largest events.</p><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Duration (days)</th><th>Wet days</th><th>Precipitation ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{rainfall_event_rows}</tbody></table></div></section>
+</div>
+<div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="system-design-content">System design and performance</button></h2></div>
+<div id="system-design-content" class="report-group-content">
+<section id="surface-area-summary"><h2>Surface area summary</h2><table><thead><tr><th>Surface</th><th>Area ({escape(report['area_unit'])})</th><th>Runoff coefficient</th><th>First flush ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{surface_rows}</tbody></table><p>First-flush event dry-period threshold: {format_number(float(report.get('first_flush_antecedent_dry_value', report.get('first_flush_antecedent_dry_days', 1.0))))} {escape(str(report.get('first_flush_antecedent_dry_unit', 'days')))}. Events: {format_number(int(report.get('first_flush_event_count', 0)), max_decimal_places=0)}. Diverted volume: {format_number(float(report.get('first_flush_loss', 0.0)), max_decimal_places=1)} {escape(report['volume_unit'])}.</p></section>
 <section id="tank-summary"><h2>Tank summary</h2><p>Minimum operating volumes remain physically stored but are unavailable to normal demand and pump transfers. Overflow is based on total physical capacity.</p><table><thead><tr><th>Tank property</th><th>Value</th></tr></thead><tbody>{tank_summary_rows}</tbody></table></section>
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
 {system_visualization_html}
+<section id="first-flush-summary"><h2>First-flush diversion summary</h2><p>Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.</p><h3>Yearly totals</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Events started</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_yearly_rows}</tbody></table></div><h3>Rainfall-event totals</h3><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Wet timesteps</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_event_rows}</tbody></table></div></section>
+</div>
+<div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="demand-financial-content">Demand and financial analysis</button></h2></div>
+<div id="demand-financial-content" class="report-group-content">
 <section id="demand-summary"><h2>Demand summary</h2><table><thead><tr><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th><th>Month</th><th>Demand ({escape(report['volume_unit'])}/day)</th><th>Demand ({escape(report['volume_unit'])}/month)</th></tr></thead><tbody>{demand_rows}<tr class="demand-rule"><td colspan="6"></td></tr><tr class="demand-total"><td colspan="5">Total Annual Demand</td><td>{format_number(float(report['total_annual_demand']), max_decimal_places=0)} {escape(report['volume_unit'])}</td></tr></tbody></table></section>
 <section id="end-use-performance"><h2>End-use demand and savings</h2><p>Rainwater supply is allocated proportionally among the demand objects active on each simulated day. Sewer savings follow each object's eligibility setting; migrated legacy objects use the legacy aggregate percentage.</p><div class="table-scroll"><table><thead><tr><th>End use</th><th>Type</th><th>Schedule</th><th>Sewer basis</th><th>Demand ({escape(report['volume_unit'])}/year)</th><th>Supply ({escape(report['volume_unit'])}/year)</th><th>Demand met</th><th>Water savings/year</th><th>Sewer savings/year</th></tr></thead><tbody>{end_use_rows}</tbody></table></div></section>
 <section id="financial-analysis"><h2>Financial assumptions and results</h2>{financial_notice}<p>{escape(financial.get('methodology', 'Discounted lifecycle cash-flow estimate.'))}</p><table><thead><tr><th>Item</th><th>Value</th></tr></thead><tbody>{financial_rows}</tbody></table><h3>Annual lifecycle cash flow</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Nominal net cash flow</th><th>Discounted cash flow</th><th>Cumulative discounted cash flow</th></tr></thead><tbody>{cash_flow_rows_html}</tbody></table></div></section>
-<section id="rainfall-quality"><h2>Rainfall quality and completeness</h2><dl>{rainfall_quality_rows}</dl><h3>Missing periods</h3><p>Up to 20 missing periods are shown, including partial-year boundary periods.</p><table><thead><tr><th>Start</th><th>End</th><th>Days</th></tr></thead><tbody>{missing_period_rows}</tbody></table></section>
-<section id="yearly-rainfall"><h2>Yearly rainfall summary</h2><div class="table-scroll"><table><thead><tr><th>Year</th><th>Observed days</th><th>Missing days</th><th>Completeness</th><th>Precipitation ({escape(report['precipitation_unit'])})</th><th>Wet days</th><th>Status</th></tr></thead><tbody>{yearly_rainfall_rows}</tbody></table></div></section>
-<section id="rainfall-events"><h2>Rainfall-event summary</h2><p>{format_number(int(event_summary.get('event_count', 0)), max_decimal_places=0)} event(s) were identified using an antecedent dry threshold of {format_number(float(event_summary.get('antecedent_dry_days', 1.0)))} day(s). Average event precipitation: {format_number(float(event_summary.get('average_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}; largest event: {format_number(float(event_summary.get('largest_event_precipitation', 0.0)), max_decimal_places=3)} {escape(report['precipitation_unit'])}. The table lists up to the 10 largest events.</p><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Duration (days)</th><th>Wet days</th><th>Precipitation ({escape(report['precipitation_unit'])})</th></tr></thead><tbody>{rainfall_event_rows}</tbody></table></div></section>
-<section id="first-flush-summary"><h2>First-flush diversion summary</h2><p>Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.</p><h3>Yearly totals</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Events started</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_yearly_rows}</tbody></table></div><h3>Rainfall-event totals</h3><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Wet timesteps</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_event_rows}</tbody></table></div></section>
-<section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
+</div>
+<div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="reliability-analysis-content">Reliability analysis</button></h2></div>
+<div id="reliability-analysis-content" class="report-group-content">
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
 <g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
@@ -1567,6 +1649,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days</text>
 </svg></div><div class="table-scroll"><table class="chart-data"><caption>Tank level distribution data</caption><thead><tr><th>Tank level range ({escape(report['volume_unit'])})</th><th>Days</th></tr></thead><tbody>{distribution_data_rows}</tbody></table></div></section>
 {multitank_html}
+<section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
+</div>
 <footer>Generated by RWH Calculator at {escape(provenance.get('generated_at', metadata.get('date', 'Not available')))}</footer>
 </main></div><div id="chart-tooltip" class="chart-tooltip" role="tooltip"></div>
 <script>
@@ -1581,7 +1665,32 @@ function setTocCollapsed(collapsed){{
 let storedTocState='0';try{{storedTocState=sessionStorage.getItem('rwh-report-toc-collapsed')||'0';}}catch(_error){{}}
 setTocCollapsed(storedTocState==='1');
 tocToggle.addEventListener('click',()=>setTocCollapsed(!reportShell.classList.contains('toc-collapsed')));
+const narrowTocQuery=window.matchMedia('(max-width:900px)');
+document.addEventListener('click',(event)=>{{
+  if(!narrowTocQuery.matches||reportShell.classList.contains('toc-collapsed'))return;
+  if(!document.querySelector('.toc').contains(event.target))setTocCollapsed(true);
+}});
 const tocLinks=[...document.querySelectorAll('.toc a[href^="#"]')];
+const reportGroupToggles=[...document.querySelectorAll('.report-group-toggle')];
+function setReportGroupExpanded(button,expanded,persist=true){{
+  const content=document.getElementById(button.getAttribute('aria-controls'));
+  if(!content)return;
+  button.setAttribute('aria-expanded',String(expanded));
+  content.hidden=!expanded;
+  if(persist){{try{{sessionStorage.setItem('rwh-report-group-'+content.id,expanded?'1':'0');}}catch(_error){{}}}}
+}}
+reportGroupToggles.forEach((button)=>{{
+  const contentId=button.getAttribute('aria-controls');let storedState='1';
+  try{{storedState=sessionStorage.getItem('rwh-report-group-'+contentId)||'1';}}catch(_error){{}}
+  setReportGroupExpanded(button,storedState!=='0',false);
+  button.addEventListener('click',()=>setReportGroupExpanded(button,button.getAttribute('aria-expanded')!=='true'));
+}});
+tocLinks.forEach((link)=>link.addEventListener('click',()=>{{
+  const target=document.querySelector(link.getAttribute('href'));if(!target)return;
+  const content=target.closest('.report-group-content');if(!content||!content.hidden)return;
+  const button=document.querySelector('.report-group-toggle[aria-controls="'+content.id+'"]');
+  if(button)setReportGroupExpanded(button,true);
+}}));
 const tocTargets=tocLinks.map((link)=>document.querySelector(link.getAttribute('href'))).filter(Boolean);
 if('IntersectionObserver' in window){{
   const tocObserver=new IntersectionObserver((entries)=>{{

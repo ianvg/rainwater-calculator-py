@@ -118,6 +118,18 @@ def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     config.report_sections = {"notes": False, "financial_analysis": True}
     config.report_include_system_visualization = True
     config.report_include_multitank_charts = True
+    config.reporting_precipitation_normal = {
+        "station_id": "USW00013873",
+        "name": "ATHENS BEN EPPS AP",
+        "period": "1991-2020",
+        "latitude": 33.948,
+        "longitude": -83.327,
+        "annual_precipitation_inches": 48.1,
+        "winter_precipitation_inches": 12.0,
+        "spring_precipitation_inches": 13.0,
+        "summer_precipitation_inches": 12.1,
+        "autumn_precipitation_inches": 11.0,
+    }
 
     store.save_project(config)
     loaded, _rainfall = store.load_project(config.name)
@@ -125,6 +137,9 @@ def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     assert loaded.report_sections == config.report_sections
     assert loaded.report_include_system_visualization is True
     assert loaded.report_include_multitank_charts is True
+    assert loaded.reporting_precipitation_normal is not None
+    assert loaded.reporting_precipitation_normal["station_id"] == "USW00013873"
+    assert loaded.reporting_precipitation_normal["annual_precipitation_inches"] == 48.1
 
 
 def test_operating_levels_round_trip_with_project(tmp_path) -> None:
