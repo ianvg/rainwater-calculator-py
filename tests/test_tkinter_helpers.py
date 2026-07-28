@@ -1,3 +1,5 @@
+import datetime as dt
+
 import pandas as pd
 import pytest
 from PIL import Image
@@ -105,6 +107,43 @@ def test_system_builder_side_panel_toggle_hides_and_restores_controls() -> None:
     ]
 
 
+def test_system_component_editor_auto_apply_debounces_and_uses_current_selection() -> None:
+    app = RainwaterTkApp.__new__(RainwaterTkApp)
+    app.system_component_auto_apply_after_id = None
+    app.system_component_editor_loaded_id = "primary"
+    app.system_builder_selected_id = "primary"
+    callbacks: dict[str, object] = {}
+    cancelled: list[str] = []
+    applied: list[str] = []
+
+    def after(_delay: int, callback: object) -> str:
+        after_id = f"after-{len(callbacks) + 1}"
+        callbacks[after_id] = callback
+        return after_id
+
+    app.after = after
+    app.after_cancel = cancelled.append
+    app.apply_system_component_name = lambda: applied.append("primary")
+
+    app._schedule_system_component_auto_apply("primary")
+    first_after_id = app.system_component_auto_apply_after_id
+    app._schedule_system_component_auto_apply("primary")
+    second_after_id = app.system_component_auto_apply_after_id
+
+    assert first_after_id is not None
+    assert second_after_id is not None
+    assert cancelled == [first_after_id]
+    callbacks[second_after_id]()
+    assert applied == ["primary"]
+    assert app.system_component_auto_apply_after_id is None
+
+    app._schedule_system_component_auto_apply("primary")
+    stale_after_id = app.system_component_auto_apply_after_id
+    app.system_builder_selected_id = "other"
+    callbacks[stale_after_id]()
+    assert applied == ["primary"]
+
+
 def test_scaled_canvas_proxy_redraws_geometry_and_type_at_target_zoom() -> None:
     class RecordingCanvas:
         def __init__(self) -> None:
@@ -197,6 +236,60 @@ class _VariableStub:
 
     def set(self, value) -> None:
         self.value = value
+
+
+def test_view_pdf_report_renders_in_background_and_opens_on_main_thread(tmp_path) -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.pdf_preview_thread = None
+    app.pdf_preview_result_queue = tkinter_app.queue.Queue()
+    app.pdf_preview_poll_after_id = None
+    app.status_var = _VariableStub("Ready")
+    app._request_report_content = lambda _label: object()
+    app._new_report_preview_directory = lambda: tmp_path
+    app._default_report_filename = lambda _suffix: "preview.pdf"
+    app._drain_execution_log_to_window = lambda: None
+    cursor_states: list[str] = []
+    app.config = lambda **kwargs: cursor_states.append(kwargs["cursor"])
+    after_callbacks: list[object] = []
+    app.after = lambda _delay, callback: after_callbacks.append(callback) or "after-1"
+    opened: list[object] = []
+    app._open_local_file = opened.append
+
+    class ExecutionLogStub:
+        def info(self, *_args, **_kwargs) -> None:
+            pass
+
+        def error(self, *_args, **_kwargs) -> None:
+            pass
+
+    app.execution_log = ExecutionLogStub()
+    worker_started = tkinter_app.threading.Event()
+    release_worker = tkinter_app.threading.Event()
+
+    def write_pdf(path, _report) -> None:
+        worker_started.set()
+        assert release_worker.wait(2)
+        path.write_bytes(b"%PDF-1.4\n")
+
+    app._write_pdf_report = write_pdf
+
+    app._view_pdf_report(legacy=False)
+
+    assert worker_started.wait(1)
+    assert app.pdf_preview_thread is not None
+    assert app.pdf_preview_thread.is_alive()
+    assert opened == []
+    assert app.status_var.get() == "Generating PDF report preview..."
+    assert after_callbacks == [app._poll_pdf_preview_results]
+
+    release_worker.set()
+    app.pdf_preview_thread.join(timeout=2)
+    app._poll_pdf_preview_results()
+
+    assert opened == [tmp_path / "preview.pdf"]
+    assert app.pdf_preview_thread is None
+    assert app.status_var.get() == "Opened PDF report preview: preview.pdf"
+    assert cursor_states == ["watch", ""]
 
 
 def test_acis_import_shows_selected_station_in_bottom_status_before_fetch(monkeypatch) -> None:
@@ -1352,6 +1445,37 @@ def test_report_surfaces_only_include_positive_areas() -> None:
     assert [row["name"] for row in rows] == ["Used roof"]
 
 
+def test_report_metadata_comes_from_project_date_location_and_demand_objects() -> None:
+    config = default_project_config()
+    config.name = "Authoritative project"
+    config.client_name = "Example Client"
+    config.author_name = "Jane Engineer"
+    config.street_address = "10 Rue de Rivoli"
+    config.city = "Paris"
+    config.state_or_province = "Ile-de-France"
+    config.postal_code = "75001"
+    config.country_code = "FRA"
+    config.demand.demand_objects = [
+        DemandObject("Toilet flushing"),
+        DemandObject("Landscape irrigation"),
+        DemandObject("Toilet flushing"),
+    ]
+    app = object.__new__(RainwaterTkApp)
+    app.config_model = config
+    app.rainfall_source_label = None
+
+    metadata = app._default_report_metadata()
+
+    assert metadata == {
+        "client_name": "Example Client",
+        "date": dt.date.today().isoformat(),
+        "location": "10 Rue de Rivoli, Paris, Ile-de-France, 75001, France",
+        "project_name": "Authoritative project",
+        "author_name": "Jane Engineer",
+        "end_uses": "Toilet flushing, Landscape irrigation",
+    }
+
+
 def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     monthly_demand = [
         {
@@ -1611,7 +1735,15 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
 
     assert '<circle class="selected-tank"' in html
     assert "RWH Calculator Report - multi-tank" in html
-    assert ".axis-label { fill:var(--muted); font-size:15px; font-weight:700; }" in html
+    assert ".axis-label { fill:#64747c; font-size:15px; font-weight:700; }" in html
+    assert ".curve { fill:none; stroke:#176b9c; stroke-width:3; }" in html
+    assert ".reliability-point { fill:#fff; stroke:#176b9c; stroke-width:3; }" in html
+    assert 'class="curve" style="fill:none;stroke:#176b9c;stroke-width:3"' in html
+    assert 'class="selected-tank" style="fill:none;stroke:#d71920;stroke-width:4"' in html
+    assert 'class="year-met" style="fill:#2e8b57"' in html
+    assert 'class="year-unmet" style="fill:#c94c4c"' in html
+    assert 'style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5"' in html
+    assert 'class="distribution-bar" style="fill:#2e8b57;stroke:#246b49;stroke-width:1"' in html
     assert "stroke:#d71920" in html
     assert "Primary tank size" in html
     assert "Executive design summary" in html

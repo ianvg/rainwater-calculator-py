@@ -59,6 +59,53 @@ REPORT_SECTION_DEFINITIONS = (
     ("yearly_demand_reliability", "Yearly demand reliability", "yearly-demand-reliability", "Yearly Demand Reliability"),
     ("tank_level_distribution", "Tank level distribution", "tank-level-distribution", "Tank Level Distribution"),
 )
+REPORT_SECTION_GROUPS = (
+    (
+        "Project overview",
+        (
+            "project_information",
+            "executive_summary",
+            "notes",
+            "design_recommendations",
+        ),
+    ),
+    (
+        "Precipitation report",
+        (
+            "rainfall_volume_summary",
+            "rainfall_quality",
+            "yearly_rainfall",
+            "rainfall_events",
+        ),
+    ),
+    (
+        "System design and performance",
+        (
+            "surface_area_summary",
+            "tank_summary",
+            "candidate_performance",
+            "water_balance",
+            "first_flush_summary",
+        ),
+    ),
+    (
+        "Demand and financial analysis",
+        (
+            "demand_summary",
+            "end_use_performance",
+            "financial_analysis",
+        ),
+    ),
+    (
+        "Reliability analysis",
+        (
+            "reliability_curve",
+            "yearly_demand_reliability",
+            "tank_level_distribution",
+            "analysis_provenance",
+        ),
+    ),
+)
 DEFAULT_REPORT_SECTIONS = {key: True for key, _label, _html_id, _title in REPORT_SECTION_DEFINITIONS}
 
 

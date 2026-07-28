@@ -1,13 +1,18 @@
 import math
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pandas as pd
 from pypdf import PdfReader
 
+import rainwater_app.html_pdf_rendering as html_pdf_rendering
 import rainwater_app.reporting as reporting
 from rainwater_app.report_service import ReportRenderingService
 from rainwater_app.defaults import default_project_config
 from rainwater_app.reporting import (
+    REPORT_SECTION_DEFINITIONS,
+    REPORT_SECTION_GROUPS,
     REPORT_SCHEMA_VERSION,
     ReportModel,
     ReportValidationError,
@@ -15,6 +20,26 @@ from rainwater_app.reporting import (
     report_average_annual_rainfall_volumes,
     report_first_flush_summaries,
 )
+
+
+def test_report_section_groups_match_html_body_organization() -> None:
+    assert [label for label, _keys in REPORT_SECTION_GROUPS] == [
+        "Project overview",
+        "Precipitation report",
+        "System design and performance",
+        "Demand and financial analysis",
+        "Reliability analysis",
+    ]
+
+    grouped_keys = [
+        key
+        for _group_label, section_keys in REPORT_SECTION_GROUPS
+        for key in section_keys
+    ]
+    definition_keys = [key for key, _label, _html_id, _title in REPORT_SECTION_DEFINITIONS]
+
+    assert len(grouped_keys) == len(set(grouped_keys))
+    assert set(grouped_keys) == set(definition_keys)
 
 
 def _minimal_report() -> dict[str, object]:
@@ -160,6 +185,10 @@ def test_html_report_groups_related_sections_in_navigation_and_body() -> None:
     assert "main section { scroll-margin-top:52px; }" in html
     assert "const narrowTocQuery=window.matchMedia('(max-width:900px)');" in html
     assert "!document.querySelector('.toc').contains(event.target)" in html
+    assert "@media (hover:hover)" in html
+    assert ".report-group-heading:hover { background:#dcece5;" in html
+    assert ".report-group-heading:focus-within { background:#dcece5;" in html
+    assert "@media (prefers-reduced-motion:reduce)" in html
 
 
 def test_html_report_wraps_long_provenance_values() -> None:
@@ -222,6 +251,37 @@ def test_report_rendering_service_writes_html_pdf_with_weasyprint(tmp_path) -> N
     assert target.read_bytes().startswith(b"%PDF")
     assert "Test" in pdf_text
     assert "Page 1 of" in pdf_text
+
+
+def test_html_pdf_uses_offline_location_diagram(monkeypatch, tmp_path) -> None:
+    report = _renderable_report()
+    report.update(
+        project_latitude=33.95,
+        project_longitude=-83.33,
+        weather_station_latitude=33.94773,
+        weather_station_longitude=-83.32736,
+        map_tile_url="https://tiles.example.test/{z}/{x}/{y}.png",
+    )
+    captured: dict[str, str] = {}
+
+    def run_stub(args, **_kwargs):
+        captured["html"] = Path(args[1]).read_text(encoding="utf-8")
+        Path(args[2]).write_bytes(b"%PDF-1.4\n")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(
+        html_pdf_rendering, "_weasyprint_executable", lambda: tmp_path / "weasyprint.exe"
+    )
+    monkeypatch.setattr(html_pdf_rendering.subprocess, "run", run_stub)
+
+    target = tmp_path / "offline-map.pdf"
+    ReportRenderingService().html_pdf(target, report)
+
+    assert "tiles.example.test" not in captured["html"]
+    assert "Offline location diagram" in captured["html"]
+    assert "Weather station" in captured["html"]
+    assert "Project location" in captured["html"]
+    assert "tiles.example.test" in ReportRenderingService().html(report)
 
 
 def test_average_annual_rainfall_volumes_reconcile_gross_first_flush_and_usable() -> None:

@@ -44,7 +44,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 15
+PROJECT_SCHEMA_VERSION = 17
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -674,6 +674,7 @@ class SQLiteStore:
 
         return ProjectConfig(
             name=payload.get("name", "Unnamed Project"),
+            client_name=payload.get("client_name", ""),
             author_name=payload.get("author_name", ""),
             notes=payload.get("notes", ""),
             street_address=payload.get("street_address", payload.get("address", "")),
@@ -777,6 +778,9 @@ class SQLiteStore:
             ),
             report_include_multitank_charts=bool(
                 payload.get("report_include_multitank_charts", False)
+            ),
+            report_include_rainfall_event_totals=bool(
+                payload.get("report_include_rainfall_event_totals", False)
             ),
         )
 

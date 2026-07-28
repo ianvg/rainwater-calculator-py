@@ -468,6 +468,7 @@ class OptimizationParameters:
 @dataclass
 class ProjectConfig:
     name: str
+    client_name: str = ""
     author_name: str = ""
     notes: str = ""
     street_address: str = ""
@@ -518,6 +519,7 @@ class ProjectConfig:
     report_sections: Dict[str, bool] = field(default_factory=dict)
     report_include_system_visualization: bool = False
     report_include_multitank_charts: bool = False
+    report_include_rainfall_event_totals: bool = False
 
     def to_dict(self) -> Dict:
         return asdict(self)

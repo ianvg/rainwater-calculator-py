@@ -911,7 +911,10 @@ def _web_mercator_pixel(
 
 
 def _build_static_location_map_html(
-    report: ReportModel, map_points: list[dict[str, object]]
+    report: ReportModel,
+    map_points: list[dict[str, object]],
+    *,
+    include_map_tiles: bool = True,
 ) -> str:
     """Build a static tile viewport without requiring a JavaScript map library."""
     if not map_points:
@@ -939,31 +942,32 @@ def _build_static_location_map_html(
     center_y = (min(value[1] for value in projected) + max(value[1] for value in projected)) / 2.0
     viewport_left = center_x - width / 2.0
     viewport_top = center_y - height / 2.0
-    tile_url = str(
-        report.get("map_tile_url", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
-    )
     tile_count = 2 ** selected_zoom
     tile_images: list[str] = []
     first_tile_x = math.floor(viewport_left / 256.0)
     last_tile_x = math.floor((viewport_left + width) / 256.0)
     first_tile_y = math.floor(viewport_top / 256.0)
     last_tile_y = math.floor((viewport_top + height) / 256.0)
-    for tile_y in range(first_tile_y, last_tile_y + 1):
-        if not 0 <= tile_y < tile_count:
-            continue
-        for tile_x in range(first_tile_x, last_tile_x + 1):
-            source = (
-                tile_url.replace("{z}", str(selected_zoom))
-                .replace("{x}", str(tile_x % tile_count))
-                .replace("{y}", str(tile_y))
-                .replace("{s}", "a")
-            )
-            x = tile_x * 256.0 - viewport_left
-            y = tile_y * 256.0 - viewport_top
-            tile_images.append(
-                f'<image href="{html.escape(source, quote=True)}" x="{x:.2f}" y="{y:.2f}" '
-                'width="256" height="256" preserveAspectRatio="none"/>'
-            )
+    if include_map_tiles:
+        tile_url = str(
+            report.get("map_tile_url", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
+        )
+        for tile_y in range(first_tile_y, last_tile_y + 1):
+            if not 0 <= tile_y < tile_count:
+                continue
+            for tile_x in range(first_tile_x, last_tile_x + 1):
+                source = (
+                    tile_url.replace("{z}", str(selected_zoom))
+                    .replace("{x}", str(tile_x % tile_count))
+                    .replace("{y}", str(tile_y))
+                    .replace("{s}", "a")
+                )
+                x = tile_x * 256.0 - viewport_left
+                y = tile_y * 256.0 - viewport_top
+                tile_images.append(
+                    f'<image href="{html.escape(source, quote=True)}" x="{x:.2f}" y="{y:.2f}" '
+                    'width="256" height="256" preserveAspectRatio="none"/>'
+                )
     markers: list[str] = []
     for point, (projected_x, projected_y) in zip(map_points, projected):
         latitude = float(point["latitude"])
@@ -978,6 +982,12 @@ def _build_static_location_map_html(
             f'<title>{label}: {latitude:.6f}, {longitude:.6f}</title></circle>'
             f'<text class="map-marker-label" x="{marker_x + 15:.2f}" y="{marker_y + 5:.2f}">{label}</text>'
         )
+    map_note = (
+        '<p class="map-note">Map data &copy; OpenStreetMap contributors. '
+        'Static map tiles require an internet connection.</p>'
+        if include_map_tiles
+        else '<p class="map-note">Offline location diagram; coordinates are listed above.</p>'
+    )
     return (
         '<div id="project-location-map" class="location-map">'
         '<svg viewBox="0 0 800 340" role="img" aria-label="Static map of project and weather-station locations">'
@@ -987,12 +997,14 @@ def _build_static_location_map_html(
         f'{"".join(tile_images)}'
         f'<g font-family="Arial,sans-serif" font-size="14" font-weight="700">{"".join(markers)}</g>'
         '</g></svg></div>'
-        '<p class="map-note">Map data &copy; OpenStreetMap contributors. Static map tiles require an internet connection.</p>'
+        f'{map_note}'
     )
 
 
 def render_html(
-    report: ReportModel | dict[str, object]
+    report: ReportModel | dict[str, object],
+    *,
+    include_map_tiles: bool = True,
 ) -> str:
     report = ReportModel.from_payload(report)
     metadata = report["metadata"]
@@ -1025,7 +1037,9 @@ def render_html(
                 "label": "Project location",
             }
         )
-    project_location_map_html = _build_static_location_map_html(report, map_points)
+    project_location_map_html = _build_static_location_map_html(
+        report, map_points, include_map_tiles=include_map_tiles
+    )
     multitank_toc_html = "".join(
         f'<li><a href="#multitank-chart-{index}">{escape(chart.get("title", f"Multitank chart {index}"))}</a></li>'
         for index, chart in enumerate(report.get("multitank_charts", []), start=1)
@@ -1068,7 +1082,8 @@ def render_html(
         for point in curve
     )
     circles = "".join(
-        f'<circle cx="{chart_x(float(point["tank_size"])):.2f}" cy="{chart_y(float(point["reliability"])):.2f}" r="4">'
+        f'<circle class="reliability-point" style="fill:#fff;stroke:#176b9c;stroke-width:3" '
+        f'cx="{chart_x(float(point["tank_size"])):.2f}" cy="{chart_y(float(point["reliability"])):.2f}" r="4">'
         f'<title>{format_number(float(point["tank_size"]), max_decimal_places=0)} {escape(report["volume_unit"])}: '
         f'{format_number(float(point["reliability"]))}% reliability</title></circle>'
         for point in curve
@@ -1078,7 +1093,8 @@ def render_html(
         selected_x = chart_x(float(report["selected_tank_size"]))
         selected_y = chart_y(float(report["selected_reliability"]))
         selected_marker = (
-            f'<circle class="selected-tank" cx="{selected_x:.2f}" cy="{selected_y:.2f}" r="10">'
+            f'<circle class="selected-tank" style="fill:none;stroke:#d71920;stroke-width:4" '
+            f'cx="{selected_x:.2f}" cy="{selected_y:.2f}" r="10">'
             f'<title>Selected tank: {format_number(float(report["selected_tank_size"]), max_decimal_places=0)} '
             f'{escape(report["volume_unit"])} at {format_number(float(report["selected_reliability"]))}% reliability</title>'
             "</circle>"
@@ -1424,17 +1440,18 @@ def render_html(
                 f"({format_number(float(row['unmet_percent']))}%)"
             )
             yearly_bars += (
-                f'<rect class="year-met" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
+                f'<rect class="year-met" style="fill:#2e8b57" x="{bar_x:.2f}" y="{yearly_baseline - met_height:.2f}" '
                 f'width="{bar_width:.2f}" height="{met_height:.2f}" data-tooltip="{escape(tooltip)}">'
                 "</rect>"
-                f'<rect class="year-unmet" x="{bar_x:.2f}" y="{yearly_top:.2f}" '
+                f'<rect class="year-unmet" style="fill:#c94c4c" x="{bar_x:.2f}" y="{yearly_top:.2f}" '
                 f'width="{bar_width:.2f}" height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}">'
                 "</rect>"
             )
             marker_x = bar_x + bar_width / 2
             marker_y = yearly_baseline - met_height
             yearly_markers += (
-                f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
+                f'<circle class="year-reliability" style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5" '
+                f'cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
                 f'data-tooltip="{int(row["year"])} tank reliability: {format_number(float(row["met_percent"]))}%"></circle>'
             )
             if index % yearly_label_step == 0 or index == len(yearly) - 1:
@@ -1447,7 +1464,8 @@ def render_html(
         average_y = yearly_baseline - yearly_plot_height * average_reliability / 100.0
         year_count = len(yearly)
         yearly_markers += (
-            f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
+            f'<circle class="year-reliability" style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5" '
+            f'cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
             f'data-tooltip="Average tank reliability over {year_count} years: {format_number(average_reliability)}%"></circle>'
         )
         yearly_labels += (
@@ -1478,7 +1496,8 @@ def render_html(
             bar_y = distribution_top + distribution_plot_height - bar_height
             range_label = f"{format_number(float(row['low']), max_decimal_places=0)}-{format_number(float(row['high']), max_decimal_places=0)}"
             distribution_bars += (
-                f'<rect class="distribution-bar" x="{bar_x:.2f}" y="{bar_y:.2f}" width="{bar_width:.2f}" '
+                f'<rect class="distribution-bar" style="fill:#2e8b57;stroke:#246b49;stroke-width:1" '
+                f'x="{bar_x:.2f}" y="{bar_y:.2f}" width="{bar_width:.2f}" '
                 f'height="{bar_height:.2f}"><title>{escape(range_label)} {escape(report["volume_unit"])}: '
                 f'{int(row["count"])} days</title></rect>'
                 f'<text x="{bar_x + bar_width / 2:.2f}" y="{distribution_top + distribution_plot_height + 22:.2f}" '
@@ -1552,7 +1571,9 @@ main {{ width:100%; min-width:0; background:var(--paper); box-shadow:0 12px 36px
 header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
 .eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
 h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
-.report-group-heading {{ padding:22px 52px; border-bottom:1px solid var(--line); background:#edf6f2; }} .report-group-heading h2 {{ margin:0; font-size:24px; }} .report-group-toggle {{ display:flex; width:100%; align-items:center; justify-content:space-between; gap:16px; padding:0; border:0; background:transparent; color:var(--green); font:inherit; font-weight:700; text-align:left; cursor:pointer; }} .report-group-toggle::after {{ content:""; flex:0 0 auto; width:10px; height:10px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg); transition:transform .15s ease; }} .report-group-toggle[aria-expanded="false"]::after {{ transform:rotate(-45deg); }} .report-group-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:6px; }} .report-group-content[hidden] {{ display:none; }}
+.report-group-heading {{ padding:22px 52px; border-bottom:1px solid var(--line); background:#edf6f2; transition:background-color .16s ease,box-shadow .16s ease,transform .16s ease; }} .report-group-heading h2 {{ margin:0; font-size:24px; }} .report-group-toggle {{ display:flex; width:100%; align-items:center; justify-content:space-between; gap:16px; padding:0; border:0; background:transparent; color:var(--green); font:inherit; font-weight:700; text-align:left; cursor:pointer; }} .report-group-toggle::after {{ content:""; flex:0 0 auto; width:10px; height:10px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg); transition:transform .15s ease; }} .report-group-toggle[aria-expanded="false"]::after {{ transform:rotate(-45deg); }} .report-group-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:6px; }} .report-group-heading:focus-within {{ background:#dcece5; box-shadow:0 4px 10px rgba(23,36,43,.16),inset 0 1px 0 rgba(255,255,255,.75); transform:translateY(-1px); }} .report-group-heading:active {{ background:#d2e6dd; box-shadow:0 1px 3px rgba(23,36,43,.18),inset 0 1px 2px rgba(23,36,43,.08); transform:translateY(0); }} .report-group-content[hidden] {{ display:none; }}
+@media (hover:hover) {{ .report-group-heading:hover {{ background:#dcece5; box-shadow:0 4px 10px rgba(23,36,43,.16),inset 0 1px 0 rgba(255,255,255,.75); transform:translateY(-1px); }} }}
+@media (prefers-reduced-motion:reduce) {{ .report-group-heading,.report-group-toggle::after {{ transition:none; }} }}
 main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
 dl {{ display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:0 40px; margin:0; }}
 .fact {{ min-width:0; padding:11px 0; border-bottom:1px solid var(--line); }} dt {{ color:var(--muted); font-size:12px; font-weight:700; text-transform:uppercase; }} dd {{ min-width:0; margin:3px 0 0; overflow-wrap:anywhere; }}
@@ -1566,13 +1587,13 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .review-warning {{ margin-top:18px; padding:14px 18px; border-left:5px solid #b34b00; background:#fff1e5; }} .review-warning h3 {{ margin:0 0 6px; }} .review-warning ul {{ margin:0; padding-left:20px; }} .review-clear {{ color:#246b49; font-weight:700; }}
 .chart-data {{ margin-top:14px; }} .chart-data caption {{ text-align:left; font-weight:700; padding:8px 0; }}
 .chart {{ overflow-x:auto; }} svg {{ display:block; width:100%; min-width:620px; height:auto; }} .grid line {{ stroke:#dce5e8; }} .grid text {{ fill:#64747c; font-size:12px; }}
-.curve {{ fill:none; stroke:var(--blue); stroke-width:3; }} circle {{ fill:var(--paper); stroke:var(--blue); stroke-width:3; }} circle:hover {{ fill:var(--blue); r:6; }}
+.curve {{ fill:none; stroke:#176b9c; stroke-width:3; }} .reliability-point {{ fill:#fff; stroke:#176b9c; stroke-width:3; }} .reliability-point:hover {{ fill:#176b9c; r:6; }}
 .selected-tank {{ fill:none; stroke:#d71920; stroke-width:4; }} .selected-tank:hover {{ fill:none; r:11; }} .swatch.primary-tank {{ background:transparent; border:2px solid #d71920; border-radius:50%; }}
 .year-met {{ fill:#2e8b57; }} .year-unmet {{ fill:#c94c4c; }} .year-met,.year-unmet,.year-reliability {{ cursor:pointer; transition:opacity .12s ease,stroke-width .12s ease; }} .year-met:hover,.year-unmet:hover {{ opacity:.78; stroke:#17242b; stroke-width:1.5; }} .year-reliability {{ fill:#f2c94c; stroke:#8a6d00; stroke-width:1.5; }} .year-reliability:hover {{ fill:#f2c94c; stroke-width:2.5; r:7; }} .chart-legend {{ display:flex; flex-wrap:wrap; gap:20px; margin:8px 0 0 72px; font-size:12px; color:var(--muted); }} .series-toggle {{ display:inline-flex; align-items:center; gap:5px; font-weight:700; cursor:pointer; }} .series-toggle input {{ accent-color:currentColor; }} .swatch {{ display:inline-block; width:11px; height:11px; margin-right:6px; vertical-align:-1px; }} .swatch.year-met {{ background:#2e8b57; }} .swatch.year-unmet {{ background:#c94c4c; }} .swatch.year-reliability {{ background:#f2c94c; border:1px solid #8a6d00; border-radius:50%; }} .chart-tooltip {{ position:fixed; display:none; z-index:1000; max-width:320px; padding:7px 9px; border:1px solid #526168; background:#fffff0; color:#17242b; font-size:12px; line-height:1.35; box-shadow:0 3px 10px rgba(0,0,0,.16); pointer-events:none; }}
 .tank-history-point {{ fill:transparent; stroke:transparent; stroke-width:1; cursor:crosshair; }} .tank-history-point:hover {{ fill:#fff; stroke:currentColor; stroke-width:2; }}
 .history-mode-controls,.history-controls,.history-range-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:8px 0; }} .history-mode-controls label {{ font-weight:700; }} .history-range-controls input[type=range] {{ width:min(280px,35vw); }}
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
-.axis-label {{ fill:var(--muted); font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
+.axis-label {{ fill:#64747c; font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:sticky; top:0; z-index:100; max-height:100vh; overflow:auto; box-shadow:0 4px 14px rgba(23,36,43,.12); border-bottom:1px solid var(--line); }} .toc-toggle {{ position:sticky; top:0; z-index:1; }} .toc-inner {{ padding:18px 22px; }} .toc-inner > ul {{ columns:2; column-gap:28px; }} .toc-group {{ break-inside:avoid; }} .toc-collapsed .toc-toggle {{ height:40px; writing-mode:horizontal-tb; transform:none; text-align:left; }} main section {{ scroll-margin-top:52px; }} main {{ box-shadow:none; }} }}
 @media (max-width:700px) {{ .toc-inner > ul {{ columns:1; }} header,main section,.report-group-heading {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @page {{ size:A4; margin:14mm 12mm 18mm; @bottom-center {{ content:"Page " counter(page) " of " counter(pages); color:#64747c; font:9pt Arial,Helvetica,sans-serif; }} }}
@@ -1582,7 +1603,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
   .toc {{ display:none; }}
   main {{ width:100%; margin:0; box-shadow:none; }}
   header {{ padding:22px 26px 20px; }}
-  .report-group-heading {{ padding:14px 26px; }}
+  .report-group-heading {{ padding:14px 26px; box-shadow:none!important; transform:none!important; }}
   .report-group-content[hidden] {{ display:block!important; }}
   main section {{ padding:18px 26px; }}
   section {{ break-inside:auto; }}
@@ -1634,7 +1655,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="reliability-analysis-content">Reliability analysis</button></h2></div>
 <div id="reliability-analysis-content" class="report-group-content">
 <section id="reliability-curve"><h2>Reliability curve</h2><div class="chart"><svg viewBox="0 0 {chart_width:.0f} {chart_height:.0f}" role="img" aria-label="Reliability versus tank size chart">
-<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" points="{polyline}"/>{circles}{selected_marker}
+<g class="grid">{y_grid}{x_ticks}</g><polyline class="curve" style="fill:none;stroke:#176b9c;stroke-width:3" points="{polyline}"/>{circles}{selected_marker}
 <text class="axis-label" x="{left + plot_width / 2:.2f}" y="{chart_height - 10:.2f}" text-anchor="middle">Tank size ({escape(report['volume_unit'])})</text>
 <text class="axis-label" transform="translate(18 {top + plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Reliability (%)</text>
 </svg></div><div class="chart-legend"><span><i class="swatch primary-tank"></i>Primary tank size</span></div><div class="table-scroll"><table class="chart-data"><caption>Reliability curve data</caption><thead><tr><th>Tank size ({escape(report['volume_unit'])})</th><th>Reliability</th></tr></thead><tbody>{reliability_data_rows}</tbody></table></div></section>
@@ -1916,13 +1937,14 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
             f"({format_number(float(row['unmet_percent']))}%)"
         )
         bars.append(
-            f'<rect class="year-met" x="{bar_x:.2f}" y="{marker_y:.2f}" width="{bar_width:.2f}" '
+            f'<rect class="year-met" style="fill:#2e8b57" x="{bar_x:.2f}" y="{marker_y:.2f}" width="{bar_width:.2f}" '
             f'height="{met_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
-            f'<rect class="year-unmet" x="{bar_x:.2f}" y="{top:.2f}" width="{bar_width:.2f}" '
+            f'<rect class="year-unmet" style="fill:#c94c4c" x="{bar_x:.2f}" y="{top:.2f}" width="{bar_width:.2f}" '
             f'height="{unmet_height:.2f}" data-tooltip="{escape(tooltip)}"></rect>'
         )
         markers.append(
-            f'<circle class="year-reliability" cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
+            f'<circle class="year-reliability" style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5" '
+            f'cx="{marker_x:.2f}" cy="{marker_y:.2f}" r="5" '
             f'data-tooltip="{int(row["year"])} tank reliability: {format_number(float(row["met_percent"]))}%"></circle>'
         )
         if index % label_step == 0 or index == len(yearly) - 1:
@@ -1935,7 +1957,8 @@ def _build_stacked_yearly_report_html(chart: dict[str, object], chart_index: int
     average_x = left + (len(yearly) + 0.5) * slot_width
     average_y = baseline - plot_height * average / 100.0
     markers.append(
-        f'<circle class="year-reliability" cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
+        f'<circle class="year-reliability" style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5" '
+        f'cx="{average_x:.2f}" cy="{average_y:.2f}" r="6" '
         f'data-tooltip="Average tank reliability over {year_count_text}: {format_number(average)}%"></circle>'
     )
     labels.append(

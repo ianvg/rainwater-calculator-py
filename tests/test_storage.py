@@ -24,6 +24,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
 
     assert config.country_code == "USA"
     assert config.system_type == "Direct system"
+    assert config.client_name == ""
     assert config.author_name == ""
     assert config.notes == ""
     assert config.street_address == ""
@@ -817,6 +818,14 @@ def test_project_author_name_is_loaded() -> None:
 
     assert config.author_name == "Jane Engineer"
     assert config.notes == "First line\nSecond line"
+
+
+def test_project_client_name_is_loaded() -> None:
+    config = SQLiteStore._config_from_dict(
+        {"name": "Client project", "client_name": "Example Client"}
+    )
+
+    assert config.client_name == "Example Client"
 
 
 def test_acis_precipitation_field_is_loaded() -> None:

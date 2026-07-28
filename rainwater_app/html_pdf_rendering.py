@@ -19,7 +19,11 @@ def render_html_pdf(
     """Render the validated HTML report to an atomically replaced PDF."""
     pdf_path = Path(pdf_path)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
-    document = render_html(ReportModel.from_payload(report))
+    # PDF creation must be deterministic and must not wait on remote map servers.
+    # The offline diagram retains the project/station markers and coordinates.
+    document = render_html(
+        ReportModel.from_payload(report), include_map_tiles=False
+    )
     temporary_pdf: Path | None = None
     temporary_html: Path | None = None
     try:

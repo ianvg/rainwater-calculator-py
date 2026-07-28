@@ -65,7 +65,7 @@ When generating a report, review or enter:
 
 The PDF, LaTeX, and HTML outputs are generated from the same report content so their values and units remain aligned.
 
-Before previewing or exporting, open **Results > Report generation**. Select the core sections to include, or use **Select all**, **Clear all**, and **Restore defaults** for quick changes. The report cover is always included, and each format builds its table of contents from the selected sections. Section choices are saved with the project and apply to both preview and export.
+Before previewing or exporting, open **Results > Report generation**. Select the core sections to include; the choices are grouped under the same Project overview, Precipitation report, System design and performance, Demand and financial analysis, and Reliability analysis headings used in the HTML report body. Use **Select all**, **Clear all**, and **Restore defaults** for quick changes. The report cover is always included, and each format builds its table of contents from the selected sections. Section choices are saved with the project and apply to both preview and export.
 
 Use **Supplemental visuals** on the same sub-tab to include the system-type visualization and, when comparison results are available, the multi-tank comparison charts.
 

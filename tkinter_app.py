@@ -189,6 +189,7 @@ from rainwater_app.recommendations import (
 from rainwater_app.reporting import (
     DEFAULT_REPORT_SECTIONS,
     REPORT_SECTION_DEFINITIONS,
+    REPORT_SECTION_GROUPS,
     REPORT_SCHEMA_VERSION,
     ReportModel,
     atomic_write_text,
@@ -338,7 +339,7 @@ def _two_line_heading_text(
     return f"{' '.join(words[:split_at])}\n{' '.join(words[split_at:])}"
 
 PROJECT_FORM_VARIABLES = (
-    "project_name_var", "author_name_var", "street_address_var", "city_var",
+    "project_name_var", "client_name_var", "author_name_var", "street_address_var", "city_var",
     "state_or_province_var", "postal_code_var", "latitude_var", "longitude_var",
     "unit_var", "country_var", "canadian_precip_var", "system_type_var",
     "simple_daily_var", "daily_demand_days_var", "hourly_schedule_enabled_var",
@@ -1565,6 +1566,7 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_resize_state: tuple[object, ...] | None = None
 
         self.project_name_var = tk.StringVar(value=self.config_model.name)
+        self.client_name_var = tk.StringVar(value=self.config_model.client_name)
         self.author_name_var = tk.StringVar(value=self.config_model.author_name)
         self.street_address_var = tk.StringVar(value=self.config_model.street_address)
         self.city_var = tk.StringVar(value=self.config_model.city)
@@ -1786,6 +1788,9 @@ class RainwaterTkApp(tk.Tk):
         self.report_include_multitank_charts_var = tk.BooleanVar(
             value=self.config_model.report_include_multitank_charts
         )
+        self.report_include_rainfall_event_totals_var = tk.BooleanVar(
+            value=self.config_model.report_include_rainfall_event_totals
+        )
         self.tank_chart_year_var = tk.StringVar(value="--")
         self.tank_chart_year: int | None = None
         self.tank_chart_range_mode_var = tk.StringVar(value="year")
@@ -1828,6 +1833,9 @@ class RainwaterTkApp(tk.Tk):
         self.unit_conversion_form_snapshot: tuple[str, ...] | None = None
         self.report_preview_directories: list[tempfile.TemporaryDirectory] = []
         self.report_preview_servers: list[http.server.ThreadingHTTPServer] = []
+        self.pdf_preview_thread: threading.Thread | None = None
+        self.pdf_preview_result_queue: queue.Queue[tuple[str, object]] = queue.Queue()
+        self.pdf_preview_poll_after_id: str | None = None
         self.location_result_queue: queue.Queue = queue.Queue()
         self.location_poll_after_id: str | None = None
         self.station_lookup_queue: queue.Queue = queue.Queue()
@@ -2753,9 +2761,13 @@ class RainwaterTkApp(tk.Tk):
         self.country_combo.configure(postcommand=self._bind_country_combo_dropdown)
         self.country_combo.bind("<KeyPress>", self._select_country_by_typed_prefix)
         self.country_combo.bind("<<ComboboxSelected>>", self._country_changed)
-        ttk.Label(project_frame, text="Produced by / author").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        ttk.Entry(project_frame, textvariable=self.author_name_var).grid(
+        ttk.Label(project_frame, text="Client name").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.client_name_var).grid(
             row=1, column=1, columnspan=5, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Label(project_frame, text="Produced by / author").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(project_frame, textvariable=self.author_name_var).grid(
+            row=2, column=1, columnspan=5, sticky="ew", padx=(8, 0), pady=(8, 0)
         )
 
         notes_frame = ttk.LabelFrame(self.inputs_tab, text="Notes", padding=10)
@@ -3440,13 +3452,9 @@ class RainwaterTkApp(tk.Tk):
         self.system_component_editor_drafts: dict[str, dict[str, object]] = {}
         self.system_component_editor_loading = False
         self.system_component_graph_step_autosizing = False
+        self.system_component_auto_apply_after_id: str | None = None
         self.system_component_editor_model = self.config_model
         self.system_component_validation_var = tk.StringVar()
-        self.apply_system_component_name_button = ttk.Button(
-            self.system_component_parameters_editor,
-            text="Apply changes",
-            command=self.apply_system_component_name,
-        )
         self.system_parameter_frames: dict[str, ttk.Frame] = {}
         editor_vars = self.system_component_parameter_vars
         parameter_specs = {
@@ -3627,9 +3635,6 @@ class RainwaterTkApp(tk.Tk):
             wraplength=220,
             justify="left",
         ).grid(row=2, column=0, columnspan=2, sticky="ew", pady=(6, 0))
-        self.apply_system_component_name_button.grid(
-            row=3, column=0, columnspan=2, sticky="e", pady=(8, 0)
-        )
         self.system_end_uses_editor = ttk.LabelFrame(
             system_edit, text="Demand objects", padding=6
         )
@@ -6687,7 +6692,7 @@ class RainwaterTkApp(tk.Tk):
     def _update_system_component_editor_state(self, *, restored: bool = False) -> None:
         item = self._system_layout_item(self.system_component_editor_loaded_id or "")
         if item is None:
-            self.apply_system_component_name_button.state(["disabled"])
+            self._cancel_system_component_auto_apply()
             self.system_component_validation_var.set("")
             return
         values = self._system_component_editor_snapshot(item)
@@ -6700,19 +6705,50 @@ class RainwaterTkApp(tk.Tk):
         component_type_key = str(item.get("component_type", ""))
         errors = _system_object_editor_validation(component_type_key, values)
         self.system_component_validation_var.set("\n".join(errors))
-        self.apply_system_component_name_button.state(
-            ["!disabled"] if dirty and not errors else ["disabled"]
-        )
+        if dirty and not errors:
+            self._schedule_system_component_auto_apply(component_id)
+        else:
+            self._cancel_system_component_auto_apply()
         component_type = self._system_component_templates().get(
             component_type_key, component_type_key or "System object"
         )
         if errors:
             suffix = " — fix the validation message below."
         elif dirty:
-            suffix = " — unapplied changes restored." if restored else " — unapplied changes."
+            suffix = (
+                " — restored changes will apply automatically."
+                if restored
+                else " — changes will apply automatically."
+            )
         else:
             suffix = ""
         self.system_component_edit_status_var.set(f"Object type: {component_type}{suffix}")
+
+    def _cancel_system_component_auto_apply(self) -> None:
+        after_id = getattr(self, "system_component_auto_apply_after_id", None)
+        if after_id is None:
+            return
+        self.system_component_auto_apply_after_id = None
+        try:
+            self.after_cancel(after_id)
+        except tk.TclError:
+            pass
+
+    def _schedule_system_component_auto_apply(self, component_id: str) -> None:
+        self._cancel_system_component_auto_apply()
+        self.system_component_auto_apply_after_id = self.after(
+            350,
+            lambda: self._auto_apply_system_component_changes(component_id),
+        )
+
+    def _auto_apply_system_component_changes(self, component_id: str) -> None:
+        self.system_component_auto_apply_after_id = None
+        if (
+            self.system_component_editor_loaded_id != component_id
+            or self.system_builder_selected_id != component_id
+        ):
+            return
+        self.apply_system_component_name()
 
     def _system_component_editor_field_changed(self, *_args: object) -> None:
         if self.system_component_editor_loading or self.system_component_editor_loaded_id is None:
@@ -6765,7 +6801,7 @@ class RainwaterTkApp(tk.Tk):
             self.system_component_name_var.set("")
             self.system_component_editor_loading = False
             self.system_component_name_entry.state(["disabled"])
-            self.apply_system_component_name_button.state(["disabled"])
+            self._cancel_system_component_auto_apply()
             self.system_component_edit_status_var.set("Select a system object to edit.")
             self.system_component_validation_var.set("")
             self.system_component_parameters_editor.grid_remove()
@@ -7003,14 +7039,13 @@ class RainwaterTkApp(tk.Tk):
         component_id = str(item.get("id", ""))
         self.system_component_editor_drafts.pop(component_id, None)
         self.system_component_editor_baseline = dict(values)
-        self.apply_system_component_name_button.state(["disabled"])
         self.system_component_validation_var.set("")
         self._render_system_builder()
         component_label = self._system_component_templates().get(component_type, component_type)
         self.system_component_edit_status_var.set(
-            f"Object type: {component_label} - changes applied."
+            f"Object type: {component_label} - changes applied automatically."
         )
-        self.status_var.set(f"Applied changes to {item['name']}")
+        self.status_var.set(f"Updated {item['name']}")
 
     def _system_builder_view_changed(self) -> None:
         view = self._normalized_system_builder_view(self.system_builder_view_var.get())
@@ -9734,16 +9769,27 @@ class RainwaterTkApp(tk.Tk):
         sections.grid(row=3, column=0, sticky="ew")
         sections.columnconfigure(0, weight=1)
         sections.columnconfigure(1, weight=1)
-        split_at = (len(REPORT_SECTION_DEFINITIONS) + 1) // 2
-        for index, (key, label, _html_id, _title) in enumerate(REPORT_SECTION_DEFINITIONS):
-            column = 0 if index < split_at else 1
-            row = index if column == 0 else index - split_at
-            ttk.Checkbutton(
-                sections,
-                text=label,
-                variable=self.report_section_vars[key],
-                command=self._apply_report_options_to_model,
-            ).grid(row=row, column=column, sticky="w", padx=(0, 30), pady=3)
+        section_labels = {
+            key: label
+            for key, label, _html_id, _title in REPORT_SECTION_DEFINITIONS
+        }
+        for group_index, (group_label, section_keys) in enumerate(REPORT_SECTION_GROUPS):
+            group = ttk.LabelFrame(sections, text=group_label, padding=(10, 7))
+            group.grid(
+                row=group_index // 2,
+                column=group_index % 2,
+                sticky="nsew",
+                padx=(0, 8) if group_index % 2 == 0 else (8, 0),
+                pady=(0, 8),
+            )
+            group.columnconfigure(0, weight=1)
+            for row, key in enumerate(section_keys):
+                ttk.Checkbutton(
+                    group,
+                    text=section_labels[key],
+                    variable=self.report_section_vars[key],
+                    command=self._apply_report_options_to_model,
+                ).grid(row=row, column=0, sticky="w", padx=(10, 0), pady=2)
 
         supplemental = ttk.LabelFrame(report_tab, text="Supplemental visuals", padding=12)
         supplemental.grid(row=4, column=0, sticky="ew", pady=(12, 0))
@@ -9760,8 +9806,17 @@ class RainwaterTkApp(tk.Tk):
             command=self._apply_report_options_to_model,
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
+        advanced = ttk.LabelFrame(report_tab, text="Advanced options", padding=12)
+        advanced.grid(row=5, column=0, sticky="ew", pady=(12, 0))
+        ttk.Checkbutton(
+            advanced,
+            text="Include detailed rainfall-event totals in the first-flush summary",
+            variable=self.report_include_rainfall_event_totals_var,
+            command=self._apply_report_options_to_model,
+        ).grid(row=0, column=0, sticky="w")
+
         actions = ttk.Frame(report_tab)
-        actions.grid(row=5, column=0, sticky="w", pady=(16, 0))
+        actions.grid(row=6, column=0, sticky="w", pady=(16, 0))
         ttk.Button(actions, text="View PDF report", command=self.view_pdf_report).grid(row=0, column=0)
         ttk.Button(actions, text="View HTML report", command=self.view_html_report).grid(row=0, column=1, padx=(8, 0))
         ttk.Button(actions, text="Export PDF...", command=self.export_pdf_report).grid(row=0, column=2, padx=(18, 0))
@@ -9796,6 +9851,9 @@ class RainwaterTkApp(tk.Tk):
         )
         self.config_model.report_include_multitank_charts = bool(
             self.report_include_multitank_charts_var.get()
+        )
+        self.config_model.report_include_rainfall_event_totals = bool(
+            self.report_include_rainfall_event_totals_var.get()
         )
 
     def _build_results_tab(self) -> None:
@@ -10890,6 +10948,7 @@ class RainwaterTkApp(tk.Tk):
         for index in migrated_indices:
             self._assign_demand_object_to_end_uses(index)
         self.project_name_var.set(cfg.name)
+        self.client_name_var.set(cfg.client_name)
         self.author_name_var.set(cfg.author_name)
         self.project_notes_text.delete("1.0", tk.END)
         self.project_notes_text.insert("1.0", cfg.notes)
@@ -11041,6 +11100,9 @@ class RainwaterTkApp(tk.Tk):
         self.report_include_multitank_charts_var.set(
             cfg.report_include_multitank_charts
         )
+        self.report_include_rainfall_event_totals_var.set(
+            cfg.report_include_rainfall_event_totals
+        )
         self.initial_fill_var.set(format_number(cfg.tank_parameters.initial_fill_percent, cfg))
         self.reserve_var.set(format_number(cfg.tank_parameters.minimum_operating_volume_percent, cfg))
         prior_component_editor_loading = getattr(
@@ -11102,6 +11164,7 @@ class RainwaterTkApp(tk.Tk):
     def _apply_form_to_model(self) -> bool:
         cfg = self.config_model
         cfg.name = self.project_name_var.get().strip() or "Unnamed Project"
+        cfg.client_name = self.client_name_var.get().strip()
         cfg.author_name = self.author_name_var.get().strip()
         cfg.notes = self.project_notes_text.get("1.0", "end-1c").strip()
         cfg.street_address = self.street_address_var.get().strip()
@@ -15738,27 +15801,76 @@ class RainwaterTkApp(tk.Tk):
 
     def _view_pdf_report(self, *, legacy: bool) -> None:
         report_label = "legacy PDF" if legacy else "PDF"
+        if self.pdf_preview_thread is not None:
+            self.status_var.set(f"A {report_label} report preview is already being generated")
+            return
         report = self._request_report_content(report_label)
         if report is None:
             return
         preview_dir = self._new_report_preview_directory()
         pdf_path = preview_dir / self._default_report_filename(".pdf")
+        self.execution_log.info("Report", f"Generating {report_label} report preview")
+        self._drain_execution_log_to_window()
+        self.status_var.set(f"Generating {report_label} report preview...")
+        self.config(cursor="watch")
+
+        def worker() -> None:
+            try:
+                if legacy:
+                    self._write_legacy_pdf_report(pdf_path, report)
+                else:
+                    self._write_pdf_report(pdf_path, report)
+                self.pdf_preview_result_queue.put(
+                    ("complete", (report_label, pdf_path))
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.pdf_preview_result_queue.put(
+                    ("error", (report_label, exc))
+                )
+
+        self.pdf_preview_thread = threading.Thread(
+            target=worker, daemon=True, name="pdf-preview-worker"
+        )
+        self.pdf_preview_thread.start()
+        self.pdf_preview_poll_after_id = self.after(50, self._poll_pdf_preview_results)
+
+    def _poll_pdf_preview_results(self) -> None:
         try:
-            self.execution_log.info("Report", f"Generating {report_label} report preview")
-            self._drain_execution_log_to_window()
-            self.update_idletasks()
-            if legacy:
-                self._write_legacy_pdf_report(pdf_path, report)
+            kind, payload = self.pdf_preview_result_queue.get_nowait()
+        except queue.Empty:
+            if self.pdf_preview_thread is not None:
+                self.pdf_preview_poll_after_id = self.after(
+                    50, self._poll_pdf_preview_results
+                )
+            return
+
+        report_label, result = payload
+        self.pdf_preview_thread = None
+        self.pdf_preview_poll_after_id = None
+        self.config(cursor="")
+        if kind == "complete":
+            pdf_path = Path(result)
+            try:
+                self._open_local_file(pdf_path)
+            except Exception as exc:  # noqa: BLE001
+                result = exc
             else:
-                self._write_pdf_report(pdf_path, report)
-            self._open_local_file(pdf_path)
-            self.status_var.set(f"Opened {report_label} report preview: {pdf_path.name}")
-            self.execution_log.info("Report", f"{report_label} report preview opened")
-        except Exception as exc:  # noqa: BLE001
-            self.execution_log.error(
-                "Report", f"Could not view {report_label} report", exception=exc
-            )
-            messagebox.showerror(APP_TITLE, f"Could not view {report_label} report:\n{exc}")
+                self.status_var.set(
+                    f"Opened {report_label} report preview: {pdf_path.name}"
+                )
+                self.execution_log.info(
+                    "Report", f"{report_label} report preview opened"
+                )
+                return
+
+        exc = result
+        self.status_var.set(f"Could not generate {report_label} report preview")
+        self.execution_log.error(
+            "Report", f"Could not view {report_label} report", exception=exc
+        )
+        messagebox.showerror(
+            APP_TITLE, f"Could not view {report_label} report:\n{exc}"
+        )
 
     def view_html_report(self) -> None:
         report = self._request_report_content("HTML")
@@ -15846,12 +15958,7 @@ class RainwaterTkApp(tk.Tk):
             messagebox.showinfo(APP_TITLE, f"Run the analysis before generating {article} {report_format} report.")
             return None
 
-        dialog = ReportDialog(self, self._default_report_metadata())
-        self.wait_window(dialog)
-        if dialog.result is None:
-            self.execution_log.info("Report", f"{report_format} report generation cancelled")
-            return None
-        content = self._build_report_content(dialog.result)
+        content = self._build_report_content(self._default_report_metadata())
         self.execution_log.debug("Report", f"Prepared {report_format} report content")
         return content
 
@@ -15940,6 +16047,7 @@ class RainwaterTkApp(tk.Tk):
             "station_map_redraw_after_id",
             "climate_normal_archive_poll_after_id",
             "analysis_poll_after_id",
+            "pdf_preview_poll_after_id",
         ):
             after_id = getattr(self, after_id_name, None)
             if after_id is not None:
@@ -15969,32 +16077,35 @@ class RainwaterTkApp(tk.Tk):
         super().destroy()
 
     def _default_report_metadata(self) -> dict[str, object]:
-        end_uses = self._default_end_uses_text()
+        cfg = self.config_model
         address_parts = [
-            self.street_address_var.get().strip(),
-            self.city_var.get().strip(),
-            self.state_or_province_var.get().strip(),
-            self.postal_code_var.get().strip(),
+            cfg.street_address.strip(),
+            cfg.city.strip(),
+            cfg.state_or_province.strip(),
+            cfg.postal_code.strip(),
         ]
         location = ", ".join(part for part in address_parts if part)
         if location:
-            country = self.country_var.get().split(" - ", 1)[-1].strip()
+            country = COUNTRY_LABEL_BY_CODE.get(cfg.country_code, cfg.country_code).split(
+                " - ", 1
+            )[-1].strip()
             location = f"{location}, {country}" if country else location
         if not location:
-            location = self.rainfall_source_label or self.config_model.rainfall_source_label or ""
+            location = self.rainfall_source_label or cfg.rainfall_source_label or ""
         return {
-            "client_name": "",
+            "client_name": cfg.client_name,
             "date": dt.date.today().isoformat(),
             "location": location,
-            "project_name": self.project_name_var.get().strip() or self.config_model.name,
-            "author_name": self.author_name_var.get().strip(),
-            "end_uses": end_uses,
+            "project_name": cfg.name,
+            "author_name": cfg.author_name,
+            "end_uses": self._default_end_uses_text(),
         }
 
     def _default_end_uses_text(self) -> str:
         uses = [
-            demand_object.object_type or demand_object.name
+            demand_object.name.strip()
             for demand_object in self.config_model.demand.demand_objects
+            if demand_object.name.strip()
         ]
         return ", ".join(dict.fromkeys(uses)) or "Not specified"
 
@@ -16587,6 +16698,9 @@ class RainwaterTkApp(tk.Tk):
             ),
             "include_system_visualization": bool(
                 cfg.report_include_system_visualization
+            ),
+            "include_rainfall_event_totals": bool(
+                cfg.report_include_rainfall_event_totals
             ),
             "system_type": cfg.system_type,
             "project_latitude": cfg.latitude,
@@ -17864,54 +17978,6 @@ class SurfaceDialog(tk.Toplevel):
             runoff_coefficient=min(max(_float(self.runoff_var.get(), 0.0), 0.0), 1.0),
             first_flush_depth_inches=self.first_flush_depth_inches,
         )
-        self.destroy()
-
-
-class ReportDialog(tk.Toplevel):
-    def __init__(self, parent: RainwaterTkApp, defaults: dict[str, object]) -> None:
-        super().__init__(parent)
-        self.title("Report details")
-        self.resizable(True, False)
-        self.result: dict[str, object] | None = None
-        self.author_name = str(defaults.get("author_name", ""))
-        self.vars = {
-            "client_name": tk.StringVar(value=str(defaults["client_name"])),
-            "date": tk.StringVar(value=str(defaults["date"])),
-            "location": tk.StringVar(value=str(defaults["location"])),
-            "project_name": tk.StringVar(value=str(defaults["project_name"])),
-        }
-
-        body = ttk.Frame(self, padding=12)
-        body.grid(sticky="nsew")
-        body.columnconfigure(1, weight=1)
-
-        fields = [
-            ("client_name", "Client name"),
-            ("date", "Date"),
-            ("location", "Location"),
-            ("project_name", "Project name"),
-        ]
-        for row, (key, label) in enumerate(fields):
-            ttk.Label(body, text=label).grid(row=row, column=0, sticky="w", pady=3)
-            ttk.Entry(body, textvariable=self.vars[key], width=52).grid(row=row, column=1, sticky="ew", pady=3)
-
-        ttk.Label(body, text="End-uses of water").grid(row=4, column=0, sticky="nw", pady=3)
-        self.end_uses_text = tk.Text(body, width=52, height=4, wrap="word")
-        self.end_uses_text.grid(row=4, column=1, sticky="ew", pady=3)
-        self.end_uses_text.insert("1.0", str(defaults["end_uses"]))
-
-        buttons = ttk.Frame(body)
-        buttons.grid(row=5, column=0, columnspan=2, sticky="e", pady=(10, 0))
-        ttk.Button(buttons, text="Cancel", command=self.destroy).grid(row=0, column=0, padx=4)
-        ttk.Button(buttons, text="Continue", command=self._save).grid(row=0, column=1)
-
-        self.transient(parent)
-        self.grab_set()
-
-    def _save(self) -> None:
-        self.result = {key: var.get().strip() for key, var in self.vars.items()}
-        self.result["author_name"] = self.author_name.strip()
-        self.result["end_uses"] = self.end_uses_text.get("1.0", "end").strip() or "Not specified"
         self.destroy()
 
 
