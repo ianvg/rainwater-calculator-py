@@ -13,6 +13,8 @@ The builder also uses these unmodified Bootstrap Icons SVGs:
 
 The daily-rainfall weather-station map uses the unmodified **Fullscreen** and
 **Fullscreen Exit** SVGs for its icon-only mode controls below the map's zoom buttons.
+The project-location, daily-rainfall station, and Climate Normals maps use the
+unmodified **Geo Alt Fill** SVG for antialiased, display-scaled location markers.
 The controls match the zoom buttons' colors and expose their labels in hover tooltips.
 
 **Arrow Right Circle Fill** and **Speedometer2** are retained as unused legacy

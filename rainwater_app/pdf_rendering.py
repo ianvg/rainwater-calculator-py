@@ -622,20 +622,21 @@ def render_pdf(pdf_path: Path, report: ReportModel) -> None:
             f'{format_number(float(row.get("diversion_percent", 0.0)))}% diverted',
             indent=20,
         )
-    event_first_flush = list(report.get("first_flush_event_summary", []))
-    add_wrapped("Rainfall-event totals:", indent=10)
-    if not event_first_flush:
-        add_wrapped("No event-level first-flush summary is available.", indent=20)
-    for row in event_first_flush:
-        add_wrapped(
-            f'Event {row.get("event_id", "")}: {row.get("start", "")} to {row.get("end", "")}; '
-            f'{int(row.get("wet_timesteps", 0)):,} wet timestep(s); '
-            f'gross {format_number(float(row.get("gross_runoff", 0.0)))} {report["volume_unit"]}; '
-            f'diverted {format_number(float(row.get("first_flush_loss", 0.0)))} {report["volume_unit"]}; '
-            f'net {format_number(float(row.get("net_collected", 0.0)))} {report["volume_unit"]}; '
-            f'{format_number(float(row.get("diversion_percent", 0.0)))}% diverted',
-            indent=20,
-        )
+    if report.get("include_rainfall_event_totals", False):
+        event_first_flush = list(report.get("first_flush_event_summary", []))
+        add_wrapped("Rainfall-event totals:", indent=10)
+        if not event_first_flush:
+            add_wrapped("No event-level first-flush summary is available.", indent=20)
+        for row in event_first_flush:
+            add_wrapped(
+                f'Event {row.get("event_id", "")}: {row.get("start", "")} to {row.get("end", "")}; '
+                f'{int(row.get("wet_timesteps", 0)):,} wet timestep(s); '
+                f'gross {format_number(float(row.get("gross_runoff", 0.0)))} {report["volume_unit"]}; '
+                f'diverted {format_number(float(row.get("first_flush_loss", 0.0)))} {report["volume_unit"]}; '
+                f'net {format_number(float(row.get("net_collected", 0.0)))} {report["volume_unit"]}; '
+                f'{format_number(float(row.get("diversion_percent", 0.0)))}% diverted',
+                indent=20,
+            )
     y -= 4
 
     heading("Analysis Provenance")
@@ -821,6 +822,8 @@ def _draw_pdf_tank_level_distribution(
     distribution = report["tank_level_distribution"]
     if not distribution:
         return
+    analysis_days = sum(int(row["count"]) for row in distribution)
+    days_label = _pdf_escape(f"Days [{analysis_days:,}]")
     max_count = max(int(row["count"]) for row in distribution) or 1
     commands.append("0.50 w 0.85 0.85 0.85 RG")
     for index in range(5):
@@ -851,7 +854,10 @@ def _draw_pdf_tank_level_distribution(
         f"BT /F2 9 Tf 1 0 0 1 {x + width / 2 - 58:.2f} {y - 34:.2f} "
         f"Tm (Tank level range ({_pdf_escape(report['volume_unit'])})) Tj ET"
     )
-    commands.append(f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 12:.2f} Tm (Days) Tj ET")
+    commands.append(
+        f"BT /F2 9 Tf 0 1 -1 0 {x - 38:.2f} {y + height / 2 - 24:.2f} "
+        f"Tm ({days_label}) Tj ET"
+    )
     commands.append("0 0 0 rg 0 0 0 RG")
 
 

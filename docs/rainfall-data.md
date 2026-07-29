@@ -22,6 +22,12 @@ The analysis uses daily precipitation records. Longer, representative periods ge
 
 Choose **Find Nearest 5 Airports** to restrict the geographic search to airport weather stations. In the United States, candidates must have an ACIS FAA or ICAO identifier and that identifier must match the official AviationWeather.gov airport-information service. Confirmed airport records are cached for 30 days and unmatched identifiers for one day, limiting repeated requests. In Canada, the search uses ECCC's authoritative `STATION_TYPE` aviation classification together with its Transport Canada and WMO metadata. Station names are not used to decide whether a station qualifies. The resulting five stations are ranked by distance and can be mapped, selected, and imported like other weather stations.
 
+## Compare candidate precipitation coverage
+
+After finding one to ten ACIS or ECCC candidates, select **Compare Coverage**. The precipitation preflight downloads each candidate's daily record for the requested historical period without assigning any of them to the project. It ranks the records by the percentage of calendar days containing a valid precipitation observation and reports observed and missing day counts. Provider-reported missing values remain missing even when an import would substitute zero precipitation for simulation continuity.
+
+Select a row in the preflight table to select that station in the station dropdown and on the map, then choose **Import Selected Station** when ready. A search containing more than ten candidates must be narrowed with the station filter or replaced with **Find Nearest 10** before comparison. Coverage comparison uses the normal provider caches, requires an internet connection for uncached records, and does not change the project's active rainfall or analysis results.
+
 ## Import from ACIS
 
 Set the project country to **USA - United States** to use ACIS importing.

@@ -188,6 +188,11 @@ def test_html_report_groups_related_sections_in_navigation_and_body() -> None:
     assert "@media (hover:hover)" in html
     assert ".report-group-heading:hover { background:#dcece5;" in html
     assert ".report-group-heading:focus-within { background:#dcece5;" in html
+    assert ".report-group-heading { padding:0;" in html
+    assert ".report-group-toggle { display:flex; width:100%;" in html
+    assert "gap:16px; padding:22px 52px;" in html
+    assert "header,main section,.report-group-toggle { padding:28px 22px;" in html
+    assert ".report-group-toggle { padding:14px 26px; }" in html
     assert "@media (prefers-reduced-motion:reduce)" in html
 
 
@@ -427,6 +432,7 @@ def test_first_flush_summaries_are_rendered_in_every_report_format(tmp_path) -> 
             "diversion_percent": 10.0 / 150.0 * 100.0,
         }
     ]
+    report["include_rainfall_event_totals"] = True
     service = ReportRenderingService()
 
     html = service.html(report)
@@ -443,6 +449,36 @@ def test_first_flush_summaries_are_rendered_in_every_report_format(tmp_path) -> 
     assert "First-flush Diversion Summary" in pdf_text
     assert "Event 7" in pdf_text
     assert "diverted 10 gal" in pdf_text
+
+
+def test_rainfall_event_totals_are_omitted_by_default_in_every_report_format(
+    tmp_path,
+) -> None:
+    report = _renderable_report()
+    report["first_flush_event_summary"] = [{
+        "event_id": 7,
+        "start": "2025-01-10T00:00:00",
+        "end": "2025-01-11T00:00:00",
+        "wet_timesteps": 2,
+        "gross_runoff": 150.0,
+        "first_flush_loss": 10.0,
+        "net_collected": 140.0,
+        "diversion_percent": 10.0 / 150.0 * 100.0,
+    }]
+    service = ReportRenderingService()
+
+    html = service.html(report)
+    latex = service.latex(report)
+    target = tmp_path / "first-flush-default.pdf"
+    service.pdf(target, report)
+    pdf_text = "\n".join(page.extract_text() or "" for page in PdfReader(target).pages)
+
+    assert "Rainfall-event totals" not in html
+    assert "2025-01-10T00:00:00" not in html
+    assert r"\subsection*{Rainfall-event totals}" not in latex
+    assert "2025-01-10T00:00:00" not in latex
+    assert "Rainfall-event totals" not in pdf_text
+    assert "Event 7" not in pdf_text
 
 
 def test_report_section_choices_apply_to_html_latex_and_pdf(tmp_path) -> None:

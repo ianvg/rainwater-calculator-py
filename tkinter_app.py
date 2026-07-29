@@ -221,6 +221,30 @@ from rainwater_app.system_model import (
     ensure_primary_overflow_paths,
     validate_builder_system,
 )
+from rainwater_app.system_builder_controller import (
+    SYSTEM_ANIMATION_FRAME_MS,
+    adjacent_animation_date,
+    animation_connection_active,
+    animation_connection_flow_gallons,
+    animation_drag_delta,
+    animation_frames_per_hour,
+    animation_pipe_flow_label,
+    animation_rain_active,
+    blocks_overlap,
+    bounded_animation_seconds,
+    bounded_pan,
+    bounded_zoom,
+    component_ports,
+    connection_points,
+    connections_after_node_disconnect,
+    float_range,
+    next_animation_date,
+    point_along_connection,
+    port_is_output,
+    rectangles_overlap,
+    required_canvas_size,
+    single_hour_animation_completion,
+)
 from rainwater_app.stations import (
     bounding_box,
     filter_stations,
@@ -243,7 +267,6 @@ from rainwater_app.ui_logic import (
     validated_schedule_library as _validated_schedule_library,
 )
 from rainwater_app.units import (
-    LITERS_PER_GALLON,
     area_to_display,
     area_to_internal,
     area_unit,
@@ -256,9 +279,12 @@ from rainwater_app.units import (
     volume_unit,
 )
 from rainwater_app.optimization import optimize_indirect_system
+from rainwater_app.precipitation_preflight import (
+    StationCoverage,
+    compare_station_coverage,
+)
 
 APP_TITLE = "Rainwater Harvesting Calculator"
-SYSTEM_ANIMATION_FRAME_MS = 40
 SYSTEM_ANIMATION_CYCLES_PER_SECOND = 0.6
 DEMAND_FLOW_UNITS = ("gpm", "gal/hr", "lpm", "liter/hr")
 DEFAULT_WINDOW_WIDTH = 1200
@@ -376,6 +402,10 @@ ECCC_SOURCE_URL = "https://climate.weather.gc.ca/"
 OSM_TILE_URL = os.environ.get("RWH_OSM_TILE_URL", "https://tile.openstreetmap.org/{z}/{x}/{y}.png")
 STATION_MAP_FULLSCREEN_ICON_ASSET = "assets/bootstrap-icons/fullscreen.svg"
 STATION_MAP_FULLSCREEN_EXIT_ICON_ASSET = "assets/bootstrap-icons/fullscreen-exit.svg"
+MAP_MARKER_ICON_ASSET = "assets/bootstrap-icons/geo-alt-fill.svg"
+MAP_MARKER_BASE_SIZE = 40
+MAP_MARKER_NORMAL_COLOR = "#1976d2"
+MAP_MARKER_SELECTED_COLOR = "#d32f2f"
 OPTIMIZATION_SECTION_HELP = {
     "Problem assumptions": (
         "Design variables remain open to the optimizer. Fixed project inputs are read directly from their "
@@ -602,6 +632,28 @@ def _load_svg_icon(
         return ImageTk.PhotoImage(image, master=master)
     except (OSError, RuntimeError, ValueError):
         return None
+
+
+def _map_marker_icon(master: tk.Misc, color: str) -> ImageTk.PhotoImage | None:
+    """Return a cached, antialiased map pin sized for the current Tk display scale."""
+    try:
+        display_scale = float(master.tk.call("tk", "scaling")) / (96.0 / 72.0)
+    except (AttributeError, tk.TclError, TypeError, ValueError):
+        display_scale = 1.0
+    size = max(round(MAP_MARKER_BASE_SIZE * display_scale), 24)
+    cache = getattr(master, "_rwh_map_marker_icons", None)
+    if not isinstance(cache, dict):
+        cache = {}
+        setattr(master, "_rwh_map_marker_icons", cache)
+    key = (size, color)
+    if key not in cache:
+        cache[key] = _load_svg_icon(
+            master,
+            MAP_MARKER_ICON_ASSET,
+            size=size,
+            color=color,
+        )
+    return cache[key]
 
 
 def _help_index_path() -> Path | None:
@@ -1205,7 +1257,13 @@ class ProjectLocationPickerDialog(tk.Toplevel):
         self.selected_coordinates = (latitude, longitude)
         self.coordinates_var.set(f"Selected coordinates: {latitude:.6f}, {longitude:.6f}")
         if self.marker is None:
-            self.marker = self.map.set_marker(latitude, longitude, text="Project location")
+            self.marker = self.map.set_marker(
+                latitude,
+                longitude,
+                text="Project location",
+                icon=_map_marker_icon(self.map, MAP_MARKER_SELECTED_COLOR),
+                icon_anchor="s",
+            )
         else:
             self.marker.set_position(latitude, longitude)  # type: ignore[attr-defined]
         self.select_button.state(["!disabled"])
@@ -1438,6 +1496,32 @@ class MultiProjectComparisonDialog(tk.Toplevel):
 
 
 class RainwaterTkApp(tk.Tk):
+    # Compatibility aliases keep existing call sites and extensions stable while
+    # the tested interaction rules live outside the Tk root-window class.
+    _adjacent_system_animation_date = staticmethod(adjacent_animation_date)
+    _next_system_animation_date = staticmethod(next_animation_date)
+    _system_animation_drag_delta = staticmethod(animation_drag_delta)
+    _bounded_system_animation_seconds = staticmethod(bounded_animation_seconds)
+    _system_animation_frames_per_hour = staticmethod(animation_frames_per_hour)
+    _single_hour_animation_completion = staticmethod(single_hour_animation_completion)
+    _system_animation_connection_active = staticmethod(animation_connection_active)
+    _system_animation_connection_flow_gallons = staticmethod(
+        animation_connection_flow_gallons
+    )
+    _system_animation_pipe_flow_label = staticmethod(animation_pipe_flow_label)
+    _system_animation_rain_active = staticmethod(animation_rain_active)
+    _system_blocks_overlap = staticmethod(blocks_overlap)
+    _system_rectangles_overlap = staticmethod(rectangles_overlap)
+    _required_system_builder_canvas_size = staticmethod(required_canvas_size)
+    _bounded_system_builder_zoom = staticmethod(bounded_zoom)
+    _bounded_system_builder_pan = staticmethod(bounded_pan)
+    _float_range = staticmethod(float_range)
+    _system_component_ports = staticmethod(component_ports)
+    _system_port_is_output = staticmethod(port_is_output)
+    _connections_after_node_disconnect = staticmethod(connections_after_node_disconnect)
+    _system_connection_points = staticmethod(connection_points)
+    _point_along_system_connection = staticmethod(point_along_connection)
+
     def __init__(self) -> None:
         super().__init__()
         self.withdraw()
@@ -1540,6 +1624,7 @@ class RainwaterTkApp(tk.Tk):
         self.candidate_sort_reverse = False
         self.candidate_tree_sizes: dict[str, float] = {}
         self.station_options: list[dict] = []
+        self.station_coverage_results: dict[str, StationCoverage] = {}
         self.climate_normal_search_results: list[dict[str, object]] = []
         self.climate_normal_catalog: list[dict[str, object]] = []
         self.climate_normal_comparison_rows: dict[str, dict[str, object]] = {}
@@ -1802,6 +1887,9 @@ class RainwaterTkApp(tk.Tk):
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
         self.station_var = tk.StringVar(value="")
+        self.station_coverage_status_var = tk.StringVar(
+            value="Find up to 10 candidate stations, then compare coverage."
+        )
         self.canadian_precip_var = tk.StringVar(value="Total precipitation")
         self.weather_source_note_var = tk.StringVar()
         self.weather_source_link_var = tk.StringVar()
@@ -1842,6 +1930,9 @@ class RainwaterTkApp(tk.Tk):
         self.station_lookup_poll_after_id: str | None = None
         self.station_lookup_in_progress = False
         self.station_lookup_airport_only = False
+        self.station_coverage_queue: queue.Queue = queue.Queue()
+        self.station_coverage_poll_after_id: str | None = None
+        self.station_coverage_in_progress = False
         self.climate_normal_queue: queue.Queue = queue.Queue()
         self.climate_normal_poll_after_id: str | None = None
         self.climate_normal_lookup_in_progress = False
@@ -4346,27 +4437,6 @@ class RainwaterTkApp(tk.Tk):
                 SYSTEM_ANIMATION_FRAME_MS, self._animate_system_frame
             )
 
-    @staticmethod
-    def _adjacent_system_animation_date(
-        values: list[str] | tuple[str, ...], current: str, delta: int
-    ) -> str | None:
-        if not values:
-            return None
-        try:
-            index = list(values).index(current)
-        except ValueError:
-            return values[0]
-        target_index = index + (-1 if delta < 0 else 1)
-        if 0 <= target_index < len(values):
-            return values[target_index]
-        return None
-
-    @staticmethod
-    def _next_system_animation_date(
-        values: list[str] | tuple[str, ...], current: str
-    ) -> str | None:
-        return RainwaterTkApp._adjacent_system_animation_date(values, current, 1)
-
     def _auto_play_next_system_animation_day(self) -> bool:
         raw_values = self.system_animation_date_combo.cget("values")
         values = tuple(
@@ -4398,13 +4468,6 @@ class RainwaterTkApp(tk.Tk):
         return self._bounded_system_animation_seconds(
             _float(self.system_animation_seconds_per_hour_var.get(), 1.0)
         )
-
-    @staticmethod
-    def _system_animation_drag_delta(
-        screen_dx: float, screen_dy: float, scale: float
-    ) -> tuple[float, float]:
-        safe_scale = max(float(scale), 0.001)
-        return float(screen_dx) / safe_scale, float(screen_dy) / safe_scale
 
     def _system_animation_drag_start(self, event: tk.Event) -> str | None:
         overlapping = self.system_animation_canvas.find_overlapping(
@@ -4466,50 +4529,6 @@ class RainwaterTkApp(tk.Tk):
         self._render_system_builder()
         self.status_var.set(f"Moved system object in animation view: {component_id}")
         return "break"
-
-    @staticmethod
-    def _bounded_system_animation_seconds(value: float) -> float:
-        return min(max(float(value), 0.1), 60.0)
-
-    @staticmethod
-    def _system_animation_frames_per_hour(seconds_per_hour: float) -> int:
-        bounded = RainwaterTkApp._bounded_system_animation_seconds(seconds_per_hour)
-        return max(round(bounded * 1000.0 / SYSTEM_ANIMATION_FRAME_MS), 1)
-
-    @staticmethod
-    def _single_hour_animation_completion(hour: int, behavior: str) -> tuple[int, bool]:
-        bounded_hour = min(max(int(hour), 0), 23)
-        if behavior == "Loop current hour":
-            return bounded_hour, False
-        return min(bounded_hour + 1, 23), True
-
-    @staticmethod
-    def _system_animation_connection_active(
-        source_type: str, target_type: str, row: pd.Series
-    ) -> bool:
-        if source_type == "rainwater_input":
-            field = (
-                "GrossCollectedGallons"
-                if target_type == "first_flush_diversion"
-                else "CollectedGallons"
-            )
-            return float(row.get(field, 0.0)) > 1e-9
-        if source_type == "first_flush_diversion":
-            return float(row.get("CollectedGallons", 0.0)) > 1e-9
-        if source_type == "municipal_backup":
-            return float(row.get("MainsMakeupGallons", 0.0)) > 1e-9
-        if target_type == "overflow_pipe":
-            return float(row.get("OverflowGallons", 0.0)) > 1e-9
-        if source_type in {"primary_tank", "filtration_pump"}:
-            return float(row.get("PumpFlowGallons", 0.0)) > 1e-9
-        if source_type == "filtration_system":
-            return float(row.get("FilterThroughputGallons", 0.0)) > 1e-9
-        if source_type in {"booster_tank", "booster_pump"}:
-            supplied = float(row.get("DemandGallons", 0.0)) - float(
-                row.get("SystemUnmetDemandGallons", 0.0)
-            )
-            return supplied > 1e-9
-        return False
 
     def _build_project_candidates_tab(self, parent: ttk.Frame) -> None:
         parent.columnconfigure(0, weight=1)
@@ -4952,50 +4971,6 @@ class RainwaterTkApp(tk.Tk):
             f"{rejected} rejected combinations · {warnings} product warnings"
         )
         self._refresh_equipment_library_tree()
-
-    @staticmethod
-    def _system_animation_connection_flow_gallons(
-        source_type: str, target_type: str, row: pd.Series
-    ) -> float:
-        """Return the volume crossing a builder connection during this hour."""
-        if target_type == "overflow_pipe":
-            return max(float(row.get("OverflowGallons", 0.0)), 0.0)
-        if source_type == "rainwater_input":
-            field = (
-                "GrossCollectedGallons"
-                if target_type == "first_flush_diversion"
-                else "CollectedGallons"
-            )
-            return max(float(row.get(field, 0.0)), 0.0)
-        if source_type == "first_flush_diversion":
-            return max(float(row.get("CollectedGallons", 0.0)), 0.0)
-        if source_type == "municipal_backup":
-            return max(float(row.get("MainsMakeupGallons", 0.0)), 0.0)
-        if source_type in {"primary_tank", "filtration_pump"}:
-            return max(float(row.get("PumpFlowGallons", 0.0)), 0.0)
-        if source_type == "filtration_system":
-            return max(float(row.get("FilterThroughputGallons", 0.0)), 0.0)
-        if source_type in {"booster_tank", "booster_pump"}:
-            return max(
-                float(row.get("DemandGallons", 0.0))
-                - float(row.get("SystemUnmetDemandGallons", 0.0)),
-                0.0,
-            )
-        return 0.0
-
-    @staticmethod
-    def _system_animation_pipe_flow_label(
-        hourly_gallons: float, config: ProjectConfig
-    ) -> str:
-        flow = max(float(hourly_gallons), 0.0) / 60.0
-        if is_metric(config):
-            return f"{format_number(flow * LITERS_PER_GALLON, config, max_decimal_places=1)} LPM"
-        return f"{format_number(flow, config, max_decimal_places=1)} GPM"
-
-    @staticmethod
-    def _system_animation_rain_active(row: pd.Series) -> bool:
-        """Return whether collected rainwater enters the configured system this hour."""
-        return float(row.get("CollectedGallons", 0.0)) > 1e-9
 
     def _load_system_weather_images(self) -> bool:
         """Load and retain the optional CC0 weather artwork for canvas animation."""
@@ -5754,31 +5729,6 @@ class RainwaterTkApp(tk.Tk):
             None,
         )
 
-    @staticmethod
-    def _system_blocks_overlap(
-        first_x: float, first_y: float, second_x: float, second_y: float
-    ) -> bool:
-        """Treat system blocks as solid rectangles with a small visual gap."""
-        return RainwaterTkApp._system_rectangles_overlap(
-            first_x, first_y, 124.0, 60.0, second_x, second_y, 124.0, 60.0
-        )
-
-    @staticmethod
-    def _system_rectangles_overlap(
-        first_x: float,
-        first_y: float,
-        first_width: float,
-        first_height: float,
-        second_x: float,
-        second_y: float,
-        second_width: float,
-        second_height: float,
-    ) -> bool:
-        return (
-            abs(first_x - second_x) < (first_width + second_width) / 2.0 + 8.0
-            and abs(first_y - second_y) < (first_height + second_height) / 2.0 + 8.0
-        )
-
     def _system_position_overlaps(
         self,
         x: float,
@@ -5815,29 +5765,6 @@ class RainwaterTkApp(tk.Tk):
         ) / maximum_zoom_out
         return width, height
 
-    @staticmethod
-    def _required_system_builder_canvas_size(
-        layout: list[dict[str, object]],
-        minimum_width: float = 760.0,
-        minimum_height: float = 420.0,
-    ) -> tuple[int, int]:
-        """Return a canvas size that contains every system object and its ports."""
-        right_edge = float(minimum_width)
-        bottom_edge = float(minimum_height)
-        for item in layout:
-            try:
-                x = float(item.get("x", 0.0))
-                y = float(item.get("y", 0.0))
-                width = max(float(item.get("width", 124.0)), 80.0)
-                height = max(float(item.get("height", 60.0)), 44.0)
-            except (TypeError, ValueError):
-                continue
-            # Leave room for inlet/outlet circles, their +/- affordances, and the
-            # canvas highlight so edge objects are never visually clipped.
-            right_edge = max(right_edge, x + width / 2.0 + 32.0)
-            bottom_edge = max(bottom_edge, y + height / 2.0 + 16.0)
-        return math.ceil(right_edge), math.ceil(bottom_edge)
-
     def _resize_system_builder_canvas_to_objects(self) -> None:
         canvas = self.system_builder_canvas
         width, height = self._required_system_builder_canvas_size(
@@ -5857,32 +5784,11 @@ class RainwaterTkApp(tk.Tk):
         self.system_builder_zoom_var.set(f"{new_steps * 10}%")
         self._render_system_builder()
 
-    @staticmethod
-    def _bounded_system_builder_zoom(current: float, delta: float) -> float:
-        current_steps = round(float(current) * 10)
-        delta_steps = 1 if delta > 0 else -1
-        return min(max(current_steps + delta_steps, 7), 13) / 10.0
-
     def _system_model_point(self, x: float, y: float) -> tuple[float, float]:
         zoom = max(float(getattr(self, "system_builder_zoom", 1.0)), 0.01)
         return (
             float(x) / zoom - self.system_builder_pan_x,
             float(y) / zoom - self.system_builder_pan_y,
-        )
-
-    @staticmethod
-    def _bounded_system_builder_pan(
-        canvas_width: float, canvas_height: float, zoom: float,
-        pan_x: float, pan_y: float,
-    ) -> tuple[float, float]:
-        zoom = min(max(float(zoom), 0.7), 1.3)
-        world_width = float(canvas_width) / 0.7
-        world_height = float(canvas_height) / 0.7
-        minimum_x = min(float(canvas_width) / zoom - world_width, 0.0)
-        minimum_y = min(float(canvas_height) / zoom - world_height, 0.0)
-        return (
-            min(max(float(pan_x), minimum_x), 0.0),
-            min(max(float(pan_y), minimum_y), 0.0),
         )
 
     def _clamp_system_builder_pan(self) -> None:
@@ -5946,21 +5852,6 @@ class RainwaterTkApp(tk.Tk):
         )
 
     @staticmethod
-    def _float_range(start: float, stop: float, step: float) -> list[float]:
-        values: list[float] = []
-        value = start
-        while value <= stop + 0.001:
-            values.append(value)
-            value += step
-        return values
-
-    @staticmethod
-    def _system_component_ports(component_type: str) -> tuple[bool, bool]:
-        has_inlet = component_type not in {"rainwater_input", "municipal_backup"}
-        has_outlet = component_type not in {"end_uses", "overflow_pipe"}
-        return has_inlet, has_outlet
-
-    @staticmethod
     def _primary_tank_outlet_offset(
         item: dict[str, object], source_port: str
     ) -> float:
@@ -5971,10 +5862,6 @@ class RainwaterTkApp(tk.Tk):
         if source_port == "out2":
             return 0.0
         return -20.0 if has_optional_outlet else -14.0
-
-    @staticmethod
-    def _system_port_is_output(direction: str) -> bool:
-        return direction.startswith("out") or direction == "overflow"
 
     def _connect_system_components(
         self, source_id: str, target_id: str, target_port: str = "in",
@@ -6342,46 +6229,6 @@ class RainwaterTkApp(tk.Tk):
             return
         item.update({"x": new_x, "y": new_y, "width": new_width, "height": new_height})
         self._render_system_builder()
-
-    @staticmethod
-    def _connections_after_node_disconnect(
-        connections: list[dict[str, str]], component_id: str, direction: str | None
-    ) -> list[dict[str, str]]:
-        if direction == "in":
-            return [
-                item for item in connections
-                if item.get("target_component") != component_id
-                or item.get("target_port", "in") != "in"
-            ]
-        if direction == "in2":
-            return [
-                item for item in connections
-                if item.get("target_component") != component_id
-                or item.get("target_port", "in") != "in2"
-            ]
-        if direction == "out":
-            return [
-                item for item in connections
-                if item.get("source_component") != component_id
-                or item.get("source_port", "out") != "out"
-            ]
-        if direction == "out2":
-            return [
-                item for item in connections
-                if item.get("source_component") != component_id
-                or item.get("source_port", "out") != "out2"
-            ]
-        if direction == "overflow":
-            return [
-                item for item in connections
-                if item.get("source_component") != component_id
-                or item.get("source_port", "out") != "overflow"
-            ]
-        return [
-            item for item in connections
-            if item.get("source_component") != component_id
-            and item.get("target_component") != component_id
-        ]
 
     def _start_system_connection_from_node(self, component_id: str, direction: str) -> None:
         self.system_builder_selected_id = component_id
@@ -7086,90 +6933,6 @@ class RainwaterTkApp(tk.Tk):
             )
         finally:
             self.system_component_graph_step_autosizing = False
-
-    @staticmethod
-    def _system_connection_points(
-        source_x: float,
-        source_y: float,
-        target_x: float,
-        target_y: float,
-        canvas_height: float,
-        source_width: float = 124.0,
-        target_width: float = 124.0,
-        source_height: float = 60.0,
-        target_height: float = 60.0,
-    ) -> tuple[float, ...]:
-        """Route a connection to the target's left port without crossing either object."""
-        # Use the centers of the visible port circles. Keeping the former extra
-        # six-pixel extension made normally adjacent ports geometrically cross,
-        # which incorrectly selected the backward/U-shaped route.
-        start_x = source_x + source_width / 2.0 + 3.0
-        end_x = target_x - target_width / 2.0 - 3.0
-        if target_x > source_x:
-            if abs(target_y - source_y) < 0.001:
-                return (start_x, source_y, end_x, target_y)
-            midpoint = (start_x + end_x) / 2.0
-            return (start_x, source_y, midpoint, source_y, midpoint, target_y, end_x, target_y)
-
-        source_rail_x = start_x + 24.0
-        target_rail_x = end_x - 24.0
-        if abs(target_y - source_y) >= (source_height + target_height) / 2.0 + 24.0:
-            # When the blocks have a clear vertical gap, route through that gap. For a
-            # source above its target this reads naturally as right, down, left, down,
-            # then right into the target's inlet instead of looping over both blocks.
-            corridor_y = (source_y + target_y) / 2.0
-        else:
-            corridor_offset = max(source_height, target_height) / 2.0 + 22.0
-            upper_corridor = min(source_y, target_y) - corridor_offset
-            lower_corridor = max(source_y, target_y) + corridor_offset
-            if upper_corridor >= 10.0:
-                corridor_y = upper_corridor
-            elif lower_corridor <= max(canvas_height - 10.0, 10.0):
-                corridor_y = lower_corridor
-            else:
-                corridor_y = upper_corridor
-        return (
-            start_x,
-            source_y,
-            source_rail_x,
-            source_y,
-            source_rail_x,
-            corridor_y,
-            target_rail_x,
-            corridor_y,
-            target_rail_x,
-            target_y,
-            end_x,
-            target_y,
-        )
-
-    @staticmethod
-    def _point_along_system_connection(
-        points: tuple[float, ...], fraction: float
-    ) -> tuple[float, float]:
-        """Return a distance-weighted point along a routed connection polyline."""
-        pairs = list(zip(points[0::2], points[1::2]))
-        if not pairs:
-            return 0.0, 0.0
-        if len(pairs) == 1:
-            return pairs[0]
-        segments = [
-            math.hypot(end[0] - start[0], end[1] - start[1])
-            for start, end in zip(pairs, pairs[1:])
-        ]
-        total_length = sum(segments)
-        if total_length <= 0.0:
-            return pairs[0]
-        remaining = min(max(float(fraction), 0.0), 1.0) * total_length
-        for (start, end), length in zip(zip(pairs, pairs[1:]), segments):
-            if remaining <= length:
-                progress = remaining / length if length > 0.0 else 0.0
-                return (
-                    start[0] + (end[0] - start[0]) * progress,
-                    start[1] + (end[1] - start[1]) * progress,
-                )
-            remaining -= length
-        return pairs[-1]
 
     @staticmethod
     def _system_builder_icon_assets() -> dict[str, str]:
@@ -7914,12 +7677,60 @@ class RainwaterTkApp(tk.Tk):
         self.station_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
         self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
         self.station_combo.bind("<<ComboboxSelected>>", self._station_selection_changed)
+        station_actions = ttk.Frame(self.weather_frame)
+        station_actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        station_actions.columnconfigure(0, weight=1)
+        station_actions.columnconfigure(1, weight=1)
+        self.compare_station_coverage_button = ttk.Button(
+            station_actions,
+            text="Compare Coverage",
+            command=self.compare_weather_station_coverage,
+            state="disabled",
+        )
+        self.compare_station_coverage_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
         self.import_station_button = ttk.Button(
-            self.weather_frame,
+            station_actions,
             text="Import Selected Station",
             command=self.import_selected_weather,
         )
-        self.import_station_button.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.import_station_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+
+        coverage_frame = ttk.LabelFrame(
+            self.weather_frame, text="Precipitation preflight", padding=8
+        )
+        coverage_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        coverage_frame.columnconfigure(0, weight=1)
+        ttk.Label(
+            coverage_frame,
+            textvariable=self.station_coverage_status_var,
+            foreground="#5f6b70",
+            wraplength=760,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew", pady=(0, 5))
+        self.station_coverage_tree = ttk.Treeview(
+            coverage_frame,
+            columns=("station", "coverage", "observed", "missing"),
+            show="headings",
+            height=5,
+            selectmode="browse",
+        )
+        for column, heading, width, anchor in (
+            ("station", "Station", 420, "w"),
+            ("coverage", "Coverage", 105, "e"),
+            ("observed", "Observed days", 110, "e"),
+            ("missing", "Missing days", 105, "e"),
+        ):
+            self.station_coverage_tree.heading(column, text=heading)
+            self.station_coverage_tree.column(column, width=width, anchor=anchor)
+        self.station_coverage_tree.grid(row=1, column=0, sticky="ew")
+        coverage_scroll = ttk.Scrollbar(
+            coverage_frame, orient="vertical", command=self.station_coverage_tree.yview
+        )
+        coverage_scroll.grid(row=1, column=1, sticky="ns")
+        self.station_coverage_tree.configure(yscrollcommand=coverage_scroll.set)
+        self.station_coverage_tree.bind(
+            "<<TreeviewSelect>>", self._station_coverage_selected
+        )
 
         station_map_frame = ttk.LabelFrame(import_content, text="Weather stations", padding=6)
         station_map_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
@@ -10853,6 +10664,11 @@ class RainwaterTkApp(tk.Tk):
                 text=marker_text,
                 command=self._station_marker_clicked,
                 data={"labels": labels},
+                icon=_map_marker_icon(
+                    self.station_map,
+                    MAP_MARKER_SELECTED_COLOR if selected else MAP_MARKER_NORMAL_COLOR,
+                ),
+                icon_anchor="s",
                 marker_color_circle="#b71c1c" if selected else "#1565c0",
                 marker_color_outside="#d32f2f" if selected else "#1976d2",
             )
@@ -10890,6 +10706,12 @@ class RainwaterTkApp(tk.Tk):
             selected = selected_label in labels
             marker.marker_color_circle = "#b71c1c" if selected else "#1565c0"
             marker.marker_color_outside = "#d32f2f" if selected else "#1976d2"
+            icon = _map_marker_icon(
+                self.station_map,
+                MAP_MARKER_SELECTED_COLOR if selected else MAP_MARKER_NORMAL_COLOR,
+            )
+            if icon is not None and getattr(marker, "icon", None) is not None:
+                marker.change_icon(icon)
             text = labels[0] if selected and len(labels) == 1 else f"{len(labels)} stations" if len(labels) > 1 else None
             marker.set_text(text)
 
@@ -11848,6 +11670,7 @@ class RainwaterTkApp(tk.Tk):
         self.find_nearest_airport_stations_button.configure(
             state="normal" if enabled else "disabled"
         )
+        self.compare_station_coverage_button.configure(state="disabled")
         self.import_station_button.configure(state="normal" if enabled else "disabled")
 
     def _project_form_values(self) -> dict[str, object]:
@@ -13629,6 +13452,11 @@ class RainwaterTkApp(tk.Tk):
                 text=marker_text,
                 command=self._climate_normal_map_marker_clicked,
                 data={"station_ids": station_ids},
+                icon=_map_marker_icon(
+                    self.climate_normal_map,
+                    MAP_MARKER_SELECTED_COLOR if selected else MAP_MARKER_NORMAL_COLOR,
+                ),
+                icon_anchor="s",
                 marker_color_circle="#b71c1c" if selected else "#1565c0",
                 marker_color_outside="#d32f2f" if selected else "#1976d2",
             )
@@ -13676,6 +13504,12 @@ class RainwaterTkApp(tk.Tk):
             selected = selected_station_id in station_ids
             marker.marker_color_circle = "#b71c1c" if selected else "#1565c0"
             marker.marker_color_outside = "#d32f2f" if selected else "#1976d2"
+            icon = _map_marker_icon(
+                self.climate_normal_map,
+                MAP_MARKER_SELECTED_COLOR if selected else MAP_MARKER_NORMAL_COLOR,
+            )
+            if icon is not None and getattr(marker, "icon", None) is not None:
+                marker.change_icon(icon)
             if selected and len(station_ids) == 1:
                 record = next(
                     (
@@ -14038,6 +13872,7 @@ class RainwaterTkApp(tk.Tk):
             self.find_nearest_stations_button,
             self.find_nearest_airport_stations_button,
             self.station_combo,
+            self.compare_station_coverage_button,
             self.import_station_button,
         ):
             widget.configure(state="disabled")
@@ -14079,6 +13914,7 @@ class RainwaterTkApp(tk.Tk):
             self.find_nearest_stations_button,
             self.find_nearest_airport_stations_button,
             self.station_combo,
+            self.compare_station_coverage_button,
             self.import_station_button,
         ):
             widget.configure(state="disabled")
@@ -14184,6 +14020,7 @@ class RainwaterTkApp(tk.Tk):
         self.find_nearest_stations_button.configure(state="normal")
         self.find_nearest_airport_stations_button.configure(state="normal")
         self.station_combo.configure(state="readonly")
+        self.compare_station_coverage_button.configure(state="disabled")
         self.import_station_button.configure(state="normal")
         if result == "error":
             station_kind = "airport weather stations" if self.station_lookup_airport_only else f"{provider} stations"
@@ -14193,9 +14030,13 @@ class RainwaterTkApp(tk.Tk):
             return
 
         self.station_options = payload
+        self._clear_station_coverage_results()
         labels = [self._station_label(station) for station in self.station_options]
         self.station_combo["values"] = labels
         self.station_var.set(labels[0] if labels else "")
+        self.compare_station_coverage_button.configure(
+            state="normal" if labels else "disabled"
+        )
         self._reset_station_typeahead()
         self._render_station_map(fit_bounds=True)
         descriptor = (
@@ -14210,6 +14051,202 @@ class RainwaterTkApp(tk.Tk):
             "Weather", f"Found {len(self.station_options)} {provider} station options"
         )
 
+    def compare_weather_station_coverage(self) -> None:
+        if self.station_lookup_in_progress or self.station_coverage_in_progress:
+            return
+        candidate_count = len(self.station_options)
+        if not candidate_count:
+            messagebox.showinfo(APP_TITLE, "Find candidate weather stations first.")
+            return
+        if candidate_count > 10:
+            messagebox.showinfo(
+                APP_TITLE,
+                f"This search returned {candidate_count:,} stations. Refine the station "
+                "filter or use Find Nearest 10 before comparing coverage.",
+            )
+            return
+
+        years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        start_date, end_date = default_complete_calendar_range(years)
+        precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(
+            self.canadian_precip_var.get(), "TOTAL_PRECIPITATION"
+        )
+        self.station_coverage_in_progress = True
+        self._clear_station_coverage_results(
+            f"Checking {candidate_count} station(s) for {start_date:%Y-%m-%d} to "
+            f"{end_date:%Y-%m-%d}..."
+        )
+        for widget in (
+            self.country_combo,
+            self.state_combo,
+            self.find_stations_button,
+            self.find_nearest_stations_button,
+            self.find_nearest_airport_stations_button,
+            self.station_combo,
+            self.compare_station_coverage_button,
+            self.import_station_button,
+        ):
+            widget.configure(state="disabled")
+        self.analysis_progress.stop()
+        self.analysis_progress.configure(
+            mode="indeterminate", style="Analysis.Horizontal.TProgressbar"
+        )
+        self.analysis_progress.start(12)
+        self.status_var.set(f"Comparing coverage for {candidate_count} station(s)...")
+        self.execution_log.info(
+            "Weather", f"Comparing precipitation coverage for {candidate_count} station options"
+        )
+        threading.Thread(
+            target=self._station_coverage_worker,
+            args=(
+                list(self.station_options),
+                start_date,
+                end_date,
+                precipitation_field,
+            ),
+            name="rwh-station-coverage-preflight",
+            daemon=True,
+        ).start()
+        self.station_coverage_poll_after_id = self.after(
+            100, self._poll_station_coverage_results
+        )
+
+    def _station_coverage_worker(
+        self,
+        stations: list[dict],
+        start_date: dt.date,
+        end_date: dt.date,
+        precipitation_field: str,
+    ) -> None:
+        try:
+            results = compare_station_coverage(
+                stations, start_date, end_date, precipitation_field
+            )
+            self.station_coverage_queue.put(("success", results))
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Weather", "Precipitation coverage comparison failed", exception=exc
+            )
+            self.station_coverage_queue.put(("error", str(exc)))
+
+    def _poll_station_coverage_results(self) -> None:
+        self.station_coverage_poll_after_id = None
+        try:
+            result, payload = self.station_coverage_queue.get_nowait()
+        except queue.Empty:
+            self.station_coverage_poll_after_id = self.after(
+                100, self._poll_station_coverage_results
+            )
+            return
+
+        self.analysis_progress.stop()
+        self.analysis_progress.configure(mode="determinate")
+        self.analysis_progress_var.set(0)
+        self.station_coverage_in_progress = False
+        self.country_combo.configure(state="readonly")
+        self.state_combo.configure(state="readonly")
+        self.find_stations_button.configure(state="normal")
+        self.find_nearest_stations_button.configure(state="normal")
+        self.find_nearest_airport_stations_button.configure(state="normal")
+        self.station_combo.configure(state="readonly")
+        self.compare_station_coverage_button.configure(
+            state="normal" if self.station_options else "disabled"
+        )
+        self.import_station_button.configure(state="normal")
+        if result == "error":
+            self.station_coverage_status_var.set("Coverage comparison failed.")
+            self.status_var.set("Could not compare precipitation coverage")
+            messagebox.showerror(
+                APP_TITLE, f"Could not compare precipitation coverage:\n{payload}"
+            )
+            return
+
+        results: list[StationCoverage] = payload
+        self.station_coverage_results = {
+            f"{coverage.provider}:{coverage.station_id}": coverage
+            for coverage in results
+        }
+        self.station_coverage_tree.delete(
+            *self.station_coverage_tree.get_children()
+        )
+        for index, coverage in enumerate(results):
+            station_text = f"{coverage.station_name} ({coverage.station_id})"
+            coverage_text = (
+                f"{coverage.completeness_percent:.1f}%"
+                if coverage.available
+                else "Unavailable"
+            )
+            self.station_coverage_tree.insert(
+                "",
+                tk.END,
+                iid=f"coverage-{index}",
+                values=(
+                    station_text,
+                    coverage_text,
+                    f"{coverage.observed_days:,}" if coverage.available else "--",
+                    f"{coverage.missing_days:,}" if coverage.available else "--",
+                ),
+                tags=(f"{coverage.provider}:{coverage.station_id}",),
+            )
+        usable = [coverage for coverage in results if coverage.available]
+        unavailable_count = len(results) - len(usable)
+        if usable:
+            best = usable[0]
+            suffix = (
+                f" {unavailable_count} station(s) could not be assessed."
+                if unavailable_count
+                else ""
+            )
+            self.station_coverage_status_var.set(
+                f"Requested period: {best.requested_start:%Y-%m-%d} to "
+                f"{best.requested_end:%Y-%m-%d}. Ranked by valid daily coverage.{suffix}"
+            )
+            self.status_var.set(
+                f"Best coverage: {best.station_name} ({best.station_id}), "
+                f"{best.completeness_percent:.1f}%"
+            )
+        else:
+            self.station_coverage_status_var.set(
+                "None of the candidate station records could be assessed."
+            )
+            self.status_var.set("No station coverage results available")
+
+    def _clear_station_coverage_results(self, status: str | None = None) -> None:
+        self.station_coverage_results = {}
+        if hasattr(self, "station_coverage_tree"):
+            self.station_coverage_tree.delete(
+                *self.station_coverage_tree.get_children()
+            )
+        if hasattr(self, "station_coverage_status_var"):
+            self.station_coverage_status_var.set(
+                status or "Find up to 10 candidate stations, then compare coverage."
+            )
+
+    def _station_coverage_selected(self, _event: tk.Event | None = None) -> None:
+        selected_items = self.station_coverage_tree.selection()
+        if not selected_items:
+            return
+        tags = self.station_coverage_tree.item(selected_items[0], "tags")
+        if not tags:
+            return
+        provider, station_id = str(tags[0]).split(":", maxsplit=1)
+        station = next(
+            (
+                item
+                for item in self.station_options
+                if str(item.get("provider", "")).upper() == provider
+                and str(item.get("sid", "")) == station_id
+            ),
+            None,
+        )
+        if station is None:
+            return
+        label = self._station_label(station)
+        labels = list(self.station_combo["values"])
+        if label in labels:
+            self.station_combo.current(labels.index(label))
+            self._station_selection_changed()
+
     def _reset_weather_selection(self) -> None:
         if self.state_typeahead_after_id is not None:
             self.after_cancel(self.state_typeahead_after_id)
@@ -14222,8 +14259,11 @@ class RainwaterTkApp(tk.Tk):
         self.weather_filter_var.set("")
         self.station_var.set("")
         self.station_options = []
+        self._clear_station_coverage_results()
         if hasattr(self, "station_combo"):
             self.station_combo["values"] = []
+        if hasattr(self, "compare_station_coverage_button"):
+            self.compare_station_coverage_button.configure(state="disabled")
         if hasattr(self, "station_map"):
             self._clear_station_map_markers()
         self._reset_station_typeahead()
@@ -16059,6 +16099,9 @@ class RainwaterTkApp(tk.Tk):
         if self.station_lookup_poll_after_id is not None:
             self.after_cancel(self.station_lookup_poll_after_id)
             self.station_lookup_poll_after_id = None
+        if self.station_coverage_poll_after_id is not None:
+            self.after_cancel(self.station_coverage_poll_after_id)
+            self.station_coverage_poll_after_id = None
         if self.location_poll_after_id is not None:
             self.after_cancel(self.location_poll_after_id)
             self.location_poll_after_id = None
@@ -17448,7 +17491,9 @@ class RainwaterTkApp(tk.Tk):
             high = float(rows[index]["high"])
             canvas.create_text((left + right) / 2, bottom + 15, text=f"{format_number(low, self.config_model, max_decimal_places=0)}-{format_number(high, self.config_model, max_decimal_places=0)}", font=("Segoe UI", 7))
             canvas.create_text((left + right) / 2, max(top - 9, pad_top + 7), text=str(count), font=("Segoe UI", 8))
-        canvas.create_text(13, height / 2, text="Days", angle=90, font=("Segoe UI", 8))
+        canvas.create_text(
+            13, height / 2, text=chart["y_label"], angle=90, font=("Segoe UI", 8)
+        )
         canvas.create_text(
             pad_left + plot_width / 2,
             ((height - pad_bottom + 15) + height) / 2,
@@ -17577,7 +17622,7 @@ class RainwaterTkApp(tk.Tk):
             self.multitank_distribution_canvas,
             distribution_series,
             "Tank Level Distribution",
-            "Days (%)",
+            prepared["report_charts"][0]["y_label"],
             "Tank level (% of capacity)",
             y_bounds=(0.0, 100.0),
         )
@@ -18643,12 +18688,14 @@ class DemandObjectDialog(tk.Toplevel):
         typical_day = 0.0
         typical_week = 0.0
         average_monthly = 0.0
+        instantaneous_gpm: float | None = None
         daily_summary_label = "Typical weekday"
         if mode == "scheduled_flow":
             display_flow = self._parsed_nonnegative(self.instantaneous_demand_var) or 0.0
             flow = _demand_flow_to_gallons_per_minute(
                 display_flow, self.instantaneous_demand_unit_var.get()
             )
+            instantaneous_gpm = flow
             daily_values = [
                 flow * 60.0 * sum(float(value) for value in schedule.get(day, [])[:24])
                 for day in WEEKDAY_KEYS
@@ -18693,8 +18740,13 @@ class DemandObjectDialog(tk.Toplevel):
             typical_week = typical_day * 7.0
         unit = volume_unit(self.config_model)
         eligibility = "Yes" if self.sewer_eligible_var.get() else "No"
+        instantaneous_summary = (
+            f"Instantaneous demand: {format_number(instantaneous_gpm, self.config_model, max_decimal_places=1)} GPM    |    "
+            if instantaneous_gpm is not None
+            else ""
+        )
         self.summary_var.set(
-            f"{daily_summary_label}: {format_number(volume_to_display(typical_day, self.config_model), self.config_model, max_decimal_places=1)} {unit}    |    "
+            f"{instantaneous_summary}{daily_summary_label}: {format_number(volume_to_display(typical_day, self.config_model), self.config_model, max_decimal_places=1)} {unit}    |    "
             f"Typical week: {format_number(volume_to_display(typical_week, self.config_model), self.config_model, max_decimal_places=1)} {unit}\n"
             f"Average monthly estimate: {format_number(volume_to_display(average_monthly, self.config_model), self.config_model, max_decimal_places=1)} {unit}    |    "
             f"Sewer-charge eligible: {eligibility}"

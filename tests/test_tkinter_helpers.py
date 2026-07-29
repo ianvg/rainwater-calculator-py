@@ -204,6 +204,42 @@ def test_station_map_fullscreen_icons_are_bundled_svgs() -> None:
         assert icon_path.read_text(encoding="utf-8").lstrip().startswith("<svg")
 
 
+def test_map_marker_icon_is_a_bundled_svg() -> None:
+    icon_path = tkinter_app._resource_path(tkinter_app.MAP_MARKER_ICON_ASSET)
+
+    assert icon_path.is_file()
+    assert icon_path.read_text(encoding="utf-8").lstrip().startswith("<svg")
+
+
+def test_map_marker_icon_is_display_scaled_and_cached(monkeypatch) -> None:
+    class Tcl:
+        @staticmethod
+        def call(*_args: str) -> float:
+            return 2.0
+
+    class Master:
+        tk = Tcl()
+
+    loaded: list[tuple[object, str, int, str]] = []
+    image = object()
+
+    def load(master: object, path: str, *, size: int, color: str) -> object:
+        loaded.append((master, path, size, color))
+        return image
+
+    monkeypatch.setattr(tkinter_app, "_load_svg_icon", load)
+    master = Master()
+
+    first = tkinter_app._map_marker_icon(master, "#1976d2")
+    second = tkinter_app._map_marker_icon(master, "#1976d2")
+
+    assert first is image
+    assert second is image
+    assert loaded == [
+        (master, tkinter_app.MAP_MARKER_ICON_ASSET, 60, "#1976d2")
+    ]
+
+
 def test_demand_quantity_summary_uses_selected_number_format() -> None:
     app = object.__new__(RainwaterTkApp)
     app.config_model = default_project_config()
@@ -528,6 +564,26 @@ def test_occupational_demand_modes_have_clear_visible_prefix() -> None:
     assert DemandObjectDialog.MODE_LABELS[
         "Occupational - Monthly volume"
     ] == "monthly_volume"
+
+
+def test_scheduled_demand_calculated_summary_shows_instantaneous_gpm() -> None:
+    dialog = object.__new__(DemandObjectDialog)
+    dialog.config_model = default_project_config()
+    dialog.config_model.demand.hourly_schedule_library = {
+        "Week": {day: [1.0] + [0.0] * 23 for day in WEEKDAY_KEYS}
+    }
+    dialog.mode_var = _VariableStub("Scheduled flow")
+    dialog.schedule_var = _VariableStub("Week")
+    dialog.instantaneous_demand_var = _VariableStub("7.57082")
+    dialog.instantaneous_demand_unit_var = _VariableStub("lpm")
+    dialog.sewer_eligible_var = _VariableStub(True)
+    dialog.summary_var = _VariableStub()
+
+    dialog._update_calculated_summary()
+
+    assert dialog.summary_var.get().startswith(
+        "Instantaneous demand: 2 GPM    |    Typical weekday:"
+    )
 
 
 def test_custom_schedule_library_preserves_schedule_types(tmp_path) -> None:
@@ -1744,6 +1800,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert 'class="year-unmet" style="fill:#c94c4c"' in html
     assert 'style="fill:#f2c94c;stroke:#8a6d00;stroke-width:1.5"' in html
     assert 'class="distribution-bar" style="fill:#2e8b57;stroke:#246b49;stroke-width:1"' in html
+    assert "Days [210]" in html
     assert "stroke:#d71920" in html
     assert "Primary tank size" in html
     assert "Executive design summary" in html
@@ -1923,6 +1980,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
         r"\section{Yearly Demand Reliability - 750 gal tank}"
     )
     assert r"\section{Tank Level Distribution}" in latex
+    assert r"ylabel={Days [210]}" in latex
     assert latex.index(r"\section{Yearly Demand Reliability - 750 gal tank}") < latex.index(
         r"\section{Tank Level Distribution}"
     )
@@ -1934,6 +1992,7 @@ def test_report_charts_mark_selected_tank_with_red_circle(tmp_path) -> None:
     assert any("0.79 0.30 0.30 rg" in command for command in yearly_pdf_commands)
     assert any("0.18 0.55 0.34 rg" in command for command in distribution_pdf_commands)
     assert any("5,000-6,000" in command for command in distribution_pdf_commands)
+    assert any("Days [210]" in command for command in distribution_pdf_commands)
 
     pdf_path = tmp_path / "parity.pdf"
     app = object.__new__(RainwaterTkApp)

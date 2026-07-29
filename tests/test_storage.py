@@ -54,6 +54,7 @@ def test_legacy_project_defaults_to_united_states() -> None:
     assert config.report_sections == {}
     assert config.report_include_system_visualization is False
     assert config.report_include_multitank_charts is False
+    assert config.report_include_rainfall_event_totals is False
 
 
 def test_read_only_store_loads_without_modifying_database(tmp_path: Path) -> None:
@@ -119,6 +120,7 @@ def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     config.report_sections = {"notes": False, "financial_analysis": True}
     config.report_include_system_visualization = True
     config.report_include_multitank_charts = True
+    config.report_include_rainfall_event_totals = True
     config.reporting_precipitation_normal = {
         "station_id": "USW00013873",
         "name": "ATHENS BEN EPPS AP",
@@ -138,6 +140,7 @@ def test_report_generation_choices_round_trip_with_project(tmp_path) -> None:
     assert loaded.report_sections == config.report_sections
     assert loaded.report_include_system_visualization is True
     assert loaded.report_include_multitank_charts is True
+    assert loaded.report_include_rainfall_event_totals is True
     assert loaded.reporting_precipitation_normal is not None
     assert loaded.reporting_precipitation_normal["station_id"] == "USW00013873"
     assert loaded.reporting_precipitation_normal["annual_precipitation_inches"] == 48.1

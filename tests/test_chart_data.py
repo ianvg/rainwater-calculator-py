@@ -50,6 +50,8 @@ def test_selected_tank_chart_data_reuses_report_rows_and_project_units() -> None
     assert reliability["x_values"] == pytest.approx([1_892.705, 2_271.246])
     assert distribution["unit"] == "L"
     assert sum(row["count"] for row in distribution["rows"]) == 2
+    assert distribution["analysis_days"] == 2
+    assert distribution["y_label"] == "Days [2]"
     assert yearly["rows"][0]["met_percent"] == 50.0
     assert yearly["selected_reliability"] == 50.0
 
@@ -75,7 +77,10 @@ def test_multitank_chart_data_keeps_screen_and_report_series_in_parity() -> None
     assert tank["dated_points"][0] == ("2024-12-31", 0.0)
     distribution = prepared["distribution_series"][0]
     assert sum(distribution["y_values"]) == pytest.approx(100.0)
+    assert distribution["analysis_days"] == 3
+    assert prepared["report_charts"][0]["y_label"] == "Days (%) [3]"
     report_distribution = prepared["report_charts"][0]["series"][0]
     assert report_distribution["points"] == distribution["points"]
+    assert report_distribution["analysis_days"] == 3
     report_history = prepared["report_charts"][-1]["series"][0]
     assert report_history["points"] == tank["points"]

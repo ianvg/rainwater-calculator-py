@@ -45,14 +45,13 @@
     "water-balance: Component | Volume",
     "water-balance: Component | Volume",
     "first-flush-summary: Year | Events started | Gross runoff (gal) | First-flush diversion (gal) | Net collected (gal) | Diverted",
-    "first-flush-summary: Event | Start | End | Wet timesteps | Gross runoff (gal) | First-flush diversion (gal) | Net collected (gal) | Diverted",
     "demand-summary: Month | Demand (gal/day) | Demand (gal/month) | Month | Demand (gal/day) | Demand (gal/month)",
     "end-use-performance: End use | Type | Schedule | Sewer basis | Demand (gal/year) | Supply (gal/year) | Demand met | Water savings/year | Sewer savings/year",
     "financial-analysis: Item | Value",
     "financial-analysis: Year | Nominal net cash flow | Discounted cash flow | Cumulative discounted cash flow",
     "reliability-curve: Tank size (gal) | Reliability",
     "yearly-demand-reliability: Year | Days met | Met | Days not met | Not met",
-    "tank-level-distribution: Tank level range (gal) | Days"
+    "tank-level-distribution: Tank level range (gal) | Days [366]"
   ],
   "toc_targets": [
     "project-information",

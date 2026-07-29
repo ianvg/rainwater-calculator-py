@@ -14,7 +14,7 @@ The **Financial assumptions and results** section records tariffs, billing units
 
 The **Rainfall quality and completeness** section reports a calendar-year completeness score and rating, observed and expected days, missing periods, explicit partial-year labels, duplicate dates, and invalid precipitation rows. The **Yearly rainfall summary** reports precipitation, wet days, missing days, and completeness for every year. The **Rainfall-event summary** reports the event count and up to the ten largest events using the project's antecedent-dry-period rule.
 
-The **First-flush diversion summary** provides two reconciled tables. Yearly rows report events started, gross runoff, first-flush diversion, net collected water, and the diverted percentage. Event rows report the same volumes for every retained rainfall event together with its identifier, start, end, and wet-timestep count. An event that crosses New Year is counted in the year it starts, while each year's volume row contains only volumes occurring in that calendar year. The tables are also available under **Results > First-flush summaries**.
+The **First-flush diversion summary** provides a reconciled yearly table reporting events started, gross runoff, first-flush diversion, net collected water, and the diverted percentage. The detailed event table is omitted from reports by default; enable **Include detailed rainfall-event totals in the first-flush summary** under **Advanced options** to add every retained event with its identifier, start, end, wet-timestep count, and reconciled volumes. An event that crosses New Year is counted in the year it starts, while each year's volume row contains only volumes occurring in that calendar year. Both tables remain available in the application under **Results > First-flush summaries**.
 
 The **Analysis provenance and reproducibility** section identifies the rainfall source, explicit data classification, record coverage, temporal resolution, source timezone, timing metadata, import or retrieval timestamp, timestep and rainfall-timing assumptions, system and municipal-backup state, initial tank fill, filter recovery, application and algorithm versions, analysis signature, and report-generation timestamp.
 
@@ -42,7 +42,7 @@ The reliability graph marks the selected tank size and its simulated reliability
 
 The Yearly Demand Reliability plot appears immediately after the reliability curve. Each 100% stacked bar shows the percentage of days in that calendar year when complete demand was met by rainwater and when it was not; the two segments always total 100%. Yellow markers identify each year's reliability at the segment boundary. A final average-only slot reports the selected tank's overall reliability and identifies the number of analyzed years.
 
-The Tank Level Distribution plot follows the yearly reliability plot. It groups the selected-tank simulation into six tank-level ranges and reports the number of days in each range.
+The Tank Level Distribution plot follows the yearly reliability plot. It groups the selected-tank simulation into six tank-level ranges and reports the number of days in each range. The plot axis and accompanying table label show the total number of analyzed days in brackets, such as **Days [731]**. Multi-tank distribution charts use the equivalent **Days (%) [731]** label.
 
 The surface-area summary includes only collection surfaces whose configured area is greater than zero. It reports each surface's runoff coefficient and first-flush depth, followed by the antecedent dry period in its selected unit, detected event count, and total diverted volume. Daily and hourly result exports retain gross runoff, first-flush loss, and net collection separately. Zero-area default and custom surfaces are omitted from PDF, HTML, and LaTeX report output.
 
@@ -54,7 +54,7 @@ The demand summary reports both mean simulated demand per day and mean total dem
 
 ## Report information
 
-When generating a report, review or enter:
+Report information comes directly from the saved project and current report-generation context:
 
 - Client name
 - Date
@@ -67,17 +67,17 @@ The PDF, LaTeX, and HTML outputs are generated from the same report content so t
 
 Before previewing or exporting, open **Results > Report generation**. Select the core sections to include; the choices are grouped under the same Project overview, Precipitation report, System design and performance, Demand and financial analysis, and Reliability analysis headings used in the HTML report body. Use **Select all**, **Clear all**, and **Restore defaults** for quick changes. The report cover is always included, and each format builds its table of contents from the selected sections. Section choices are saved with the project and apply to both preview and export.
 
-Use **Supplemental visuals** on the same sub-tab to include the system-type visualization and, when comparison results are available, the multi-tank comparison charts.
+Use **Supplemental visuals** on the same sub-tab to include the system-type visualization and, when comparison results are available, the multi-tank comparison charts. Use **Advanced options** to include the detailed first-flush rainfall-event totals; this project setting is off by default.
 
 ## Preview a report
 
-Select **View > View PDF report** or **View > View HTML report**, then complete the report-information dialog. The primary PDF uses WeasyPrint to render the same HTML document used by the HTML export. The application generates the report in a temporary directory and immediately opens it in the operating system's default PDF viewer or web browser. HTML previews are served only on the local loopback interface (`127.0.0.1`) while the application is running, avoiding browser restrictions on temporary `file://` pages. No save location is required for a preview.
+Select **View > View PDF report** or **View > View HTML report**. The primary PDF uses WeasyPrint to render the same HTML document used by the HTML export. The application generates the report in a temporary directory and immediately opens it in the operating system's default PDF viewer or web browser. HTML previews are served only on the local loopback interface (`127.0.0.1`) while the application is running, avoiding browser restrictions on temporary `file://` pages. No save location is required for a preview.
 
 Temporary previews are intended for review. Export a report when a permanent project deliverable is required.
 
 ## Export a report
 
-Select **Export > Export PDF report...** or **Export > Export HTML report...**, complete the report-information dialog, and choose a permanent save location. **Export legacy PDF report...** retains the previous LaTeX/direct-PDF renderer as a secondary option during the transition.
+Select **Export > Export PDF report...** or **Export > Export HTML report...**, then choose a permanent save location. **Export legacy PDF report...** retains the previous LaTeX/direct-PDF renderer as a secondary option during the transition.
 
 ## Compare saved projects
 

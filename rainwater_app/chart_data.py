@@ -68,16 +68,19 @@ def tank_level_distribution_chart_data(
 ) -> dict[str, object]:
     capacity = volume_to_display(config.selected_tank_size_gal, config)
     unit = volume_unit(config)
+    rows = report_tank_level_distribution(results, config, bin_count)
+    analysis_days = sum(int(row["count"]) for row in rows)
     return {
         "title": (
             f"Tank Level Distribution - "
             f"{format_number(capacity, config, max_decimal_places=0)} {unit} tank"
         ),
         "x_label": f"Tank level range ({unit})",
-        "y_label": "Days",
+        "y_label": f"Days [{analysis_days:,}]",
+        "analysis_days": analysis_days,
         "capacity": capacity,
         "unit": unit,
-        "rows": report_tank_level_distribution(results, config, bin_count),
+        "rows": rows,
     }
 
 
@@ -159,7 +162,8 @@ def multitank_chart_data(
         counts = [0] * 6
         for percentage in percentages:
             counts[min(int(percentage / (100.0 / 6)), 5)] += 1
-        total = len(percentages) or 1
+        analysis_days = len(percentages)
+        total = analysis_days or 1
         distribution_x = [(index + 0.5) * (100.0 / 6) for index in range(6)]
         distribution_y = [count / total * 100.0 for count in counts]
         distribution_series.append(
@@ -168,6 +172,7 @@ def multitank_chart_data(
                 "x_values": distribution_x,
                 "y_values": distribution_y,
                 "points": list(zip(distribution_x, distribution_y)),
+                "analysis_days": analysis_days,
             }
         )
 
@@ -195,13 +200,30 @@ def multitank_chart_data(
             }
         )
 
+    distribution_day_counts = sorted({
+        int(row["analysis_days"]) for row in distribution_series
+    })
+    if len(distribution_day_counts) == 1:
+        distribution_days_label = f"{distribution_day_counts[0]:,}"
+    elif distribution_day_counts:
+        distribution_days_label = ", ".join(
+            f"{count:,}" for count in distribution_day_counts
+        )
+    else:
+        distribution_days_label = "0"
+
     report_charts = [
         {
             "title": "Tank level distribution - multitank",
             "x_label": "Tank level (% of capacity)",
-            "y_label": "Days (%)",
+            "y_label": f"Days (%) [{distribution_days_label}]",
+            "analysis_days": distribution_day_counts,
             "series": [
-                {"label": row["label"], "points": row["points"]}
+                {
+                    "label": row["label"],
+                    "points": row["points"],
+                    "analysis_days": row["analysis_days"],
+                }
                 for row in distribution_series
             ],
         },

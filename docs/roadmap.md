@@ -9,7 +9,11 @@ This document records possible future directions for the RWH Calculator. Items a
 Continue extracting cohesive boundaries instead of performing a single wholesale rewrite:
 
 - [Implemented] Keep validated HTML, LaTeX, and direct-PDF renderers behind a dedicated reporting service.
-- Separate system-builder canvas interaction from graph validation and compilation.
+- [Implemented initial extraction] Keep system-builder geometry, viewport bounds, connection
+  editing, and animation timing and flow-state rules in the tested UI-independent
+  `rainwater_app/system_builder_controller.py` module. Continue moving widget event
+  coordination and canvas rendering behind this boundary; graph validation and compilation
+  already remain in `rainwater_app/system_model.py`.
 - [Implemented] Isolate hydraulic analysis coordination, cancellation callbacks, and progress events from widgets.
 - [Implemented initial extraction] Prepare reliability-curve rows and labels, yearly reliability, tank-level distributions, extrema-preserving line downsampling, and shared screen/report multitank series in the tested UI-independent `rainwater_app/chart_data.py` module. Tkinter retains canvas drawing and interactive range controls.
 - Keep dialogs and tab construction thin, with calculation and validation logic independently testable.

@@ -359,6 +359,18 @@ def render_latex(
         )
         for row in report.get("first_flush_event_summary", [])
     ) or _latex_row("No event-level first-flush summary", "--", "--", "--", "--", "--", "--", "--")
+    first_flush_event_detail_latex = ""
+    if report.get("include_rainfall_event_totals", False):
+        first_flush_event_detail_latex = rf"""
+\subsection*{{Rainfall-event totals}}
+\begin{{longtable}}{{@{{}}rllrrrrr@{{}}}}
+\toprule
+Event & Start & End & Wet steps & Gross & Diverted & Net & Diverted \% \\
+\midrule
+{first_flush_event_rows_latex}
+\bottomrule
+\end{{longtable}}
+"""
     provenance_rows_latex = "\n".join(
         _latex_row(label, value)
         for label, value in (
@@ -440,6 +452,10 @@ def render_latex(
         f"({_latex_number(index + 1)},{_latex_number(row['count'])})"
         for index, row in enumerate(report["tank_level_distribution"])
     )
+    distribution_analysis_days = sum(
+        int(row["count"]) for row in report["tank_level_distribution"]
+    )
+    distribution_days_label = f"Days [{distribution_analysis_days:,}]"
     distribution_labels = ",".join(
         _latex_escape(f"{format_number(float(row['low']), max_decimal_places=0)}-{format_number(float(row['high']), max_decimal_places=0)}")
         for row in report["tank_level_distribution"]
@@ -762,14 +778,7 @@ Year & Events & Gross ({_latex_escape(volume)}) & Diverted ({_latex_escape(volum
 {first_flush_yearly_rows_latex}
 \bottomrule
 \end{{longtable}}
-\subsection*{{Rainfall-event totals}}
-\begin{{longtable}}{{@{{}}rllrrrrr@{{}}}}
-\toprule
-Event & Start & End & Wet steps & Gross & Diverted & Net & Diverted \% \\
-\midrule
-{first_flush_event_rows_latex}
-\bottomrule
-\end{{longtable}}
+{first_flush_event_detail_latex}
 \normalsize
 
 \section{{Analysis Provenance}}
@@ -842,7 +851,7 @@ width=6.6in,
 height=3.8in,
 ybar,
 ymin=0,
-ylabel={{Days}},
+ylabel={{{_latex_escape(distribution_days_label)}}},
 xlabel={{Tank level range ({_latex_escape(volume)})}},
 label style={{font=\bfseries\normalsize}},
 xtick={{1,...,6}},
@@ -1380,6 +1389,16 @@ def render_html(
         f'<td>{format_number(float(row.get("diversion_percent", 0.0)))}%</td></tr>'
         for row in report.get("first_flush_event_summary", [])
     ) or '<tr><td colspan="8">No event-level first-flush summary is available.</td></tr>'
+    first_flush_event_detail_html = ""
+    if report.get("include_rainfall_event_totals", False):
+        first_flush_event_detail_html = (
+            f'<h3>Rainfall-event totals</h3><div class="table-scroll"><table><thead><tr>'
+            f'<th>Event</th><th>Start</th><th>End</th><th>Wet timesteps</th>'
+            f'<th>Gross runoff ({escape(report["volume_unit"])})</th>'
+            f'<th>First-flush diversion ({escape(report["volume_unit"])})</th>'
+            f'<th>Net collected ({escape(report["volume_unit"])})</th><th>Diverted</th>'
+            f'</tr></thead><tbody>{first_flush_event_rows}</tbody></table></div>'
+        )
 
     provenance = report.get("provenance", {})
     provenance_rows = "".join(
@@ -1481,6 +1500,8 @@ def render_html(
         for value in range(0, 101, 25)
     )
     distribution = report["tank_level_distribution"]
+    distribution_analysis_days = sum(int(row["count"]) for row in distribution)
+    distribution_days_label = f"Days [{distribution_analysis_days:,}]"
     distribution_width, distribution_height = 900.0, 420.0
     distribution_left, distribution_right, distribution_top, distribution_bottom = 72.0, 24.0, 28.0, 72.0
     distribution_plot_width = distribution_width - distribution_left - distribution_right
@@ -1571,7 +1592,7 @@ main {{ width:100%; min-width:0; background:var(--paper); box-shadow:0 12px 36px
 header {{ padding:44px 52px 38px; border-top:6px solid var(--green); border-bottom:1px solid var(--line); }}
 .eyebrow {{ color:var(--green); font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:.1em; }}
 h1 {{ margin:8px 0 4px; font-size:34px; line-height:1.15; }} header p {{ margin:0; color:var(--muted); }}
-.report-group-heading {{ padding:22px 52px; border-bottom:1px solid var(--line); background:#edf6f2; transition:background-color .16s ease,box-shadow .16s ease,transform .16s ease; }} .report-group-heading h2 {{ margin:0; font-size:24px; }} .report-group-toggle {{ display:flex; width:100%; align-items:center; justify-content:space-between; gap:16px; padding:0; border:0; background:transparent; color:var(--green); font:inherit; font-weight:700; text-align:left; cursor:pointer; }} .report-group-toggle::after {{ content:""; flex:0 0 auto; width:10px; height:10px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg); transition:transform .15s ease; }} .report-group-toggle[aria-expanded="false"]::after {{ transform:rotate(-45deg); }} .report-group-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:6px; }} .report-group-heading:focus-within {{ background:#dcece5; box-shadow:0 4px 10px rgba(23,36,43,.16),inset 0 1px 0 rgba(255,255,255,.75); transform:translateY(-1px); }} .report-group-heading:active {{ background:#d2e6dd; box-shadow:0 1px 3px rgba(23,36,43,.18),inset 0 1px 2px rgba(23,36,43,.08); transform:translateY(0); }} .report-group-content[hidden] {{ display:none; }}
+.report-group-heading {{ padding:0; border-bottom:1px solid var(--line); background:#edf6f2; transition:background-color .16s ease,box-shadow .16s ease,transform .16s ease; }} .report-group-heading h2 {{ margin:0; font-size:24px; }} .report-group-toggle {{ display:flex; width:100%; align-items:center; justify-content:space-between; gap:16px; padding:22px 52px; border:0; background:transparent; color:var(--green); font:inherit; font-weight:700; text-align:left; cursor:pointer; }} .report-group-toggle::after {{ content:""; flex:0 0 auto; width:10px; height:10px; border-right:2px solid currentColor; border-bottom:2px solid currentColor; transform:rotate(45deg); transition:transform .15s ease; }} .report-group-toggle[aria-expanded="false"]::after {{ transform:rotate(-45deg); }} .report-group-toggle:focus-visible {{ outline:2px solid var(--blue); outline-offset:-6px; }} .report-group-heading:focus-within {{ background:#dcece5; box-shadow:0 4px 10px rgba(23,36,43,.16),inset 0 1px 0 rgba(255,255,255,.75); transform:translateY(-1px); }} .report-group-heading:active {{ background:#d2e6dd; box-shadow:0 1px 3px rgba(23,36,43,.18),inset 0 1px 2px rgba(23,36,43,.08); transform:translateY(0); }} .report-group-content[hidden] {{ display:none; }}
 @media (hover:hover) {{ .report-group-heading:hover {{ background:#dcece5; box-shadow:0 4px 10px rgba(23,36,43,.16),inset 0 1px 0 rgba(255,255,255,.75); transform:translateY(-1px); }} }}
 @media (prefers-reduced-motion:reduce) {{ .report-group-heading,.report-group-toggle::after {{ transition:none; }} }}
 main section {{ padding:34px 52px; border-bottom:1px solid var(--line); scroll-margin-top:20px; }} h2 {{ margin:0 0 20px; font-size:20px; }}
@@ -1595,7 +1616,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 .distribution-bar {{ fill:#2e8b57; stroke:#246b49; stroke-width:1; }}
 .axis-label {{ fill:#64747c; font-size:15px; font-weight:700; }} .history-controls {{ display:flex; align-items:center; justify-content:center; gap:10px; margin:-4px 0 8px; }} .history-controls button {{ width:30px; height:28px; border:1px solid #aab7bc; background:#fff; color:var(--ink); cursor:pointer; }} .history-controls button:disabled {{ color:#aab7bc; cursor:default; }} .history-controls strong {{ min-width:52px; text-align:center; }} footer {{ padding:20px 52px; color:var(--muted); font-size:12px; }}
 @media (max-width:900px) {{ .report-shell,.report-shell.toc-collapsed {{ display:block; width:100%; margin:0; }} .toc {{ position:sticky; top:0; z-index:100; max-height:100vh; overflow:auto; box-shadow:0 4px 14px rgba(23,36,43,.12); border-bottom:1px solid var(--line); }} .toc-toggle {{ position:sticky; top:0; z-index:1; }} .toc-inner {{ padding:18px 22px; }} .toc-inner > ul {{ columns:2; column-gap:28px; }} .toc-group {{ break-inside:avoid; }} .toc-collapsed .toc-toggle {{ height:40px; writing-mode:horizontal-tb; transform:none; text-align:left; }} main section {{ scroll-margin-top:52px; }} main {{ box-shadow:none; }} }}
-@media (max-width:700px) {{ .toc-inner > ul {{ columns:1; }} header,main section,.report-group-heading {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
+@media (max-width:700px) {{ .toc-inner > ul {{ columns:1; }} header,main section,.report-group-toggle {{ padding:28px 22px; }} dl {{ grid-template-columns:1fr; }} h1 {{ font-size:28px; }} .metric-grid,.balance-grid {{ grid-template-columns:1fr; }} }}
 @page {{ size:A4; margin:14mm 12mm 18mm; @bottom-center {{ content:"Page " counter(page) " of " counter(pages); color:#64747c; font:9pt Arial,Helvetica,sans-serif; }} }}
 @media print {{
   body {{ background:#fff; font-size:9.5pt; }}
@@ -1603,7 +1624,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
   .toc {{ display:none; }}
   main {{ width:100%; margin:0; box-shadow:none; }}
   header {{ padding:22px 26px 20px; }}
-  .report-group-heading {{ padding:14px 26px; box-shadow:none!important; transform:none!important; }}
+  .report-group-heading {{ box-shadow:none!important; transform:none!important; }}
+  .report-group-toggle {{ padding:14px 26px; }}
   .report-group-content[hidden] {{ display:block!important; }}
   main section {{ padding:18px 26px; }}
   section {{ break-inside:auto; }}
@@ -1644,7 +1666,7 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="candidate-performance"><h2>Candidate tank performance</h2><p>Flow quantities are average annual values; final storage is the end-of-record value. Click a column heading to sort the HTML table. The selected primary tank is highlighted.</p><div class="table-scroll"><table data-sortable-table><thead><tr>{candidate_head}</tr></thead><tbody>{candidate_rows}</tbody></table></div></section>
 <section id="water-balance"><h2>Reconciled water balance</h2><p>Runoff coefficients reduce rainfall-derived volume on every wet day. First flush is a separate event-based diversion applied after runoff coefficients. Values below cover the complete analysis period.</p><div class="balance-grid"><div><h3>Collection balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{collection_balance_rows}</tbody></table></div><div><h3>Primary-storage balance</h3><table><thead><tr><th>Component</th><th>Volume</th></tr></thead><tbody>{storage_balance_rows}</tbody></table></div></div></section>
 {system_visualization_html}
-<section id="first-flush-summary"><h2>First-flush diversion summary</h2><p>Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.</p><h3>Yearly totals</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Events started</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_yearly_rows}</tbody></table></div><h3>Rainfall-event totals</h3><div class="table-scroll"><table><thead><tr><th>Event</th><th>Start</th><th>End</th><th>Wet timesteps</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_event_rows}</tbody></table></div></section>
+<section id="first-flush-summary"><h2>First-flush diversion summary</h2><p>Event counts are assigned to the calendar year in which each rainfall event starts. Volumes use the complete simulated record and reconcile gross runoff less first-flush diversion to net collected water.</p><h3>Yearly totals</h3><div class="table-scroll"><table><thead><tr><th>Year</th><th>Events started</th><th>Gross runoff ({escape(report['volume_unit'])})</th><th>First-flush diversion ({escape(report['volume_unit'])})</th><th>Net collected ({escape(report['volume_unit'])})</th><th>Diverted</th></tr></thead><tbody>{first_flush_yearly_rows}</tbody></table></div>{first_flush_event_detail_html}</section>
 </div>
 <div class="report-group-heading"><h2><button class="report-group-toggle" type="button" aria-expanded="true" aria-controls="demand-financial-content">Demand and financial analysis</button></h2></div>
 <div id="demand-financial-content" class="report-group-content">
@@ -1667,8 +1689,8 @@ table {{ width:100%; border-collapse:collapse; }} th {{ color:var(--muted); font
 <section id="tank-level-distribution"><h2>Tank level distribution</h2><div class="chart"><svg viewBox="0 0 {distribution_width:.0f} {distribution_height:.0f}" role="img" aria-label="Distribution of days by tank level range">
 <g class="grid">{distribution_grid}</g>{distribution_bars}
 <text class="axis-label" x="{distribution_left + distribution_plot_width / 2:.2f}" y="{distribution_height - 10:.2f}" text-anchor="middle">Tank level range ({escape(report['volume_unit'])})</text>
-<text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">Days</text>
-</svg></div><div class="table-scroll"><table class="chart-data"><caption>Tank level distribution data</caption><thead><tr><th>Tank level range ({escape(report['volume_unit'])})</th><th>Days</th></tr></thead><tbody>{distribution_data_rows}</tbody></table></div></section>
+<text class="axis-label" transform="translate(18 {distribution_top + distribution_plot_height / 2:.2f}) rotate(-90)" text-anchor="middle">{escape(distribution_days_label)}</text>
+</svg></div><div class="table-scroll"><table class="chart-data"><caption>Tank level distribution data</caption><thead><tr><th>Tank level range ({escape(report['volume_unit'])})</th><th>{escape(distribution_days_label)}</th></tr></thead><tbody>{distribution_data_rows}</tbody></table></div></section>
 {multitank_html}
 <section id="analysis-provenance"><h2>Analysis provenance and reproducibility</h2><dl>{provenance_rows}</dl></section>
 </div>
