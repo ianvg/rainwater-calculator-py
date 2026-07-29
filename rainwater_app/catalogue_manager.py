@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import date
 import json
 from math import asin, cos, radians, sin, sqrt
+import shutil
 from pathlib import Path
+import tempfile
 import sqlite3
 from types import TracebackType
 
@@ -39,6 +42,8 @@ class StationRecommendation:
     subdivision_code: str
     latitude: float
     longitude: float
+    timezone: str
+    daily_boundary: str
     distance_km: float
     elevation_m: float | None
     coverage_percent: float
@@ -190,6 +195,8 @@ class CatalogueManager:
                     subdivision_code=str(row["subdivision_code"] or ""),
                     latitude=float(row["latitude"]),
                     longitude=float(row["longitude"]),
+                    timezone=str(row["timezone"] or ""),
+                    daily_boundary=str(row["daily_boundary"] or ""),
                     distance_km=distance,
                     elevation_m=(float(row["elevation_m"]) if row["elevation_m"] is not None else None),
                     coverage_percent=coverage,
@@ -284,6 +291,67 @@ def apply_catalogue_provenance(config: object, recommendation: StationRecommenda
     config.precipitation_catalogue_station_key = recommendation.station_key
     config.precipitation_catalogue_scope = metadata.scope
     config.precipitation_catalogue_production_ready = metadata.production_ready
+
+
+def install_catalogue(source: str | Path, install_dir: str | Path) -> Path:
+    """Validate and atomically copy a catalogue into the calculator data directory."""
+    source_path = Path(source).resolve()
+    with CatalogueManager.open(source_path) as catalogue:
+        version = catalogue.metadata.catalogue_version
+    destination_dir = Path(install_dir).resolve()
+    destination_dir.mkdir(parents=True, exist_ok=True)
+    base_name = f"precipitation-quality-{version}"
+    source_digest = _file_sha256(source_path)
+    destination = destination_dir / f"{base_name}.sqlite"
+    suffix = 2
+    while destination.exists():
+        if _file_sha256(destination) == source_digest:
+            return destination
+        destination = destination_dir / f"{base_name}-{suffix}.sqlite"
+        suffix += 1
+    with tempfile.NamedTemporaryFile(
+        dir=destination_dir, prefix=f".{base_name}-", suffix=".tmp", delete=False
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+    try:
+        shutil.copyfile(source_path, temporary_path)
+        with CatalogueManager.open(temporary_path):
+            pass
+        temporary_path.replace(destination)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return destination
+
+
+def preferred_catalogue(paths: tuple[Path, ...]) -> tuple[Path, CatalogueMetadata] | None:
+    """Choose the newest supported release, preferring production catalogues."""
+    valid: list[tuple[Path, CatalogueMetadata]] = []
+    for path in paths:
+        try:
+            with CatalogueManager.open(path) as catalogue:
+                valid.append((path, catalogue.metadata))
+        except (OSError, sqlite3.Error, ValueError):
+            continue
+    if not valid:
+        return None
+    return max(
+        valid,
+        key=lambda item: (
+            item[1].production_ready,
+            item[1].data_cutoff,
+            item[1].released_at,
+            item[1].catalogue_version,
+            str(item[0]).casefold(),
+        ),
+    )
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _assessment_evidence(

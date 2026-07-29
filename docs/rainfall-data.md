@@ -14,8 +14,16 @@ This comparison is a preliminary screening tool, not simulation input. Project s
 
 To provide that context in a generated report, select one completed comparison row and choose **Use selected in report**. The application saves a snapshot of that NOAA station and its versioned 1991-2020 annual and seasonal normals with the project. The executive summary then identifies the reference station, compares its annual normal with the analyzed-record average, and reports the station's distance from the project location or rainfall station when coordinates are available. A star marks the reporting reference in the comparison table. Choose **Clear report normal** to remove it. This selection only adds report context; it never changes rainfall data or simulation results. The application asks for confirmation when the selected reference is more than 100 km from the available project or rainfall-station coordinates.
 
-## Find stations near project coordinates
+## Import from an offline precipitation-quality catalogue
 
+Open **Rainwater Data > Daily rainfall** and use **Offline precipitation-quality catalogue**. Choose **Install Catalogue** to copy a schema-v2 SQLite release into the calculator's per-user data directory. The application validates SQLite integrity and catalogue metadata before installation, discovers installed releases at startup, and selects the newest supported production release. Set project coordinates and the historical period, choose **Long-term yield** or **Storm-event screening**, then select **Find Best Nearby Stations**. Results are ranked using the catalogue's period- and purpose-specific suitability assessment, coverage, complete-year count, longest gap, and distance.
+
+Choose **Use Selected Catalogue Record** to assign its daily observations to the project without contacting ACIS or ECCC. The saved project retains the catalogue version, schema version, station key, scope, production-readiness flag, station coordinates, timezone, daily reporting boundary, and known missing dates. Known missing observations are never silently reclassified as observations; the current daily simulation treats their explicitly recorded placeholders as zero and shows a warning. Prototype or review-only releases and stations rated unsuitable require confirmation before import. Storm-event suitability can use hourly inventory evidence, but the calculator currently imports the catalogue's daily record, so within-day rainfall timing is still not observed.
+
+Set `RWH_PRECIPITATION_CATALOGUE` to an absolute SQLite path when a managed deployment should use a catalogue outside the per-user installation directory. The online ACIS/ECCC workflow remains available below the catalogue panel as a fallback.
+
+
+## Find stations near project coordinates
 When project latitude and longitude are available, select **Find Nearest 10** to search geographically around the project. The calculator expands the search area as needed, ranks stations by great-circle distance, and displays the nearest ten stations that overlap the requested historical period. Distances are shown in kilometres, and the resulting stations can be selected, mapped, and imported through the normal workflow. This search does not require a State or Province/Territory selection.
 
 The analysis uses daily precipitation records. Longer, representative periods generally provide a more meaningful reliability estimate than short records.

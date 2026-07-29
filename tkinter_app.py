@@ -57,6 +57,14 @@ from rainwater_app.app_paths import (
     project_backup_dir,
     user_data_dir,
 )
+from rainwater_app.catalogue_manager import (
+    CatalogueManager,
+    CatalogueMetadata,
+    StationRecommendation,
+    apply_catalogue_provenance,
+    install_catalogue,
+    preferred_catalogue,
+)
 from rainwater_app.climate_normals import (
     CLIMATE_NORMALS_DATASET,
     CLIMATE_NORMALS_PRODUCT_VERSION,
@@ -588,6 +596,11 @@ CANADIAN_PRECIPITATION_OPTIONS = {
     "Total precipitation": "TOTAL_PRECIPITATION",
     "Rain only": "TOTAL_RAIN",
 }
+CATALOGUE_PURPOSE_OPTIONS = {
+    "Long-term yield": "long_term_yield",
+    "Storm-event screening": "storm_event",
+}
+
 CANADIAN_PRECIPITATION_LABELS = {value: label for label, value in CANADIAN_PRECIPITATION_OPTIONS.items()}
 COUNTRY_OPTIONS = sorted(
     ((country.alpha_3, country.name) for country in pycountry.countries),
@@ -1624,6 +1637,10 @@ class RainwaterTkApp(tk.Tk):
         self.candidate_sort_reverse = False
         self.candidate_tree_sizes: dict[str, float] = {}
         self.station_options: list[dict] = []
+        self.catalogue_path: Path | None = None
+        self.catalogue_metadata: CatalogueMetadata | None = None
+        self.catalogue_recommendations: tuple[StationRecommendation, ...] = ()
+        self.catalogue_recommendation_by_iid: dict[str, StationRecommendation] = {}
         self.station_coverage_results: dict[str, StationCoverage] = {}
         self.climate_normal_search_results: list[dict[str, object]] = []
         self.climate_normal_catalog: list[dict[str, object]] = []
@@ -1886,6 +1903,13 @@ class RainwaterTkApp(tk.Tk):
         self.weather_state_var = tk.StringVar(value=STATE_PLACEHOLDER)
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
+        self.catalogue_purpose_var = tk.StringVar(value="Long-term yield")
+        self.catalogue_status_var = tk.StringVar(
+            value="No installed precipitation catalogue found."
+        )
+        self.catalogue_station_status_var = tk.StringVar(
+            value="Install a catalogue release to search offline."
+        )
         self.station_var = tk.StringVar(value="")
         self.station_coverage_status_var = tk.StringVar(
             value="Find up to 10 candidate stations, then compare coverage."
@@ -1964,6 +1988,7 @@ class RainwaterTkApp(tk.Tk):
 
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self.request_exit)
+        self._refresh_catalogue_status()
         self.execution_log.info("Application", "Application started")
         self.execution_log_poll_after_id = self.after(75, self._poll_execution_log)
         if self.execution_log_visible_var.get():
@@ -7599,9 +7624,101 @@ class RainwaterTkApp(tk.Tk):
             foreground="#5f6b70",
         ).grid(row=4, column=1, sticky="ew", pady=2)
         self._refresh_synthetic_hourly_rainfall_status()
+        catalogue_frame = ttk.LabelFrame(
+            import_content, text="Offline precipitation-quality catalogue", padding=10
+        )
+        catalogue_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        catalogue_frame.columnconfigure(0, weight=1)
+        catalogue_header = ttk.Frame(catalogue_frame)
+        catalogue_header.grid(row=0, column=0, columnspan=3, sticky="ew")
+        catalogue_header.columnconfigure(0, weight=1)
+        ttk.Label(
+            catalogue_header,
+            textvariable=self.catalogue_status_var,
+            foreground="#5f6b70",
+            wraplength=650,
+            justify="left",
+        ).grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            catalogue_header,
+            text="Install Catalogue...",
+            command=self.install_precipitation_catalogue,
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Button(
+            catalogue_header,
+            text="Refresh",
+            command=self._refresh_catalogue_status,
+        ).grid(row=0, column=2, padx=(6, 0))
+
+        catalogue_controls = ttk.Frame(catalogue_frame)
+        catalogue_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
+        ttk.Label(catalogue_controls, text="Assessment purpose").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Combobox(
+            catalogue_controls,
+            textvariable=self.catalogue_purpose_var,
+            values=list(CATALOGUE_PURPOSE_OPTIONS),
+            state="readonly",
+            width=24,
+        ).grid(row=0, column=1, sticky="w", padx=(6, 12))
+        ttk.Label(catalogue_controls, text="Historical years").grid(
+            row=0, column=2, sticky="w"
+        )
+        ttk.Entry(
+            catalogue_controls, textvariable=self.weather_years_var, width=7
+        ).grid(row=0, column=3, sticky="w", padx=(6, 12))
+        self.find_catalogue_stations_button = ttk.Button(
+            catalogue_controls,
+            text="Find Best Nearby Stations",
+            command=self.find_catalogue_stations,
+        )
+        self.find_catalogue_stations_button.grid(row=0, column=4, sticky="w")
+
+        ttk.Label(
+            catalogue_frame,
+            textvariable=self.catalogue_station_status_var,
+            foreground="#5f6b70",
+            wraplength=760,
+            justify="left",
+        ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 4))
+        self.catalogue_tree = ttk.Treeview(
+            catalogue_frame,
+            columns=("station", "rating", "coverage", "years", "gap", "distance"),
+            show="headings",
+            height=5,
+            selectmode="browse",
+        )
+        for column, heading, width, anchor in (
+            ("station", "Station", 300, "w"),
+            ("rating", "Suitability", 135, "w"),
+            ("coverage", "Coverage", 85, "e"),
+            ("years", "Complete years", 95, "e"),
+            ("gap", "Longest gap", 85, "e"),
+            ("distance", "Distance", 80, "e"),
+        ):
+            self.catalogue_tree.heading(column, text=heading)
+            self.catalogue_tree.column(column, width=width, anchor=anchor)
+        self.catalogue_tree.grid(row=3, column=0, columnspan=2, sticky="ew")
+        catalogue_scroll = ttk.Scrollbar(
+            catalogue_frame, orient="vertical", command=self.catalogue_tree.yview
+        )
+        catalogue_scroll.grid(row=3, column=2, sticky="ns")
+        self.catalogue_tree.configure(yscrollcommand=catalogue_scroll.set)
+        self.catalogue_tree.bind("<<TreeviewSelect>>", self._catalogue_selection_changed)
+        self.import_catalogue_station_button = ttk.Button(
+            catalogue_frame,
+            text="Use Selected Catalogue Record",
+            command=self.import_selected_catalogue_station,
+            state="disabled",
+        )
+        self.import_catalogue_station_button.grid(
+            row=4, column=0, columnspan=3, sticky="ew", pady=(8, 0)
+        )
+
 
         self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
-        self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        self.weather_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         self.weather_frame.columnconfigure(1, weight=1)
         source_row = ttk.Frame(self.weather_frame)
         source_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
@@ -7733,7 +7850,7 @@ class RainwaterTkApp(tk.Tk):
         )
 
         station_map_frame = ttk.LabelFrame(import_content, text="Weather stations", padding=6)
-        station_map_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        station_map_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         station_map_frame.columnconfigure(0, weight=1)
         station_map_frame.rowconfigure(1, weight=1)
         map_toolbar = ttk.Frame(station_map_frame)
@@ -12261,6 +12378,13 @@ class RainwaterTkApp(tk.Tk):
             for tank_size, rows in frame.groupby("ComparisonTankSizeGallons", sort=True)
         }
 
+    def _clear_catalogue_provenance(self) -> None:
+        self.config_model.precipitation_catalogue_version = None
+        self.config_model.precipitation_catalogue_schema_version = None
+        self.config_model.precipitation_catalogue_station_key = None
+        self.config_model.precipitation_catalogue_scope = None
+        self.config_model.precipitation_catalogue_production_ready = None
+
     def _set_rainfall_provenance(
         self,
         *,
@@ -12622,6 +12746,7 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.use_synthetic_hourly_rainfall = False
             self.current_rainfall_csv_path = str(csv_path)
             self._remember_recent_rainfall_csv(csv_path)
+            self._clear_catalogue_provenance()
             self.rainfall_source_label = f"CSV file: {csv_path.name}"
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self._set_rainfall_provenance(
@@ -12670,6 +12795,7 @@ class RainwaterTkApp(tk.Tk):
             self.use_synthetic_hourly_rainfall_var.set(False)
             self.config_model.use_synthetic_hourly_rainfall = False
             self.current_rainfall_csv_path = None
+            self._clear_catalogue_provenance()
             self.rainfall_source_label = f"Hourly CSV file: {Path(path).name}"
             self.config_model.rainfall_source_label = self.rainfall_source_label
             self._set_rainfall_provenance(
@@ -13789,6 +13915,265 @@ class RainwaterTkApp(tk.Tk):
             f"Exported comparison to {Path(path).name}."
         )
 
+    def _catalogue_search_paths(self) -> tuple[Path, ...]:
+        paths: list[Path] = []
+        override = os.environ.get("RWH_PRECIPITATION_CATALOGUE", "").strip()
+        if override:
+            paths.append(Path(override).expanduser())
+        paths.extend(
+            (
+                self.application_data_dir / "catalogues",
+                _app_dir() / "catalogues",
+                _app_dir() / "data" / "catalogues",
+            )
+        )
+        return tuple(paths)
+
+    @staticmethod
+    def _catalogue_release_status(metadata: CatalogueMetadata, path: Path) -> str:
+        readiness = "production release" if metadata.production_ready else "prototype / review-only"
+        return (
+            f"Using catalogue {metadata.catalogue_version} ({readiness}); "
+            f"data cutoff {metadata.data_cutoff.isoformat()}; scope: {metadata.scope}. "
+            f"Installed at {path}."
+        )
+
+    def _refresh_catalogue_status(self) -> None:
+        candidates = CatalogueManager.discover(self._catalogue_search_paths())
+        selected = preferred_catalogue(candidates)
+        self.catalogue_path = selected[0] if selected else None
+        self.catalogue_metadata = selected[1] if selected else None
+        self.catalogue_recommendations = ()
+        self.catalogue_recommendation_by_iid = {}
+        tree = self.__dict__.get("catalogue_tree")
+        if tree is not None:
+            for iid in tree.get_children():
+                tree.delete(iid)
+        button = self.__dict__.get("import_catalogue_station_button")
+        if button is not None:
+            button.configure(state="disabled")
+        if selected is None:
+            self.catalogue_status_var.set(
+                "No supported catalogue is installed. Install a schema-v2 SQLite release; "
+                "the live ACIS/ECCC importer below remains available."
+            )
+            self.catalogue_station_status_var.set(
+                "Install a catalogue release to search offline."
+            )
+            return
+        self.catalogue_status_var.set(self._catalogue_release_status(selected[1], selected[0]))
+        self.catalogue_station_status_var.set(
+            "Set project coordinates, choose a purpose, then find nearby stations."
+        )
+
+    def install_precipitation_catalogue(self) -> None:
+        path = filedialog.askopenfilename(
+            title="Install precipitation-quality catalogue",
+            filetypes=[("SQLite catalogues", "*.sqlite"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            installed = install_catalogue(
+                path, self.application_data_dir / "catalogues"
+            )
+            self._refresh_catalogue_status()
+            self.status_var.set(f"Installed precipitation catalogue: {installed.name}")
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Catalogue", "Catalogue installation failed", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"Could not install the catalogue:\n{exc}", parent=self
+            )
+
+    def find_catalogue_stations(self) -> None:
+        if self.catalogue_path is None or self.catalogue_metadata is None:
+            messagebox.showinfo(
+                APP_TITLE, "Install a supported precipitation catalogue first.", parent=self
+            )
+            return
+        coordinates = self._coordinates_from_form(require_coordinates=True)
+        if coordinates is None:
+            return
+        latitude, longitude = coordinates
+        assert latitude is not None and longitude is not None
+        years = max(1, int(_float(self.weather_years_var.get(), 30)))
+        end_date = self.catalogue_metadata.data_cutoff
+        start_year = end_date.year - years + 1
+        purpose = CATALOGUE_PURPOSE_OPTIONS.get(
+            self.catalogue_purpose_var.get(), "long_term_yield"
+        )
+        try:
+            with CatalogueManager.open(self.catalogue_path) as catalogue:
+                recommendations = catalogue.recommendations_nearby(
+                    latitude=latitude,
+                    longitude=longitude,
+                    start_year=start_year,
+                    end_year=end_date.year,
+                    purpose=purpose,
+                    radius_km=250.0,
+                    limit=10,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Catalogue", "Offline station search failed", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"Could not search the catalogue:\n{exc}", parent=self
+            )
+            return
+        self.catalogue_recommendations = recommendations
+        self.catalogue_recommendation_by_iid = {}
+        for iid in self.catalogue_tree.get_children():
+            self.catalogue_tree.delete(iid)
+        for index, recommendation in enumerate(recommendations):
+            iid = f"catalogue-{index}"
+            self.catalogue_recommendation_by_iid[iid] = recommendation
+            rating = recommendation.suitability_level.replace("_", " ").title()
+            self.catalogue_tree.insert(
+                "",
+                "end",
+                iid=iid,
+                values=(
+                    recommendation.source_label,
+                    rating,
+                    f"{recommendation.coverage_percent:.1f}%",
+                    recommendation.complete_years,
+                    f"{recommendation.longest_gap_days} d",
+                    f"{recommendation.distance_km:.1f} km",
+                ),
+            )
+        self.import_catalogue_station_button.configure(state="disabled")
+        if recommendations:
+            self.catalogue_tree.selection_set("catalogue-0")
+            self.catalogue_tree.focus("catalogue-0")
+            self._catalogue_selection_changed()
+            self.catalogue_station_status_var.set(
+                f"Found {len(recommendations)} station(s) within 250 km for "
+                f"{start_year}-{end_date.year}. Ratings are period- and purpose-specific."
+            )
+        else:
+            self.catalogue_station_status_var.set(
+                f"No assessed stations were found within 250 km for {start_year}-{end_date.year}."
+            )
+
+    def _catalogue_selection_changed(self, _event: tk.Event | None = None) -> None:
+        selected = self.catalogue_tree.selection()
+        recommendation = (
+            self.catalogue_recommendation_by_iid.get(selected[0]) if selected else None
+        )
+        self.import_catalogue_station_button.configure(
+            state="normal" if recommendation is not None else "disabled"
+        )
+        if recommendation is not None and recommendation.finding_codes:
+            findings = ", ".join(
+                code.replace("_", " ") for code in recommendation.finding_codes
+            )
+            self.catalogue_station_status_var.set(
+                f"Selected {recommendation.source_label}. Assessment findings: {findings}."
+            )
+
+    def import_selected_catalogue_station(self) -> None:
+        selected = self.catalogue_tree.selection()
+        recommendation = (
+            self.catalogue_recommendation_by_iid.get(selected[0]) if selected else None
+        )
+        if (
+            recommendation is None
+            or self.catalogue_path is None
+            or self.catalogue_metadata is None
+        ):
+            messagebox.showinfo(
+                APP_TITLE, "Find and select a catalogue station first.", parent=self
+            )
+            return
+        if not self.catalogue_metadata.production_ready:
+            proceed = messagebox.askyesno(
+                APP_TITLE,
+                "This catalogue is marked prototype / review-only, not production-ready. "
+                "Its data may be synthetic or limited in scope. Use it for this project anyway?",
+                parent=self,
+            )
+            if not proceed:
+                return
+        if recommendation.suitability_level == "unsuitable":
+            proceed = messagebox.askyesno(
+                APP_TITLE,
+                "This station is rated unsuitable for the selected purpose and period. "
+                "Import its daily record anyway?",
+                parent=self,
+            )
+            if not proceed:
+                return
+        years = max(1, int(_float(self.weather_years_var.get(), 30)))
+        end_date = self.catalogue_metadata.data_cutoff
+        start_date = dt.date(end_date.year - years + 1, 1, 1)
+        try:
+            with CatalogueManager.open(self.catalogue_path) as catalogue:
+                rainfall = catalogue.import_daily_rainfall(
+                    recommendation.station_key, start_date, end_date
+                )
+                metadata = catalogue.metadata
+            rainfall_attrs = dict(rainfall.attrs)
+            self.rainfall_df = rainfall[["Date", "Precipitation"]].copy()
+            self.use_synthetic_hourly_rainfall_var.set(False)
+            self.config_model.use_synthetic_hourly_rainfall = False
+            self.current_rainfall_csv_path = None
+            apply_catalogue_provenance(self.config_model, recommendation, metadata)
+            self.rainfall_source_label = (
+                f"{recommendation.source_label} via offline catalogue "
+                f"{metadata.catalogue_version}"
+            )
+            self.config_model.rainfall_source_label = self.rainfall_source_label
+            timezone = recommendation.timezone or "Station local time; timezone not supplied"
+            boundary = recommendation.daily_boundary or "unspecified daily boundary"
+            self._set_rainfall_provenance(
+                data_type="observed",
+                temporal_resolution="daily",
+                timezone=timezone,
+                timing_type=(
+                    f"Catalogue daily totals; reporting boundary: {boundary}; "
+                    "within-day timing not observed"
+                ),
+                known_missing_dates=rainfall_attrs.get("known_missing_dates", []),
+            )
+            self.config_model.country_code = {
+                "US": "USA",
+                "CA": "CAN",
+            }.get(recommendation.country_code, recommendation.country_code)
+            self.curve_df = pd.DataFrame()
+            self.results_df = pd.DataFrame()
+            self.reliability_var.set("Reliability: --")
+            self._clear_results()
+            self._reset_weather_selection()
+            self._update_rainfall_summary()
+            self.status_var.set(
+                f"Imported {len(self.rainfall_df):,} offline daily rows from "
+                f"{recommendation.name}"
+            )
+            self.execution_log.info(
+                "Catalogue",
+                f"Imported catalogue {metadata.catalogue_version} station "
+                f"{recommendation.station_key}",
+            )
+            missing_count = len(rainfall_attrs.get("known_missing_dates", []))
+            if missing_count:
+                messagebox.showwarning(
+                    APP_TITLE,
+                    f"The catalogue record contains {missing_count:,} known missing day(s). "
+                    "They are explicitly preserved in project provenance and treated as zero "
+                    "precipitation by the current daily simulation.",
+                    parent=self,
+                )
+        except Exception as exc:  # noqa: BLE001
+            self.execution_log.error(
+                "Catalogue", "Catalogue rainfall import failed", exception=exc
+            )
+            messagebox.showerror(
+                APP_TITLE, f"Could not import catalogue rainfall:\n{exc}", parent=self
+            )
+
     def find_acis_stations(self) -> None:
         years = max(30, int(_float(self.weather_years_var.get(), 30)))
         selected_state = self.weather_state_var.get()
@@ -14295,6 +14680,7 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.use_synthetic_hourly_rainfall = False
             self.current_rainfall_csv_path = None
             station_region = self._station_region_suffix(station)
+            self._clear_catalogue_provenance()
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ACIS, {basis_label}"
             )
@@ -14378,6 +14764,7 @@ class RainwaterTkApp(tk.Tk):
             self.config_model.use_synthetic_hourly_rainfall = False
             self.current_rainfall_csv_path = None
             station_region = self._station_region_suffix(station)
+            self._clear_catalogue_provenance()
             self.rainfall_source_label = (
                 f"{station['name']} ({station['sid']}){station_region} via ECCC, {basis_label}"
             )

@@ -36,6 +36,7 @@ Notes:
 - Existing beside-executable data is copied into the new location on first run without deleting the original files.
 - The installer and uninstaller do not remove user projects or backups.
 - ACIS weather import requires internet access.
+- Offline precipitation-quality catalogues can be installed from **Rainwater Data > Daily rainfall**; catalogue imports do not require internet access.
 
 ## Product interface policy
 

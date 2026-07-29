@@ -7,6 +7,8 @@ import pytest
 from rainwater_app.catalogue_manager import (
     CatalogueManager,
     apply_catalogue_provenance,
+    install_catalogue,
+    preferred_catalogue,
 )
 from rainwater_app.models import ProjectConfig
 
@@ -34,7 +36,9 @@ CREATE TABLE daily_observations (
 """
 
 
-def _catalogue(path: Path, *, schema_version: int = 2) -> None:
+def _catalogue(
+    path: Path, *, schema_version: int = 2, production_ready: bool = False
+) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(SCHEMA)
     metadata = {
@@ -45,7 +49,7 @@ def _catalogue(path: Path, *, schema_version: int = 2) -> None:
         "assessment_engine_version": "0.2.0",
         "methodology_version": "0.2.0",
         "scope": "synthetic NY/ON prototype",
-        "production_ready": "false",
+        "production_ready": str(production_ready).lower(),
     }
     connection.executemany("INSERT INTO catalogue_metadata VALUES (?, ?)", metadata.items())
     connection.execute(
@@ -91,6 +95,8 @@ def test_open_recommend_import_and_project_provenance(tmp_path: Path) -> None:
         apply_catalogue_provenance(config, recommendations[0], catalogue.metadata)
 
     assert recommendations[0].suitability_level == "recommended"
+    assert recommendations[0].timezone == "America/New_York"
+    assert recommendations[0].daily_boundary == "midnight"
     assert rainfall["Precipitation"].tolist() == [1.0, 0.0]
     assert rainfall.attrs["known_missing_dates"] == ["2025-01-02"]
     assert rainfall.attrs["observation_qualifiers"] == {"2025-01-02": ["estimated"]}
@@ -114,3 +120,30 @@ def test_discovery_is_deterministic(tmp_path: Path) -> None:
     _catalogue(second)
 
     assert CatalogueManager.discover((tmp_path,)) == (second.resolve(), first.resolve())
+
+
+def test_install_is_validated_atomic_and_idempotent(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite"
+    install_dir = tmp_path / "installed"
+    _catalogue(source)
+
+    first = install_catalogue(source, install_dir)
+    second = install_catalogue(source, install_dir)
+
+    assert first == second
+    assert first.name == "precipitation-quality-2025.1.sqlite"
+    with CatalogueManager.open(first) as catalogue:
+        assert catalogue.metadata.catalogue_version == "2025.1"
+
+
+def test_preferred_catalogue_prioritizes_production_release(tmp_path: Path) -> None:
+    prototype = tmp_path / "prototype.sqlite"
+    production = tmp_path / "production.sqlite"
+    _catalogue(prototype)
+    _catalogue(production, production_ready=True)
+
+    selected = preferred_catalogue((prototype, production))
+
+    assert selected is not None
+    assert selected[0] == production
+    assert selected[1].production_ready
