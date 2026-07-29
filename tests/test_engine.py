@@ -897,6 +897,11 @@ def test_project_persists_rainfall_source_label(tmp_path) -> None:
     cfg.latitude = 36.548921
     cfg.longitude = -82.456789
     cfg.rainfall_source_label = "CENTRAL PARK NY (123456)"
+    cfg.precipitation_catalogue_version = "2025.1"
+    cfg.precipitation_catalogue_schema_version = 2
+    cfg.precipitation_catalogue_station_key = "ACIS:123456"
+    cfg.precipitation_catalogue_scope = "North America"
+    cfg.precipitation_catalogue_production_ready = True
     rainfall = pd.DataFrame(
         {
             "Date": pd.date_range("2025-01-01", periods=2, freq="D"),
@@ -910,6 +915,11 @@ def test_project_persists_rainfall_source_label(tmp_path) -> None:
 
     assert loaded_cfg.rainfall_source_label == "CENTRAL PARK NY (123456)"
     assert loaded_cfg.street_address == "1121 Brittain Estates Drive"
+    assert loaded_cfg.precipitation_catalogue_version == "2025.1"
+    assert loaded_cfg.precipitation_catalogue_schema_version == 2
+    assert loaded_cfg.precipitation_catalogue_station_key == "ACIS:123456"
+    assert loaded_cfg.precipitation_catalogue_scope == "North America"
+    assert loaded_cfg.precipitation_catalogue_production_ready is True
     assert loaded_cfg.city == "Kingsport"
     assert loaded_cfg.state_or_province == "Tennessee"
     assert loaded_cfg.postal_code == "37664"

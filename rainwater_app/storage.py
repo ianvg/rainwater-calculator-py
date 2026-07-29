@@ -44,7 +44,7 @@ from .models import (
 
 
 STORAGE_SCHEMA_VERSION = 1
-PROJECT_SCHEMA_VERSION = 17
+PROJECT_SCHEMA_VERSION = 18
 DEFAULT_BACKUP_RETENTION = 10
 
 
@@ -756,6 +756,21 @@ class SQLiteStore:
             ],
             weather_station_latitude=_optional_float(payload.get("weather_station_latitude")),
             weather_station_longitude=_optional_float(payload.get("weather_station_longitude")),
+            precipitation_catalogue_version=payload.get("precipitation_catalogue_version"),
+            precipitation_catalogue_schema_version=(
+                int(payload["precipitation_catalogue_schema_version"])
+                if payload.get("precipitation_catalogue_schema_version") is not None
+                else None
+            ),
+            precipitation_catalogue_station_key=payload.get(
+                "precipitation_catalogue_station_key"
+            ),
+            precipitation_catalogue_scope=payload.get("precipitation_catalogue_scope"),
+            precipitation_catalogue_production_ready=(
+                bool(payload["precipitation_catalogue_production_ready"])
+                if payload.get("precipitation_catalogue_production_ready") is not None
+                else None
+            ),
             analysis_input_signature=payload.get("analysis_input_signature"),
             analysis_unit_system=(
                 normalize_unit_system(payload.get("analysis_unit_system"))

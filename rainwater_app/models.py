@@ -509,6 +509,11 @@ class ProjectConfig:
     rainfall_known_missing_dates: List[str] = field(default_factory=list)
     weather_station_latitude: float | None = None
     weather_station_longitude: float | None = None
+    precipitation_catalogue_version: str | None = None
+    precipitation_catalogue_schema_version: int | None = None
+    precipitation_catalogue_station_key: str | None = None
+    precipitation_catalogue_scope: str | None = None
+    precipitation_catalogue_production_ready: bool | None = None
     analysis_input_signature: str | None = None
     analysis_unit_system: str | None = None
     tank_parameters: TankParameters = field(default_factory=TankParameters)
