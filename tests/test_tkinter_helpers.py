@@ -365,6 +365,31 @@ def test_acis_import_shows_selected_station_in_bottom_status_before_fetch(monkey
     assert status_during_fetch == ["Importing station Test Station (TEST001)..."]
 
 
+def test_imported_station_coverage_is_calculated_without_catalogue_data() -> None:
+    app = object.__new__(RainwaterTkApp)
+    app.station_coverage_results = {}
+    rainfall = pd.DataFrame(
+        {
+            "Date": pd.to_datetime(["2025-01-01", "2025-01-02"]),
+            "Precipitation": [0.1, 0.0],
+        }
+    )
+    rainfall.attrs["known_missing_dates"] = ["2025-01-02"]
+
+    app._record_imported_station_coverage(
+        {"provider": "ACIS", "sid": "TEST001", "name": "Test Station"},
+        dt.date(2025, 1, 1),
+        dt.date(2025, 1, 2),
+        "TOTAL_PRECIPITATION",
+        rainfall,
+    )
+
+    coverage = app.station_coverage_results["ACIS:TEST001"]
+    assert coverage.expected_days == 2
+    assert coverage.observed_days == 1
+    assert coverage.missing_days == 1
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [(None, 100), (True, 100), ("invalid", 100), (80, 80), ("110", 110), (119, 125), (999, 150)],

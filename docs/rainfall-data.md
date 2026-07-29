@@ -16,11 +16,13 @@ To provide that context in a generated report, select one completed comparison r
 
 ## Import from an offline precipitation-quality catalogue
 
-Open **Rainwater Data > Daily rainfall** and use **Offline precipitation-quality catalogue**. Choose **Install Catalogue** to copy a schema-v2 SQLite release into the calculator's per-user data directory. The application validates SQLite integrity and catalogue metadata before installation, discovers installed releases at startup, and selects the newest supported production release. Set project coordinates and the historical period, choose **Long-term yield** or **Storm-event screening**, then select **Find Best Nearby Stations**. Results are ranked using the catalogue's period- and purpose-specific suitability assessment, coverage, complete-year count, longest gap, and distance.
+At the bottom of **Rainwater Data > Daily rainfall**, use **Offline precipitation-quality catalogue**. Choose **Install Catalogue** to copy a schema-v2 SQLite release into the calculator's per-user data directory. The application validates SQLite integrity and catalogue metadata before installation, discovers installed releases at startup, and selects the newest supported production release. Set project coordinates and the historical period, then select **Find Nearby Stations**. Results are ranked neutrally by coverage and distance and show coverage, missing-day count, longest gap, and distance; the calculator does not display a purpose selector or suitability rating.
 
-Choose **Use Selected Catalogue Record** to assign its daily observations to the project without contacting ACIS or ECCC. The saved project retains the catalogue version, schema version, station key, scope, production-readiness flag, station coordinates, timezone, daily reporting boundary, and known missing dates. Known missing observations are never silently reclassified as observations; the current daily simulation treats their explicitly recorded placeholders as zero and shows a warning. Prototype or review-only releases and stations rated unsuitable require confirmation before import. Storm-event suitability can use hourly inventory evidence, but the calculator currently imports the catalogue's daily record, so within-day rainfall timing is still not observed.
+Choose **Use Selected Catalogue Record** to download the selected station's daily ACIS observations and cache them locally for the project. The saved project retains the catalogue version, schema version, station key, scope, production-readiness flag, station coordinates, timezone, daily reporting boundary, and known missing dates. Known missing observations are never silently reclassified as observations; the current daily simulation treats their explicitly recorded placeholders as zero and shows a warning. Prototype or review-only releases require confirmation before import.
 
-Set `RWH_PRECIPITATION_CATALOGUE` to an absolute SQLite path when a managed deployment should use a catalogue outside the per-user installation directory. The online ACIS/ECCC workflow remains available below the catalogue panel as a fallback.
+The compact catalogue stores station-level daily-quality summaries only. After selection, the calculator downloads the station's daily ACIS observations and retains them in its existing weather cache. The catalogue retains temporal-resolution inventory and precomputed assessment evidence for future research, but the calculator does not currently download or evaluate actual hourly observations. Inventory metadata indicating hourly availability is not treated as an hourly-data assessment.
+
+Set `RWH_PRECIPITATION_CATALOGUE` to an absolute SQLite path when a managed deployment should use a catalogue outside the per-user installation directory. The online ACIS/ECCC workflow remains available above the catalogue panel as a fallback.
 
 
 ## Find stations near project coordinates
@@ -30,11 +32,11 @@ The analysis uses daily precipitation records. Longer, representative periods ge
 
 Choose **Find Nearest 5 Airports** to restrict the geographic search to airport weather stations. In the United States, candidates must have an ACIS FAA or ICAO identifier and that identifier must match the official AviationWeather.gov airport-information service. Confirmed airport records are cached for 30 days and unmatched identifiers for one day, limiting repeated requests. In Canada, the search uses ECCC's authoritative `STATION_TYPE` aviation classification together with its Transport Canada and WMO metadata. Station names are not used to decide whether a station qualifies. The resulting five stations are ranked by distance and can be mapped, selected, and imported like other weather stations.
 
-## Compare candidate precipitation coverage
+## Review station precipitation coverage
 
-After finding one to ten ACIS or ECCC candidates, select **Compare Coverage**. The precipitation preflight downloads each candidate's daily record for the requested historical period without assigning any of them to the project. It ranks the records by the percentage of calendar days containing a valid precipitation observation and reports observed and missing day counts. Provider-reported missing values remain missing even when an import would substitute zero precipitation for simulation continuity.
+After an ACIS or ECCC station search, select a station from the scrollable results table and choose **Import Selected Station**. When the installed offline precipitation-quality catalogue contains the same provider station and every year in the requested historical period, the table shows its coverage percentage, observed days, and missing days immediately. Stations outside the catalogue's current geographic or temporal scope are marked **After import**.
 
-Select a row in the preflight table to select that station in the station dropdown and on the map, then choose **Import Selected Station** when ready. A search containing more than ten candidates must be narrowed with the station filter or replaced with **Find Nearest 10** before comparison. Coverage comparison uses the normal provider caches, requires an internet connection for uncached records, and does not change the project's active rainfall or analysis results.
+Importing an **After import** station calculates the same coverage fields from its downloaded daily record and updates the selected row. Provider-reported missing values remain missing in this assessment even when the daily simulation uses explicit zero-precipitation placeholders for continuity. Station selection in the table and on the map remains synchronized.
 
 ## Import from ACIS
 
@@ -46,11 +48,11 @@ Open the rainwater-data import tab and select a state. Begin typing a state name
 
 Select **Total precipitation** to use the ACIS daily precipitation value. ACIS does not provide a native rain-only field, so **Rain only** excludes precipitation on days with reported snowfall. This conservative approximation can undercount rain on mixed rain and snow days; the application displays a warning after such an import.
 
-After stations are retrieved, type the first few letters of a station name to preselect a matching station. Choose the date range and import the record.
+After stations are retrieved, focus the station table and type the first few letters of a station name to preselect a matching station. Choose the date range and import the record.
 
 While the application searches the weather service for stations, the lower-right progress bar animates and the station-selection controls remain disabled until the search finishes.
 
-After a station search completes, the map in the lower half of the tab displays every returned station that has valid coordinates and adjusts its view to include them. Nearby stations are grouped into numbered markers when zoomed out and separate automatically as the map is enlarged. Select a grouped marker to zoom into it. The selected station or group is red; other markers are blue. Select an individual marker to select the corresponding station in the dropdown, or select a station in the dropdown to highlight its marker. Map tiles require an internet connection and are provided by OpenStreetMap.
+After a station search completes, the map in the lower half of the tab displays every returned station that has valid coordinates and adjusts its view to include them. Nearby stations are grouped into numbered markers when zoomed out and separate automatically as the map is enlarged. Select a grouped marker to zoom into it. The selected station or group is red; other markers are blue. Select an individual marker to select the corresponding table row, or select a station in the table to highlight its marker. Map tiles require an internet connection and are provided by OpenStreetMap.
 
 ACIS importing requires an internet connection. After a successful import, the rainfall summary identifies the station name, station ID, number of rows, and record dates. Station information is retained when the project is saved and reopened.
 
@@ -65,7 +67,7 @@ The source is [ECCC Historical Climate Data](https://climate.weather.gc.ca/). Th
 3. Find and select an ECCC climate station.
 4. Import the selected station.
 
-With the station dropdown focused or expanded, type up to four letters in quick succession to move to the first station whose name begins with that prefix. The expanded list scrolls to keep the highlighted station visible. The prefix resets after one second or after the fourth character.
+With the station table focused, type up to four letters in quick succession to move to the first station whose name begins with that prefix. The list scrolls to keep the highlighted station visible. The prefix resets after one second or after the fourth character.
 
 **Total precipitation** includes liquid precipitation and the water equivalent represented by snowfall observations. This may be appropriate when snow is retained and later melts into the collection system. **Rain only** excludes snowfall and may be more appropriate where snow is expected to blow, slide, or be removed from the collection surface. Select the basis that matches the roof, climate, and operating assumptions.
 

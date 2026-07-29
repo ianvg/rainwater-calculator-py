@@ -88,6 +88,14 @@ def test_open_recommend_import_and_project_provenance(tmp_path: Path) -> None:
             end_year=2025,
             radius_km=50.0,
         )
+        neutral = catalogue.recommendations_nearby(
+            latitude=42.66,
+            longitude=-73.76,
+            start_year=2025,
+            end_year=2025,
+            purpose=None,
+            radius_km=50.0,
+        )
         rainfall = catalogue.import_daily_rainfall(
             "ACIS:ALB", date(2025, 1, 1), date(2025, 1, 2)
         )
@@ -95,6 +103,8 @@ def test_open_recommend_import_and_project_provenance(tmp_path: Path) -> None:
         apply_catalogue_provenance(config, recommendations[0], catalogue.metadata)
 
     assert recommendations[0].suitability_level == "recommended"
+    assert neutral[0].suitability_level == "not_assessed"
+    assert neutral[0].finding_codes == ()
     assert recommendations[0].timezone == "America/New_York"
     assert recommendations[0].daily_boundary == "midnight"
     assert rainfall["Precipitation"].tolist() == [1.0, 0.0]
@@ -103,6 +113,34 @@ def test_open_recommend_import_and_project_provenance(tmp_path: Path) -> None:
     assert config.precipitation_catalogue_version == "2025.1"
     assert config.precipitation_catalogue_station_key == "ACIS:ALB"
     assert not config.precipitation_catalogue_production_ready
+
+
+def test_station_coverage_matches_provider_ids_and_requires_every_requested_year(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "catalogue.sqlite"
+    _catalogue(path)
+
+    with CatalogueManager.open(path) as catalogue:
+        coverage = catalogue.coverage_for_stations(
+            provider="acis",
+            provider_station_ids=("ALB", "MISSING"),
+            start_year=2025,
+            end_year=2025,
+        )
+        incomplete_period = catalogue.coverage_for_stations(
+            provider="ACIS",
+            provider_station_ids=("ALB",),
+            start_year=2024,
+            end_year=2025,
+        )
+
+    assert tuple(coverage) == ("ALB",)
+    assert coverage["ALB"].expected_days == 365
+    assert coverage["ALB"].observed_days == 365
+    assert coverage["ALB"].missing_days == 0
+    assert coverage["ALB"].completeness_percent == 100.0
+    assert incomplete_period == {}
 
 
 def test_rejects_unsupported_catalogue_schema(tmp_path: Path) -> None:

@@ -47,14 +47,33 @@ class StationRecommendation:
     distance_km: float
     elevation_m: float | None
     coverage_percent: float
+    missing_days: int
     complete_years: int
     longest_gap_days: int
+    meets_coverage_filter: bool
     suitability_level: str
     finding_codes: tuple[str, ...]
 
     @property
     def source_label(self) -> str:
         return f"{self.name} ({self.provider}:{self.provider_station_id})"
+
+
+@dataclass(frozen=True)
+class CatalogueCoverage:
+    """Calendar-day coverage stored for one provider station and year range."""
+
+    provider: str
+    provider_station_id: str
+    start_year: int
+    end_year: int
+    expected_days: int
+    observed_days: int
+    missing_days: int
+
+    @property
+    def completeness_percent(self) -> float:
+        return 100.0 * self.observed_days / self.expected_days
 
 
 class CatalogueManager:
@@ -133,58 +152,80 @@ class CatalogueManager:
         longitude: float,
         start_year: int,
         end_year: int,
-        purpose: str = "long_term_yield",
+        purpose: str | None = "long_term_yield",
         radius_km: float = 250.0,
         limit: int = 10,
     ) -> tuple[StationRecommendation, ...]:
-        if purpose not in {"long_term_yield", "storm_event"}:
+        if purpose is not None and purpose not in {"long_term_yield", "storm_event"}:
             raise ValueError("Purpose must be long_term_yield or storm_event.")
         if end_year < start_year:
             raise ValueError("End year must not precede start year.")
-        rows = self._connection.execute(
-            """
-            SELECT s.*, SUM(q.expected_days) AS expected_days,
-                   SUM(q.observed_days) AS observed_days,
-                   SUM(q.complete_year) AS complete_years,
-                   MAX(q.longest_gap_days) AS longest_gap_days
-            FROM stations s
-            JOIN station_year_quality q ON q.station_key = s.station_key
-            WHERE q.year BETWEEN ? AND ?
-            GROUP BY s.station_key
-            """,
-            (start_year, end_year),
-        ).fetchall()
+        has_summary = self._connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' "
+            "AND name='station_quality_summary'"
+        ).fetchone() is not None
+        if has_summary:
+            rows = self._connection.execute(
+                """
+                SELECT s.*, q.expected_days, q.observed_days, q.missing_days,
+                       0 AS complete_years, q.longest_gap_days,
+                       q.coverage_percent, q.meets_coverage_filter
+                FROM stations s JOIN station_quality_summary q USING(station_key)
+                WHERE q.meets_coverage_filter = 1
+                """
+            ).fetchall()
+        else:
+            rows = self._connection.execute(
+                """
+                SELECT s.*, SUM(q.expected_days) AS expected_days,
+                       SUM(q.observed_days) AS observed_days,
+                       SUM(q.expected_days) - SUM(q.observed_days) AS missing_days,
+                       SUM(q.complete_year) AS complete_years,
+                       MAX(q.longest_gap_days) AS longest_gap_days
+                FROM stations s
+                JOIN station_year_quality q ON q.station_key = s.station_key
+                WHERE q.year BETWEEN ? AND ?
+                GROUP BY s.station_key
+                """,
+                (start_year, end_year),
+            ).fetchall()
         results: list[StationRecommendation] = []
         for row in rows:
             distance = _haversine_km(latitude, longitude, row["latitude"], row["longitude"])
             if distance > radius_km:
                 continue
-            assessment = self._connection.execute(
-                """
-                SELECT level, findings_json
-                FROM suitability_assessments
-                WHERE station_key = ? AND purpose = ?
-                  AND requested_start <= ? AND requested_end >= ?
-                ORDER BY requested_start DESC, requested_end ASC
-                LIMIT 1
-                """,
-                (
-                    row["station_key"],
-                    purpose,
-                    date(start_year, 1, 1).isoformat(),
-                    date(end_year, 12, 31).isoformat(),
-                ),
-            ).fetchone()
-            coverage = 100.0 * int(row["observed_days"]) / int(row["expected_days"])
-            level, findings = _assessment_evidence(
-                assessment,
-                purpose=purpose,
-                coverage_percent=coverage,
-                complete_years=int(row["complete_years"]),
-                longest_gap_days=int(row["longest_gap_days"]),
-                station_key=str(row["station_key"]),
-                connection=self._connection,
+            coverage = (
+                float(row["coverage_percent"]) if has_summary
+                else 100.0 * int(row["observed_days"]) / int(row["expected_days"])
             )
+            if purpose is None:
+                level, findings = "not_assessed", ()
+            else:
+                assessment = self._connection.execute(
+                    """
+                    SELECT level, findings_json
+                    FROM suitability_assessments
+                    WHERE station_key = ? AND purpose = ?
+                      AND requested_start <= ? AND requested_end >= ?
+                    ORDER BY requested_start DESC, requested_end ASC
+                    LIMIT 1
+                    """,
+                    (
+                        row["station_key"],
+                        purpose,
+                        date(start_year, 1, 1).isoformat(),
+                        date(end_year, 12, 31).isoformat(),
+                    ),
+                ).fetchone()
+                level, findings = _assessment_evidence(
+                    assessment,
+                    purpose=purpose,
+                    coverage_percent=coverage,
+                    complete_years=int(row["complete_years"]),
+                    longest_gap_days=int(row["longest_gap_days"]),
+                    station_key=str(row["station_key"]),
+                    connection=self._connection,
+                )
             results.append(
                 StationRecommendation(
                     station_key=str(row["station_key"]),
@@ -200,22 +241,92 @@ class CatalogueManager:
                     distance_km=distance,
                     elevation_m=(float(row["elevation_m"]) if row["elevation_m"] is not None else None),
                     coverage_percent=coverage,
+                    missing_days=int(row["missing_days"]),
                     complete_years=int(row["complete_years"]),
                     longest_gap_days=int(row["longest_gap_days"]),
+                    meets_coverage_filter=(
+                        bool(row["meets_coverage_filter"]) if has_summary
+                        else coverage >= 95.0 and int(row["longest_gap_days"]) <= 31
+                    ),
                     suitability_level=level,
                     finding_codes=findings,
                 )
             )
-        level_rank = {"recommended": 0, "suitable_with_caveats": 1, "unsuitable": 2}
-        results.sort(
-            key=lambda item: (
-                level_rank.get(item.suitability_level, 3),
-                -item.coverage_percent,
-                item.distance_km,
-                item.name.casefold(),
+        if purpose is None:
+            results.sort(
+                key=lambda item: (
+                    -item.coverage_percent,
+                    item.distance_km,
+                    item.name.casefold(),
+                )
             )
-        )
+        else:
+            level_rank = {"recommended": 0, "suitable_with_caveats": 1, "unsuitable": 2}
+            results.sort(
+                key=lambda item: (
+                    level_rank.get(item.suitability_level, 3),
+                    -item.coverage_percent,
+                    item.distance_km,
+                    item.name.casefold(),
+                )
+            )
         return tuple(results[: max(limit, 0)])
+
+    def coverage_for_stations(
+        self,
+        *,
+        provider: str,
+        provider_station_ids: tuple[str, ...],
+        start_year: int,
+        end_year: int,
+    ) -> dict[str, CatalogueCoverage]:
+        """Return complete catalogue coverage summaries keyed by provider station ID.
+
+        A station is omitted when even one requested calendar year is absent. This
+        prevents a partial catalogue period from being presented as coverage for the
+        whole weather-import request.
+        """
+        if end_year < start_year:
+            raise ValueError("Coverage end year must not precede its start year.")
+        requested_ids = {
+            station_id.strip().casefold(): station_id.strip()
+            for station_id in provider_station_ids
+            if station_id.strip()
+        }
+        if not requested_ids:
+            return {}
+        rows = self._connection.execute(
+            """
+            SELECT s.provider_station_id,
+                   COUNT(*) AS year_count,
+                   SUM(q.expected_days) AS expected_days,
+                   SUM(q.observed_days) AS observed_days
+            FROM stations s
+            JOIN station_year_quality q ON q.station_key = s.station_key
+            WHERE UPPER(s.provider) = UPPER(?) AND q.year BETWEEN ? AND ?
+            GROUP BY s.station_key, s.provider_station_id
+            """,
+            (provider, start_year, end_year),
+        ).fetchall()
+        expected_year_count = end_year - start_year + 1
+        results: dict[str, CatalogueCoverage] = {}
+        for row in rows:
+            catalogue_id = str(row["provider_station_id"])
+            requested_id = requested_ids.get(catalogue_id.casefold())
+            if requested_id is None or int(row["year_count"]) != expected_year_count:
+                continue
+            expected_days = int(row["expected_days"])
+            observed_days = int(row["observed_days"])
+            results[requested_id] = CatalogueCoverage(
+                provider=provider.upper(),
+                provider_station_id=requested_id,
+                start_year=start_year,
+                end_year=end_year,
+                expected_days=expected_days,
+                observed_days=observed_days,
+                missing_days=expected_days - observed_days,
+            )
+        return results
 
     def import_daily_rainfall(
         self, station_key: str, start: date, end: date

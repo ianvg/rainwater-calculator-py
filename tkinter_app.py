@@ -289,6 +289,7 @@ from rainwater_app.units import (
 from rainwater_app.optimization import optimize_indirect_system
 from rainwater_app.precipitation_preflight import (
     StationCoverage,
+    assess_station_coverage,
     compare_station_coverage,
 )
 
@@ -595,10 +596,6 @@ PROVINCE_PLACEHOLDER = "-- Select province / territory --"
 CANADIAN_PRECIPITATION_OPTIONS = {
     "Total precipitation": "TOTAL_PRECIPITATION",
     "Rain only": "TOTAL_RAIN",
-}
-CATALOGUE_PURPOSE_OPTIONS = {
-    "Long-term yield": "long_term_yield",
-    "Storm-event screening": "storm_event",
 }
 
 CANADIAN_PRECIPITATION_LABELS = {value: label for label, value in CANADIAN_PRECIPITATION_OPTIONS.items()}
@@ -1903,7 +1900,6 @@ class RainwaterTkApp(tk.Tk):
         self.weather_state_var = tk.StringVar(value=STATE_PLACEHOLDER)
         self.weather_years_var = tk.StringVar(value="30")
         self.weather_filter_var = tk.StringVar(value="")
-        self.catalogue_purpose_var = tk.StringVar(value="Long-term yield")
         self.catalogue_status_var = tk.StringVar(
             value="No installed precipitation catalogue found."
         )
@@ -1912,7 +1908,7 @@ class RainwaterTkApp(tk.Tk):
         )
         self.station_var = tk.StringVar(value="")
         self.station_coverage_status_var = tk.StringVar(
-            value="Find up to 10 candidate stations, then compare coverage."
+            value="Find stations to see catalogue coverage where available."
         )
         self.canadian_precip_var = tk.StringVar(value="Total precipitation")
         self.weather_source_note_var = tk.StringVar()
@@ -1932,7 +1928,6 @@ class RainwaterTkApp(tk.Tk):
         self.active_example_id: str | None = None
         self.station_typeahead = ""
         self.station_typeahead_after_id: str | None = None
-        self.station_popdown_key_command: str | None = None
         self.state_typeahead = ""
         self.state_typeahead_after_id: str | None = None
         self.state_popdown_key_command: str | None = None
@@ -7627,7 +7622,7 @@ class RainwaterTkApp(tk.Tk):
         catalogue_frame = ttk.LabelFrame(
             import_content, text="Offline precipitation-quality catalogue", padding=10
         )
-        catalogue_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
+        catalogue_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
         catalogue_frame.columnconfigure(0, weight=1)
         catalogue_header = ttk.Frame(catalogue_frame)
         catalogue_header.grid(row=0, column=0, columnspan=3, sticky="ew")
@@ -7652,28 +7647,18 @@ class RainwaterTkApp(tk.Tk):
 
         catalogue_controls = ttk.Frame(catalogue_frame)
         catalogue_controls.grid(row=1, column=0, columnspan=3, sticky="ew", pady=(8, 0))
-        ttk.Label(catalogue_controls, text="Assessment purpose").grid(
-            row=0, column=0, sticky="w"
-        )
-        ttk.Combobox(
-            catalogue_controls,
-            textvariable=self.catalogue_purpose_var,
-            values=list(CATALOGUE_PURPOSE_OPTIONS),
-            state="readonly",
-            width=24,
-        ).grid(row=0, column=1, sticky="w", padx=(6, 12))
         ttk.Label(catalogue_controls, text="Historical years").grid(
-            row=0, column=2, sticky="w"
+            row=0, column=0, sticky="w"
         )
         ttk.Entry(
             catalogue_controls, textvariable=self.weather_years_var, width=7
-        ).grid(row=0, column=3, sticky="w", padx=(6, 12))
+        ).grid(row=0, column=1, sticky="w", padx=(6, 12))
         self.find_catalogue_stations_button = ttk.Button(
             catalogue_controls,
-            text="Find Best Nearby Stations",
+            text="Find Nearby Stations",
             command=self.find_catalogue_stations,
         )
-        self.find_catalogue_stations_button.grid(row=0, column=4, sticky="w")
+        self.find_catalogue_stations_button.grid(row=0, column=2, sticky="w")
 
         ttk.Label(
             catalogue_frame,
@@ -7684,16 +7669,15 @@ class RainwaterTkApp(tk.Tk):
         ).grid(row=2, column=0, columnspan=3, sticky="ew", pady=(8, 4))
         self.catalogue_tree = ttk.Treeview(
             catalogue_frame,
-            columns=("station", "rating", "coverage", "years", "gap", "distance"),
+            columns=("station", "coverage", "years", "gap", "distance"),
             show="headings",
             height=5,
             selectmode="browse",
         )
         for column, heading, width, anchor in (
-            ("station", "Station", 300, "w"),
-            ("rating", "Suitability", 135, "w"),
+            ("station", "Station", 380, "w"),
             ("coverage", "Coverage", 85, "e"),
-            ("years", "Complete years", 95, "e"),
+            ("years", "Missing days", 95, "e"),
             ("gap", "Longest gap", 85, "e"),
             ("distance", "Distance", 80, "e"),
         ):
@@ -7718,7 +7702,7 @@ class RainwaterTkApp(tk.Tk):
 
 
         self.weather_frame = ttk.LabelFrame(import_content, text="ACIS Weather Import", padding=10)
-        self.weather_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
+        self.weather_frame.grid(row=1, column=0, sticky="ew", pady=(10, 0))
         self.weather_frame.columnconfigure(1, weight=1)
         source_row = ttk.Frame(self.weather_frame)
         source_row.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 8))
@@ -7770,7 +7754,9 @@ class RainwaterTkApp(tk.Tk):
         )
         self.canadian_precip_combo.grid(row=4, column=1, sticky="ew", pady=2)
         station_search_buttons = ttk.Frame(self.weather_frame)
-        station_search_buttons.grid(row=5, column=0, sticky="w", pady=(8, 2))
+        station_search_buttons.grid(
+            row=5, column=0, columnspan=2, sticky="w", pady=(8, 2)
+        )
         self.find_stations_button = ttk.Button(
             station_search_buttons, text="Find Stations", command=self.find_weather_stations
         )
@@ -7789,31 +7775,18 @@ class RainwaterTkApp(tk.Tk):
         self.find_nearest_airport_stations_button.grid(
             row=0, column=2, sticky="w", padx=(6, 0)
         )
-        self.station_combo = ttk.Combobox(self.weather_frame, textvariable=self.station_var, state="readonly")
-        self.station_combo.configure(postcommand=self._bind_station_combo_dropdown)
-        self.station_combo.grid(row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 2))
-        self.station_combo.bind("<KeyPress>", self._select_station_by_typed_prefix)
-        self.station_combo.bind("<<ComboboxSelected>>", self._station_selection_changed)
         station_actions = ttk.Frame(self.weather_frame)
         station_actions.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 0))
         station_actions.columnconfigure(0, weight=1)
-        station_actions.columnconfigure(1, weight=1)
-        self.compare_station_coverage_button = ttk.Button(
-            station_actions,
-            text="Compare Coverage",
-            command=self.compare_weather_station_coverage,
-            state="disabled",
-        )
-        self.compare_station_coverage_button.grid(row=0, column=0, sticky="ew", padx=(0, 3))
         self.import_station_button = ttk.Button(
             station_actions,
             text="Import Selected Station",
             command=self.import_selected_weather,
         )
-        self.import_station_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self.import_station_button.grid(row=0, column=0, sticky="ew")
 
         coverage_frame = ttk.LabelFrame(
-            self.weather_frame, text="Precipitation preflight", padding=8
+            self.weather_frame, text="Available weather stations", padding=8
         )
         coverage_frame.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(8, 0))
         coverage_frame.columnconfigure(0, weight=1)
@@ -7846,11 +7819,14 @@ class RainwaterTkApp(tk.Tk):
         coverage_scroll.grid(row=1, column=1, sticky="ns")
         self.station_coverage_tree.configure(yscrollcommand=coverage_scroll.set)
         self.station_coverage_tree.bind(
+            "<KeyPress>", self._select_station_by_typed_prefix
+        )
+        self.station_coverage_tree.bind(
             "<<TreeviewSelect>>", self._station_coverage_selected
         )
 
         station_map_frame = ttk.LabelFrame(import_content, text="Weather stations", padding=6)
-        station_map_frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        station_map_frame.grid(row=2, column=0, sticky="ew", pady=(10, 0))
         station_map_frame.columnconfigure(0, weight=1)
         station_map_frame.rowconfigure(1, weight=1)
         map_toolbar = ttk.Frame(station_map_frame)
@@ -10593,22 +10569,10 @@ class RainwaterTkApp(tk.Tk):
         return "break"
 
     def _select_station_by_prefix(self, prefix: str, listbox: tk.Listbox | str | None = None) -> bool:
-        labels = list(self.station_combo["values"])
+        labels = [self._station_label(station) for station in self.station_options]
         for index, label in enumerate(labels):
             if str(label).casefold().startswith(prefix):
-                self.station_combo.current(index)
-                self._update_station_marker_selection()
-                if listbox is not None:
-                    if isinstance(listbox, str):
-                        self.tk.call(listbox, "selection", "clear", 0, "end")
-                        self.tk.call(listbox, "selection", "set", index)
-                        self.tk.call(listbox, "activate", index)
-                        self.tk.call(listbox, "see", index)
-                    else:
-                        listbox.selection_clear(0, tk.END)
-                        listbox.selection_set(index)
-                        listbox.activate(index)
-                        listbox.see(index)
+                self._select_station_tree_row(index)
                 return True
         return False
 
@@ -10729,12 +10693,10 @@ class RainwaterTkApp(tk.Tk):
             self._schedule_station_map_redraw()
             return
         label = str(labels_in_marker[0]) if labels_in_marker else ""
-        labels = list(self.station_combo["values"])
+        labels = [self._station_label(station) for station in self.station_options]
         if label not in labels:
             return
-        self.station_combo.current(labels.index(label))
-        self.station_combo.focus_set()
-        self._station_selection_changed()
+        self._select_station_tree_row(labels.index(label))
 
     @classmethod
     def _cluster_stations(cls, stations: list[dict], zoom: int, cluster_pixels: int = 70) -> list[list[dict]]:
@@ -10846,28 +10808,6 @@ class RainwaterTkApp(tk.Tk):
             return
         if round(self.station_map.zoom) != self.station_map_rendered_zoom:
             self._render_station_map(fit_bounds=False)
-
-    def _bind_station_combo_dropdown(self) -> None:
-        self.after_idle(self._bind_station_combo_listbox)
-
-    def _select_station_in_expanded_dropdown(self, char: str) -> bool:
-        try:
-            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.station_combo}")
-            listbox_path = f"{popdown}.f.l"
-            return self._select_station_by_char(char, listbox_path) == "break"
-        except tk.TclError:
-            return False
-
-    def _bind_station_combo_listbox(self) -> None:
-        try:
-            popdown = self.tk.eval(f"ttk::combobox::PopdownWindow {self.station_combo}")
-            listbox_path = f"{popdown}.f.l"
-            if self.station_popdown_key_command is None:
-                self.station_popdown_key_command = self.register(self._select_station_in_expanded_dropdown)
-            binding = f"if {{[{self.station_popdown_key_command} %K]}} {{break}}"
-            self.tk.call("bind", listbox_path, "<KeyPress>", binding)
-        except tk.TclError:
-            return
 
     def _load_project_list(self) -> None:
         projects = self.store.list_projects()
@@ -11781,13 +11721,11 @@ class RainwaterTkApp(tk.Tk):
             self.canadian_precip_label.grid_remove()
             self.canadian_precip_combo.grid_remove()
             enabled = False
-        self.station_combo.configure(state="readonly" if enabled else "disabled")
         self.find_stations_button.configure(state="normal" if enabled else "disabled")
         self.find_nearest_stations_button.configure(state="normal" if enabled else "disabled")
         self.find_nearest_airport_stations_button.configure(
             state="normal" if enabled else "disabled"
         )
-        self.compare_station_coverage_button.configure(state="disabled")
         self.import_station_button.configure(state="normal" if enabled else "disabled")
 
     def _project_form_values(self) -> dict[str, object]:
@@ -13955,7 +13893,7 @@ class RainwaterTkApp(tk.Tk):
         if selected is None:
             self.catalogue_status_var.set(
                 "No supported catalogue is installed. Install a schema-v2 SQLite release; "
-                "the live ACIS/ECCC importer below remains available."
+                "the live ACIS/ECCC importer above remains available."
             )
             self.catalogue_station_status_var.set(
                 "Install a catalogue release to search offline."
@@ -13963,7 +13901,7 @@ class RainwaterTkApp(tk.Tk):
             return
         self.catalogue_status_var.set(self._catalogue_release_status(selected[1], selected[0]))
         self.catalogue_station_status_var.set(
-            "Set project coordinates, choose a purpose, then find nearby stations."
+            "Set project coordinates and a historical period, then find nearby stations."
         )
 
     def install_precipitation_catalogue(self) -> None:
@@ -14001,9 +13939,6 @@ class RainwaterTkApp(tk.Tk):
         years = max(1, int(_float(self.weather_years_var.get(), 30)))
         end_date = self.catalogue_metadata.data_cutoff
         start_year = end_date.year - years + 1
-        purpose = CATALOGUE_PURPOSE_OPTIONS.get(
-            self.catalogue_purpose_var.get(), "long_term_yield"
-        )
         try:
             with CatalogueManager.open(self.catalogue_path) as catalogue:
                 recommendations = catalogue.recommendations_nearby(
@@ -14011,7 +13946,7 @@ class RainwaterTkApp(tk.Tk):
                     longitude=longitude,
                     start_year=start_year,
                     end_year=end_date.year,
-                    purpose=purpose,
+                    purpose=None,
                     radius_km=250.0,
                     limit=10,
                 )
@@ -14030,16 +13965,14 @@ class RainwaterTkApp(tk.Tk):
         for index, recommendation in enumerate(recommendations):
             iid = f"catalogue-{index}"
             self.catalogue_recommendation_by_iid[iid] = recommendation
-            rating = recommendation.suitability_level.replace("_", " ").title()
             self.catalogue_tree.insert(
                 "",
                 "end",
                 iid=iid,
                 values=(
                     recommendation.source_label,
-                    rating,
                     f"{recommendation.coverage_percent:.1f}%",
-                    recommendation.complete_years,
+                    recommendation.missing_days,
                     f"{recommendation.longest_gap_days} d",
                     f"{recommendation.distance_km:.1f} km",
                 ),
@@ -14051,11 +13984,11 @@ class RainwaterTkApp(tk.Tk):
             self._catalogue_selection_changed()
             self.catalogue_station_status_var.set(
                 f"Found {len(recommendations)} station(s) within 250 km for "
-                f"{start_year}-{end_date.year}. Ratings are period- and purpose-specific."
+                f"{start_year}-{end_date.year}, ranked by coverage and distance."
             )
         else:
             self.catalogue_station_status_var.set(
-                f"No assessed stations were found within 250 km for {start_year}-{end_date.year}."
+                f"No catalogue stations were found within 250 km for {start_year}-{end_date.year}."
             )
 
     def _catalogue_selection_changed(self, _event: tk.Event | None = None) -> None:
@@ -14066,13 +13999,6 @@ class RainwaterTkApp(tk.Tk):
         self.import_catalogue_station_button.configure(
             state="normal" if recommendation is not None else "disabled"
         )
-        if recommendation is not None and recommendation.finding_codes:
-            findings = ", ".join(
-                code.replace("_", " ") for code in recommendation.finding_codes
-            )
-            self.catalogue_station_status_var.set(
-                f"Selected {recommendation.source_label}. Assessment findings: {findings}."
-            )
 
     def import_selected_catalogue_station(self) -> None:
         selected = self.catalogue_tree.selection()
@@ -14097,24 +14023,26 @@ class RainwaterTkApp(tk.Tk):
             )
             if not proceed:
                 return
-        if recommendation.suitability_level == "unsuitable":
-            proceed = messagebox.askyesno(
-                APP_TITLE,
-                "This station is rated unsuitable for the selected purpose and period. "
-                "Import its daily record anyway?",
-                parent=self,
-            )
-            if not proceed:
-                return
         years = max(1, int(_float(self.weather_years_var.get(), 30)))
         end_date = self.catalogue_metadata.data_cutoff
         start_date = dt.date(end_date.year - years + 1, 1, 1)
         try:
             with CatalogueManager.open(self.catalogue_path) as catalogue:
-                rainfall = catalogue.import_daily_rainfall(
-                    recommendation.station_key, start_date, end_date
-                )
                 metadata = catalogue.metadata
+                if recommendation.provider.upper() == "ACIS":
+                    precipitation_field = CANADIAN_PRECIPITATION_OPTIONS.get(
+                        self.canadian_precip_var.get(), "TOTAL_PRECIPITATION"
+                    )
+                    rainfall = fetch_daily_station_data(
+                        recommendation.provider_station_id,
+                        start_date,
+                        end_date,
+                        precipitation_field,
+                    )
+                else:
+                    rainfall = catalogue.import_daily_rainfall(
+                        recommendation.station_key, start_date, end_date
+                    )
             rainfall_attrs = dict(rainfall.attrs)
             self.rainfall_df = rainfall[["Date", "Precipitation"]].copy()
             self.use_synthetic_hourly_rainfall_var.set(False)
@@ -14149,7 +14077,7 @@ class RainwaterTkApp(tk.Tk):
             self._reset_weather_selection()
             self._update_rainfall_summary()
             self.status_var.set(
-                f"Imported {len(self.rainfall_df):,} offline daily rows from "
+                f"Downloaded and cached {len(self.rainfall_df):,} daily rows from "
                 f"{recommendation.name}"
             )
             self.execution_log.info(
@@ -14256,8 +14184,6 @@ class RainwaterTkApp(tk.Tk):
             self.find_stations_button,
             self.find_nearest_stations_button,
             self.find_nearest_airport_stations_button,
-            self.station_combo,
-            self.compare_station_coverage_button,
             self.import_station_button,
         ):
             widget.configure(state="disabled")
@@ -14298,8 +14224,6 @@ class RainwaterTkApp(tk.Tk):
             self.find_stations_button,
             self.find_nearest_stations_button,
             self.find_nearest_airport_stations_button,
-            self.station_combo,
-            self.compare_station_coverage_button,
             self.import_station_button,
         ):
             widget.configure(state="disabled")
@@ -14404,8 +14328,6 @@ class RainwaterTkApp(tk.Tk):
         self.find_stations_button.configure(state="normal")
         self.find_nearest_stations_button.configure(state="normal")
         self.find_nearest_airport_stations_button.configure(state="normal")
-        self.station_combo.configure(state="readonly")
-        self.compare_station_coverage_button.configure(state="disabled")
         self.import_station_button.configure(state="normal")
         if result == "error":
             station_kind = "airport weather stations" if self.station_lookup_airport_only else f"{provider} stations"
@@ -14417,11 +14339,12 @@ class RainwaterTkApp(tk.Tk):
         self.station_options = payload
         self._clear_station_coverage_results()
         labels = [self._station_label(station) for station in self.station_options]
-        self.station_combo["values"] = labels
+        years = max(30, int(_float(self.weather_years_var.get(), 30)))
+        start_date, end_date = default_complete_calendar_range(years)
+        self._populate_weather_station_list(provider, start_date, end_date)
         self.station_var.set(labels[0] if labels else "")
-        self.compare_station_coverage_button.configure(
-            state="normal" if labels else "disabled"
-        )
+        if labels:
+            self._select_station_tree_row(0)
         self._reset_station_typeahead()
         self._render_station_map(fit_bounds=True)
         descriptor = (
@@ -14467,8 +14390,6 @@ class RainwaterTkApp(tk.Tk):
             self.find_stations_button,
             self.find_nearest_stations_button,
             self.find_nearest_airport_stations_button,
-            self.station_combo,
-            self.compare_station_coverage_button,
             self.import_station_button,
         ):
             widget.configure(state="disabled")
@@ -14533,10 +14454,6 @@ class RainwaterTkApp(tk.Tk):
         self.find_stations_button.configure(state="normal")
         self.find_nearest_stations_button.configure(state="normal")
         self.find_nearest_airport_stations_button.configure(state="normal")
-        self.station_combo.configure(state="readonly")
-        self.compare_station_coverage_button.configure(
-            state="normal" if self.station_options else "disabled"
-        )
         self.import_station_button.configure(state="normal")
         if result == "error":
             self.station_coverage_status_var.set("Coverage comparison failed.")
@@ -14604,7 +14521,7 @@ class RainwaterTkApp(tk.Tk):
             )
         if hasattr(self, "station_coverage_status_var"):
             self.station_coverage_status_var.set(
-                status or "Find up to 10 candidate stations, then compare coverage."
+                status or "Find stations to see catalogue coverage where available."
             )
 
     def _station_coverage_selected(self, _event: tk.Event | None = None) -> None:
@@ -14627,10 +14544,130 @@ class RainwaterTkApp(tk.Tk):
         if station is None:
             return
         label = self._station_label(station)
-        labels = list(self.station_combo["values"])
-        if label in labels:
-            self.station_combo.current(labels.index(label))
-            self._station_selection_changed()
+        self.station_var.set(label)
+        self._station_selection_changed()
+
+    def _select_station_tree_row(self, index: int) -> None:
+        iid = f"station-{index}"
+        if not hasattr(self, "station_coverage_tree") or not self.station_coverage_tree.exists(iid):
+            return
+        self.station_coverage_tree.selection_set(iid)
+        self.station_coverage_tree.focus(iid)
+        self.station_coverage_tree.see(iid)
+        self.station_coverage_tree.focus_set()
+        self._station_coverage_selected()
+
+    def _populate_weather_station_list(
+        self, provider: str, start_date: dt.date, end_date: dt.date
+    ) -> None:
+        coverage_by_id = {}
+        catalogue_error = ""
+        if self.catalogue_path is not None:
+            try:
+                station_ids = tuple(str(station.get("sid", "")) for station in self.station_options)
+                with CatalogueManager.open(self.catalogue_path) as catalogue:
+                    coverage_by_id = catalogue.coverage_for_stations(
+                        provider=provider,
+                        provider_station_ids=station_ids,
+                        start_year=start_date.year,
+                        end_year=end_date.year,
+                    )
+            except Exception as exc:  # noqa: BLE001 - station search remains usable
+                catalogue_error = str(exc)
+                self.execution_log.error(
+                    "Catalogue", "Could not load station-list coverage", exception=exc
+                )
+
+        self.station_coverage_tree.delete(*self.station_coverage_tree.get_children())
+        self.station_coverage_results = {}
+        for index, station in enumerate(self.station_options):
+            station_id = str(station.get("sid", ""))
+            catalogue_coverage = coverage_by_id.get(station_id)
+            if catalogue_coverage is not None:
+                coverage = StationCoverage(
+                    station_id=station_id,
+                    station_name=str(station.get("name", "Unnamed station")),
+                    provider=provider.upper(),
+                    requested_start=start_date,
+                    requested_end=end_date,
+                    expected_days=catalogue_coverage.expected_days,
+                    observed_days=catalogue_coverage.observed_days,
+                    missing_days=catalogue_coverage.missing_days,
+                    completeness_percent=catalogue_coverage.completeness_percent,
+                    record_start=start_date,
+                    record_end=end_date,
+                )
+                self.station_coverage_results[f"{provider.upper()}:{station_id}"] = coverage
+                coverage_text = f"{coverage.completeness_percent:.1f}%"
+                observed_text = f"{coverage.observed_days:,}"
+                missing_text = f"{coverage.missing_days:,}"
+            else:
+                coverage_text = "After import"
+                observed_text = "--"
+                missing_text = "--"
+            self.station_coverage_tree.insert(
+                "",
+                tk.END,
+                iid=f"station-{index}",
+                values=(
+                    self._station_label(station),
+                    coverage_text,
+                    observed_text,
+                    missing_text,
+                ),
+                tags=(f"{provider.upper()}:{station_id}",),
+            )
+
+        matched = len(coverage_by_id)
+        total = len(self.station_options)
+        if catalogue_error:
+            status = "Catalogue coverage could not be read; coverage will be calculated after import."
+        elif matched:
+            status = (
+                f"Offline catalogue coverage for {matched} of {total} station(s), "
+                f"{start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}. "
+                "Other rows are calculated after import."
+            )
+        elif total:
+            status = "No matching catalogue coverage; each station is assessed after it is imported."
+        else:
+            status = "No stations found."
+        self.station_coverage_status_var.set(status)
+
+    def _record_imported_station_coverage(
+        self,
+        station: dict,
+        start_date: dt.date,
+        end_date: dt.date,
+        precipitation_field: str,
+        weather_df: pd.DataFrame,
+    ) -> None:
+        coverage = assess_station_coverage(
+            station,
+            start_date,
+            end_date,
+            precipitation_field,
+            lambda _station_id, _start, _end, _field: weather_df,
+        )
+        key = f"{coverage.provider}:{coverage.station_id}"
+        self.station_coverage_results[key] = coverage
+        if self.__dict__.get("station_coverage_tree") is None:
+            return
+        for iid in self.station_coverage_tree.get_children():
+            if key not in self.station_coverage_tree.item(iid, "tags"):
+                continue
+            values = list(self.station_coverage_tree.item(iid, "values"))
+            values[1:] = [
+                f"{coverage.completeness_percent:.1f}%",
+                f"{coverage.observed_days:,}",
+                f"{coverage.missing_days:,}",
+            ]
+            self.station_coverage_tree.item(iid, values=values)
+            self.station_coverage_status_var.set(
+                f"Selected station coverage calculated from imported data for "
+                f"{start_date:%Y-%m-%d} to {end_date:%Y-%m-%d}."
+            )
+            break
 
     def _reset_weather_selection(self) -> None:
         if self.state_typeahead_after_id is not None:
@@ -14645,10 +14682,6 @@ class RainwaterTkApp(tk.Tk):
         self.station_var.set("")
         self.station_options = []
         self._clear_station_coverage_results()
-        if hasattr(self, "station_combo"):
-            self.station_combo["values"] = []
-        if hasattr(self, "compare_station_coverage_button"):
-            self.compare_station_coverage_button.configure(state="disabled")
         if hasattr(self, "station_map"):
             self._clear_station_map_markers()
         self._reset_station_typeahead()
@@ -14707,6 +14740,9 @@ class RainwaterTkApp(tk.Tk):
             self.reliability_var.set("Reliability: --")
             self._clear_results()
             self._update_rainfall_summary()
+            self._record_imported_station_coverage(
+                station, start_date, end_date, precipitation_field, weather_df
+            )
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
             self.execution_log.info(
                 "Weather", f"Imported {len(self.rainfall_df):,} daily ACIS rainfall rows"
@@ -14791,6 +14827,9 @@ class RainwaterTkApp(tk.Tk):
             self.reliability_var.set("Reliability: --")
             self._clear_results()
             self._update_rainfall_summary()
+            self._record_imported_station_coverage(
+                station, start_date, end_date, precipitation_field, weather_df
+            )
             self.status_var.set(f"Imported {len(self.rainfall_df):,} rows from {station['name']} ({station['sid']})")
             self.execution_log.info(
                 "Weather", f"Imported {len(self.rainfall_df):,} daily ECCC rainfall rows"

@@ -202,6 +202,20 @@ If the direct-file workflow develops coverage, availability, or scaling problems
 
 Do not claim that a daily-rainfall analysis accounts for the time of day rainfall occurs. The current hourly demand simulation places each daily rainfall total at the end-of-day boundary. Future true subdaily rainfall support should retain observation timestamps, declare the source resolution, align rainfall and demand time zones, and route collection during the corresponding timestep. Reports should state whether results use daily or subdaily rainfall and identify any temporal allocation assumption.
 
+## Probable Futures precipitation scenarios
+
+[Not started] Integrate [Probable Futures](https://probablefutures.org/climate-maps/) as an optional climate-scenario layer that augments, rather than replaces, the observed precipitation record. For a project's coordinates, retrieve relevant precipitation indicators for selected global-warming scenarios and retain the low, middle, and high outcomes so users can evaluate a plausible range of future rainwater-system performance. Probable Futures defines these location-specific values by warming level rather than a fixed forecast year; its precipitation maps use a median middle value, with low and high values generally representing approximately the 5th and 95th percentiles.
+
+Implementation should:
+
+- Present lower, middle, and upper precipitation cases together, without labeling any one case as a deterministic forecast.
+- Support relevant Probable Futures precipitation measures, beginning with change in total annual precipitation and change in the wettest 90 days; separately evaluate extreme-storm frequency and magnitude indicators for overflow and resilience analysis rather than treating them as ordinary rainfall totals.
+- Keep the selected warming scenario, map and dataset version, percentile, grid-cell coordinates, retrieval date, units, license attribution, and source URL with the project and generated reports.
+- Define and validate a transparent method for applying modeled changes to observed daily or subdaily rainfall before allowing scenario-adjusted hydraulic simulation. Do not infer a synthetic rainfall sequence directly from annual change factors or silently alter the historical source record.
+- Compare baseline, lower, middle, and upper scenario results for reliability, rainwater supplied, municipal makeup, overflow, and recommended tank capacity, with clear uncertainty and spatial-resolution disclosures.
+- Cache provider responses, keep network requests off the Tkinter UI thread, preserve the last verified scenario data for reproducibility, and handle unavailable or changed API fields without invalidating the original rainfall record.
+- Confirm current API access, licensing, attribution, rate limits, percentile definitions, warming-scenario coverage, and map methodology before implementation. Probable Futures currently exposes point-based data access and downloadable datasets for multiple warming scenarios and percentiles.
+
 ## International rainfall data
 
 Extend rainfall importing beyond the current US ACIS and Canadian ECCC workflows using a layered provider strategy:
@@ -253,3 +267,25 @@ Possible OpenStreetMap-based approaches include:
 The public OpenStreetMap Foundation Nominatim endpoint is suitable only for moderate, user-triggered searches under its usage policy. It must not be used for client-side autocomplete, is limited to one request per second, requires an identifying user agent and attribution, and should be replaceable without an application update. Addresses can be sensitive, so lookup must be initiated explicitly and the UI should disclose the selected provider before transmitting an address.
 
 Other production options include commercial geocoding and address-validation APIs. Provider selection should account for geographic coverage, address validation versus coordinate lookup, autocomplete support, result-storage rights, privacy, pricing, offline requirements, and whether coordinates may be saved permanently in project files. A Python adapter can use direct HTTP requests or a provider-neutral client such as GeoPy, but the underlying service's terms still govern usage.
+## Purpose-specific precipitation-station suitability
+
+[Deferred pending research review] Do not expose an assessment-purpose selector or
+a suitability rating in the calculator until the supporting literature and intended
+engineering decisions have been reviewed. The current catalogue schema, coverage and
+gap calculations, qualifier evidence, temporal-resolution inventory, policy versions,
+and precomputed assessment records should remain intact so this work can resume without
+discarding evidence.
+
+Before reintroducing purpose-specific guidance:
+
+- Review research on station-record selection for long-term water-yield modelling,
+  event-based design, and other intended calculator uses.
+- Decide whether coverage, gap, complete-year, accumulation, trace, estimation,
+  relocation, and temporal-resolution evidence should be limits, caveats, or ranking
+  inputs for each use.
+- Add ingestion and validation of actual hourly observations before claiming that
+  hourly station data has been evaluated; inventory metadata alone is insufficient.
+- Document thresholds, policy versions, uncertainty, and validation samples, then
+  obtain human review before displaying a recommendation or suitability label.
+- Keep the default station browser neutral, showing measured evidence such as coverage,
+  complete years, longest gap, and distance without translating it into suitability.
